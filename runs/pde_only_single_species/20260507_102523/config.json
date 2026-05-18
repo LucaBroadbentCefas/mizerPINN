@@ -1,0 +1,19 @@
+{
+  "input_dir": "py_inputs_ns_first_species",
+  "run_dir": "C:\\Users\\LB19\\OneDrive - CEFAS\\Work\\PINNs\\runs\\pde_only_single_species\\20260507_102523",
+  "n_steps": 2000,
+  "n_time": 10,
+  "n_eval": 30,
+  "residual_form": "log",
+  "learning_rate": 0.001,
+  "hidden_width": 64,
+  "hidden_layers": 3,
+  "dtype": "torch.float64",
+  "device": "cpu",
+  "t_min": 0.0,
+  "t_max": 40.0,
+  "print_every": 50,
+  "checkpoint_every": 250,
+  "warmup_steps": 10,
+  "note": "PDE-only PINN. Underconstrained: low residual does not prove biologically correct solution."
+}

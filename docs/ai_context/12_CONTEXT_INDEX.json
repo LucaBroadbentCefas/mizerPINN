@@ -1,0 +1,97 @@
+{
+  "project": "PINNmizer",
+  "repository": "LucaBroadbentCefas/PINNs",
+  "last_updated": "2026-05-18",
+  "source_ref": {
+    "branch": "main",
+    "commit": "cf437f8da7ba73678971b69f56d746eb93ee0703"
+  },
+  "canonical_docs": [
+    "docs/ai_context/00_PROJECT_BRIEF.md",
+    "docs/ai_context/01_CURRENT_STATE.md",
+    "docs/ai_context/02_ARCHITECTURE.md",
+    "docs/ai_context/03_FUNCTION_REGISTRY.yaml",
+    "docs/ai_context/04_DATA_AND_SHAPES.md",
+    "docs/ai_context/05_EQUATIONS.md",
+    "docs/ai_context/06_VALIDATION_PROTOCOL.md",
+    "docs/ai_context/07_KNOWN_ISSUES.md"
+  ],
+  "decision_records": [
+    {
+      "id": "ADR-0001",
+      "path": "docs/ai_context/09_DECISIONS/ADR-0001-direct-offgrid-growth.md",
+      "title": "Use direct off-grid continuous growth for PDE residual",
+      "status": "accepted_current_implementation"
+    },
+    {
+      "id": "ADR-0002",
+      "path": "docs/ai_context/09_DECISIONS/ADR-0002-manual-dg-dw.md",
+      "title": "Compute dg_dw manually in the biological path",
+      "status": "accepted_current_implementation"
+    },
+    {
+      "id": "ADR-0003",
+      "path": "docs/ai_context/09_DECISIONS/ADR-0003-pde-loss-weighting.md",
+      "title": "Use Wang-style gradient-statistic weighting for composite PINN losses",
+      "status": "accepted_current_implementation_for_single_species_training"
+    }
+  ],
+  "prompt_templates": [
+    "docs/ai_context/10_PROMPTS/new-chat-bootstrap.md",
+    "docs/ai_context/10_PROMPTS/code-review.md",
+    "docs/ai_context/10_PROMPTS/implementation-request.md",
+    "docs/ai_context/10_PROMPTS/debugging-request.md"
+  ],
+  "active_source_files": [
+    "PINNmizer/params.py",
+    "PINNmizer/io.py",
+    "PINNmizer/mizer_grid_ops.py",
+    "PINNmizer/continuous_biology.py",
+    "PINNmizer/pde_residual.py",
+    "validation_steps/train_pde_only_single_species.py",
+    "validation_steps/pinn_diagnostics.py"
+  ],
+  "current_training_entrypoint": "python -m validation_steps.train_pde_only_single_species",
+  "current_training_scope": "single_species_only",
+  "model_conventions": {
+    "input_columns": ["x_scaled", "t_scaled"],
+    "output": "log_N",
+    "hidden_activation": "Tanh after each hidden Linear layer",
+    "default_hidden_width": 64,
+    "default_hidden_layers": 3
+  },
+  "pde_conventions": {
+    "primary_log_residual": "dlogN_dt + g_eval * dlogN_dw + mu_eval + dg_dw",
+    "physical_residual": "dN_dt + g_eval * dN_dw + (mu_eval + dg_dw) * N_eval",
+    "coordinate": "x = log(w)",
+    "derivative_source_for_model": "autograd",
+    "derivative_source_for_dg_dw": "manual_analytical_biology_path"
+  },
+  "current_training_features": {
+    "pde_loss": true,
+    "initial_condition_loss": true,
+    "recruitment_boundary_loss_implemented": true,
+    "default_lambda_bc": 0.0,
+    "wang_gradient_statistic_weighting": true,
+    "causal_time_curriculum": true,
+    "final_bias_initialisation_from_ic": true,
+    "fixed_grid_diagnostics": true
+  },
+  "do_not_change_without_explicit_instruction": [
+    "model input order [x_scaled, t_scaled]",
+    "model output interpretation as log_N",
+    "coordinate scaling conventions",
+    "manual dg_dw path",
+    "continuous/off-grid PDE biology path",
+    "fixed-grid mizer/TMB validation path",
+    "biological equations"
+  ],
+  "known_active_issues": [
+    "near-zero or collapsed solution risk",
+    "boundary loss sensitivity to clamping and scaling",
+    "need formal PDE residual validation on mizer-generated trajectories",
+    "continuous kernel support convention may not fully match mizer",
+    "Wang weighting still embedded in training script",
+    "training script currently single-species only"
+  ]
+}
