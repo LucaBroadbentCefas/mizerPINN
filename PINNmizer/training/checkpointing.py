@@ -1,16 +1,18 @@
-"""
-Checkpointing helpers for PINN training runs.
+from __future__ import annotations
 
-Checkpointing is infrastructure: it serialises model state, optimizer state, and
-configuration. It should not compute losses, diagnostics, or biological terms.
+from pathlib import Path
 
-Future target
--------------
-Move the existing `save_checkpoint` helper here once the training script is
-split mechanically. The saved dictionary schema should remain stable:
+import torch
+import torch.nn as nn
 
-    step
-    model_state_dict
-    optimizer_state_dict
-    config
-"""
+
+def save_checkpoint(*, run_dir: Path, step: int, model: nn.Module, optimizer: torch.optim.Optimizer, config: dict) -> None:
+    torch.save(
+        {
+            "step": step,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "config": config,
+        },
+        run_dir / f"model_step_{step}.pt",
+    )
