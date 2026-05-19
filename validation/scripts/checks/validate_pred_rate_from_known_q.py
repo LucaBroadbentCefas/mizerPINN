@@ -4,11 +4,11 @@ import pandas as pd
 import torch
 
 from PINNmizer.io import load_mizer_inputs, load_mat
-from PINNmizer.continuous_biology import compute_phi_and_dphi_dw
+from PINNmizer.biology import compute_phi_and_dphi_dw
 from PINNmizer.params import _params_dtype_device
 
 
-OUT_DIR = Path("py_known_q_direct")
+OUT_DIR = Path("validation/fixtures/known_q_direct")
 OUT_DIR.mkdir(exist_ok=True)
 
 
@@ -20,7 +20,7 @@ def write_mat(x, name):
 
 
 params, n, n_pp = load_mizer_inputs(
-    "py_inputs",
+    "validation/fixtures/mizer_full",
     dtype=torch.float64,
     device="cpu",
 )
@@ -28,7 +28,7 @@ params, n, n_pp = load_mizer_inputs(
 dtype, device = _params_dtype_device(params)
 
 q_known_fish = load_mat(
-    Path("py_inputs"),
+    Path("validation/outputs/pred_mort_comparison"),
     "q_known_fish",
     dtype,
     device,
@@ -55,4 +55,4 @@ pred_mort_direct_known_q = params.interaction.T @ pred_rate_direct_known_q
 write_mat(pred_rate_direct_known_q, "pred_rate_direct_known_q")
 write_mat(pred_mort_direct_known_q, "pred_mort_direct_known_q")
 
-print("Wrote py_known_q_direct/")
+print("Wrote validation/fixtures/known_q_direct/")

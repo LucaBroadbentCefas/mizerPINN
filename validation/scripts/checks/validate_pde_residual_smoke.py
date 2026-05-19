@@ -1,12 +1,12 @@
-#python -m validation_steps.smoketest_pde--*  - -
+#python -m validation.scripts.smoketest_pde--*  - -
 import torch
 
 from PINNmizer.io import load_mizer_inputs
 from PINNmizer.params import _params_dtype_device, _n_species
-from PINNmizer.pde_residual import sample_pde_batch, compute_pde_loss
+from PINNmizer.pinn import sample_pde_batch, compute_pde_loss
 
 params, n_init, n_pp = load_mizer_inputs(
-    "py_inputs",
+    "validation/fixtures/mizer_full",
     dtype=torch.float64,
     device="cpu",
 )

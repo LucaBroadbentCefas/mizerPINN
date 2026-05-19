@@ -4,14 +4,14 @@ import pandas as pd
 import torch
 
 from PINNmizer.io import load_mizer_inputs
-from PINNmizer.continuous_biology import (
+from PINNmizer.biology import (
     compute_growth_direct_at_eval,
     compute_phi_and_dphi_dw,
 )
 from PINNmizer.params import _params_dtype_device
 
 
-OUT_DIR = Path("py_pred_mort_debug")
+OUT_DIR = Path("validation/fixtures/pred_mort_debug")
 OUT_DIR.mkdir(exist_ok=True)
 
 
@@ -44,7 +44,7 @@ def report_diff(name: str, direct: torch.Tensor, ref: torch.Tensor) -> None:
 
 
 params, n, n_pp = load_mizer_inputs(
-    "py_inputs",
+    "validation/fixtures/mizer_full",
     dtype=torch.float64,
     device="cpu",
 )

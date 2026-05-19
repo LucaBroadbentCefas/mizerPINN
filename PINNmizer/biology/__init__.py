@@ -7,7 +7,7 @@ PINN losses. They operate on tensors that already represent spectra, grids, and
 species parameters.
 
 Public compatibility imports are exposed through `PINNmizer.biology.continuous`
-and the legacy `PINNmizer.continuous_biology` module.
+and the legacy `PINNmizer.biology` module.
 """
 
 from .continuous import *

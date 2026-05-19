@@ -11,7 +11,7 @@ from mizer_torch_ops import (
 )
 
 
-IN_DIR = Path("py_inputs")
+IN_DIR = Path("validation/fixtures/mizer_full")
 DTYPE = torch.float64
 
 

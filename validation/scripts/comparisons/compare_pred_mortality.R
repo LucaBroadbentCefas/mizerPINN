@@ -2,7 +2,7 @@
 
 pred_kernels <- (getPredKernel(NS_params))
 
-debug_dir <- "py_pred_mort_debug"
+debug_dir <- "validation/fixtures/pred_mort_debug"
 
 read_py_vec <- function(name, dir = debug_dir) {
   read.csv(
@@ -99,10 +99,10 @@ q_known_fish <- sweep(
   "*"
 )
 
-write.csv(q_known_fish, "py_inputs/q_known_fish.csv", row.names = FALSE)
+write.csv(q_known_fish, "validation/outputs/pred_mort_comparison/q_known_fish.csv", row.names = FALSE)
 
 
-read_py_mat <- function(name, dir = "py_known_q_direct") {
+read_py_mat <- function(name, dir = "validation/fixtures/known_q_direct") {
   as.matrix(read.csv(file.path(dir, paste0(name, ".csv")), check.names = FALSE))
 }
 
@@ -182,7 +182,7 @@ range(pred_rate_direct-pred_rate_nofft[,127:226])
 # This would give expected outcome.
 #Currently, its not that bad, and it is probably good enough, but could be covering up a bug
 
-# (mizer-torch) C:\Users\LB19\OneDrive - CEFAS\Work\PINNs>python -m validation_steps.check_biology
+# (mizer-torch) C:\Users\LB19\OneDrive - CEFAS\Work\PINNs>python -m validation.scripts.check_biology
 # encounter            max_abs=2.337496e-05   mean_abs=2.572296e-07   max_rel=4.063562e-05   mean_rel=2.028459e-07
 # feeding              max_abs=9.559656e-06   mean_abs=4.770491e-08   max_rel=1.538254e-05   mean_rel=7.672579e-08
 # e_growth             max_abs=2.009711e-06   mean_abs=2.208617e-08   max_rel=1.818182e-02   mean_rel=1.528809e-05

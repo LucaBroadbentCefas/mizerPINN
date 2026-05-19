@@ -1,0 +1,2 @@
+from PINNmizer.diagnostics.fixed_grid import save_fixed_grid_fields_and_plots
+__all__=["save_fixed_grid_fields_and_plots"]

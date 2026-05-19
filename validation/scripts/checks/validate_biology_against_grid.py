@@ -1,9 +1,9 @@
-#python -m validation_steps.check_biology
+#python -m validation.scripts.check_biology
 import torch
 
 from PINNmizer.io import load_mizer_inputs
 from PINNmizer.mizer_grid_ops import mizer_operators
-from PINNmizer.continuous_biology import (
+from PINNmizer.biology import (
     compute_growth_direct_at_eval,
     compute_total_mortality_direct_at_eval,
 )
@@ -23,7 +23,7 @@ def cmp(name, direct, ref, eps=1e-12):
 
 
 params, n, n_pp = load_mizer_inputs(
-    "py_inputs",
+    "validation/fixtures/mizer_full",
     dtype=torch.float64,
     device="cpu",
 )

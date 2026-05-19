@@ -1,4 +1,4 @@
-outdir <- "py_inputs_ns_first_species"
+outdir <- "validation/fixtures/pde_single_species"
 
 export_mizer_inputs_for_python(
   params = params_1,

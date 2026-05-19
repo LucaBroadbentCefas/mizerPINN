@@ -5,10 +5,10 @@ import pandas as pd
 import torch
 
 from PINNmizer.io import load_mizer_inputs
-from PINNmizer.continuous_biology import compute_growth_direct_at_eval
+from PINNmizer.biology import compute_growth_direct_at_eval
 
 
-OUT_DIR = Path("py_growth_derivative_fd")
+OUT_DIR = Path("validation/fixtures/growth_derivative_fd")
 OUT_DIR.mkdir(exist_ok=True)
 
 
@@ -74,7 +74,7 @@ def central_fd(
 
 def main() -> None:
     params, n, n_pp = load_mizer_inputs(
-        "py_inputs",
+        "validation/fixtures/mizer_full",
         dtype=torch.float64,
         device="cpu",
     )

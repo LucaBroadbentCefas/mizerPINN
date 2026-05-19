@@ -26,8 +26,8 @@ from mizer_torch_ops import (
     step,
 )
 
-IN_DIR = Path("py_inputs")
-OUT_DIR = Path("py_steps")
+IN_DIR = Path("validation/fixtures/mizer_full")
+OUT_DIR = Path("validation/outputs/python_steps")
 OUT_DIR.mkdir(exist_ok=True)
 
 DTYPE = torch.float64
@@ -163,4 +163,4 @@ n_pp_new, n_new, ops = step(n_pp, n, params, dt)
 write_tensor(n_pp_new, "18_step_n_pp_new")
 write_tensor(n_new, "19_step_n_new")
 
-print("Wrote Python step outputs to py_steps/")
+print("Wrote Python step outputs to validation/outputs/python_steps/")

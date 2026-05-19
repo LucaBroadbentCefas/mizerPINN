@@ -1,6 +1,6 @@
-#python -m validation_steps.check_growth_derivatives_finite_difference
+#python -m validation.scripts.check_growth_derivatives_finite_difference
 
-summary <- read.csv("py_growth_derivative_fd/finite_difference_summary.csv")
+summary <- read.csv("validation/fixtures/growth_derivative_fd/finite_difference_summary.csv")
 
 summary[order(summary$quantity, summary$eps_scale), ]
 

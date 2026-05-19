@@ -28,7 +28,7 @@ def write_tensor(x: torch.Tensor, name: str, outdir: Path = OUT_DIR) -> None:
 
 
 params, n, n_pp = load_mizer_inputs(
-    "py_inputs",
+    "validation/fixtures/mizer_full",
     dtype=torch.float64,
     device="cpu",
 )
