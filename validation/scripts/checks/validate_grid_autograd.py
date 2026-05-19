@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 import torch
 
-from mizer_torch_ops import (
+from validation.scripts.legacy.legacy_mizer_torch_ops import (
     MizerTorchParams,
     as_complex,
     mizer_operators,
@@ -11,7 +11,7 @@ from mizer_torch_ops import (
 )
 
 
-IN_DIR = Path("validation/fixtures/mizer_full")
+IN_DIR = Path("validation/fixtures/pde_single_species")
 DTYPE = torch.float64
 
 

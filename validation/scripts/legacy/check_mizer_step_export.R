@@ -4,7 +4,7 @@ export_mizer_inputs_for_python <- function(params,
                                            n = params@initial_n,
                                            n_pp = params@initial_n_pp,
                                            dt = 0.1,
-                                           outdir = "validation/fixtures/mizer_full",
+                                           outdir = "validation/fixtures/pde_single_species",
                                            t_min = 0,
                                            t_max = 1,
                                            z0_pre = 0.6,
@@ -180,7 +180,7 @@ export_mizer_inputs_for_python(params_1, n, n_pp, dt)
 
 #################
 #run python code
-read_py_mat <- function(name, dir = "py_steps") {
+read_py_mat <- function(name, dir = "validation/outputs/python_steps") {
   as.matrix(read.csv(file.path(dir, paste0(name, ".csv")), check.names = FALSE))
 }
 

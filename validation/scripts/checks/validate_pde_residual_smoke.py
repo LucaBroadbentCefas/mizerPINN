@@ -7,7 +7,7 @@ from PINNmizer.pinn.sampling import sample_pde_batch
 from PINNmizer.pinn.losses import compute_pde_loss
 
 params, n_init, n_pp = load_mizer_inputs(
-    "validation/fixtures/mizer_full",
+    "validation/fixtures/pde_single_species",
     dtype=torch.float64,
     device="cpu",
 )

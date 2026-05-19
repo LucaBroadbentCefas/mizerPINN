@@ -4,10 +4,10 @@ import pandas as pd
 import torch
 
 from PINNmizer.io import load_mizer_inputs
-from PINNmizer.biology import (
-    compute_growth_direct_at_eval,
-    compute_phi_and_dphi_dw,
-)
+from PINNmizer.biology.growth import compute_growth_direct_at_eval
+from PINNmizer.biology.kernels import compute_phi_and_dphi_dw
+
+
 from PINNmizer.params import _params_dtype_device
 
 
@@ -44,7 +44,7 @@ def report_diff(name: str, direct: torch.Tensor, ref: torch.Tensor) -> None:
 
 
 params, n, n_pp = load_mizer_inputs(
-    "validation/fixtures/mizer_full",
+    "validation/fixtures/pde_single_species",
     dtype=torch.float64,
     device="cpu",
 )

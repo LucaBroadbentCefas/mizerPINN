@@ -4,7 +4,7 @@
 export_known_encounter_inputs <- function(params,
                                           n = params@initial_n,
                                           n_pp = params@initial_n_pp,
-                                          outdir = "validation/fixtures/mizer_full") {
+                                          outdir = "validation/fixtures/pde_single_species") {
   dir.create(outdir, showWarnings = FALSE)
 
   write_mat <- function(x, name) {
@@ -137,7 +137,7 @@ compare_mat <- function(a, b, eps = 1e-14) {
 }
 
 direct_dir <- "py_known_encounter_direct"
-mizer_dir <- "validation/fixtures/mizer_full"
+mizer_dir <- "validation/fixtures/pde_single_species"
 
 quantities <- c(
   "encounter",
