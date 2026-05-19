@@ -26,7 +26,13 @@ def evaluate_log_model_with_derivatives_at_eval(model, x_eval_scaled: torch.Tens
 
     dlogN_dx_scaled_rows, dlogN_dt_scaled_rows = [], []
     for i in range(n_species):
-        grad_i = torch.autograd.grad(log_N_flat[:, i].sum(), inputs, inputs, create_graph=True, retain_graph=True, allow_unused=False)[0]
+        grad_i = torch.autograd.grad(
+            log_N_flat[:, i].sum(),
+            inputs,
+            create_graph=True,
+            retain_graph=True,
+            allow_unused=False,
+        )[0]
         dlogN_dx_scaled_rows.append(grad_i[:, 0])
         dlogN_dt_scaled_rows.append(grad_i[:, 1])
 
