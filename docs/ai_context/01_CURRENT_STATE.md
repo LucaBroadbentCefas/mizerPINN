@@ -2,20 +2,20 @@
 
 ## Last updated
 
-2026-05-18
+2026-05-19
 
 ## Repository
 
-- GitHub repository: `LucaBroadbentCefas/PINNs`
+- Canonical GitHub repository: `LucaBroadbentCefas/mizerPINN`
 - Default branch inspected: `main`
-- Main head used for this context layer: `cf437f8da7ba73678971b69f56d746eb93ee0703`
-- Documentation branch: `docs/add-ai-context`
+- Main head used for this context layer: `79c027aa3c12cc6675a7ae023394b186159c4b84`
+- Previous repository `LucaBroadbentCefas/PINNs` is deprecated and expected to be deleted. Do not use it for new project summaries, source inspection, or future context updates.
 
 ## Active project phase
 
-The project is no longer just a standalone PDE-residual implementation. The current repository includes a single-species training workflow using PDE, initial-condition, and recruitment-boundary losses, with adaptive loss weighting and diagnostic exports.
+The project is no longer just a standalone PDE-residual implementation. The current repository is now organised as a package-style project with reusable code under `PINNmizer/`, thin executable entry points under `scripts/`, validation assets under `validation/`, generated outputs under `runs/`, and project/context documentation under `docs/`.
 
-The main active problem remains whether the PINN is learning a physically meaningful size-time abundance surface rather than exploiting weak constraints, loss imbalance, or near-zero/collapsed solutions.
+The active scientific problem remains whether the PINN is learning a physically meaningful size-time abundance surface rather than exploiting weak constraints, loss imbalance, or near-zero/collapsed solutions.
 
 ## Current source-derived state
 
@@ -23,28 +23,37 @@ The main active problem remains whether the PINN is learning a physically meanin
 
 - `MizerTorchParams` stores fixed-grid, FFT, continuous biological, interaction, reproduction, mortality, and time-domain parameters.
 - `load_mizer_inputs()` reads CSV exports into `MizerTorchParams`, `n_init`, and `n_pp`.
-- Fixed-grid mizer-like operators exist for validation and projection.
-- Continuous/direct biological functions exist for off-grid PDE residual evaluation.
+- Fixed-grid mizer-like operators exist for validation and projection in `PINNmizer/mizer_grid_ops.py`.
+- Continuous/off-grid biological functions are split across `PINNmizer/biology/`.
+- PINN sampling, model evaluation, autograd derivatives, PDE-state construction, residual assembly, and losses are split across `PINNmizer/pinn/`.
 - The model output is treated as `log_N`.
 - Autograd is used for network derivatives.
 - Manual/analytical derivatives are used for the biological growth-side `dg_dw` path.
 - PDE residuals are returned in both log and physical/check forms.
 - Initial-condition and recruitment-boundary losses are implemented through cached PDE state.
-- Single-species training includes Wang-style gradient-statistic adaptive weighting for PDE/IC/BC terms.
-- Single-species training includes causal time curriculum over the sampled PDE time horizon.
+- Single-species training is now package-backed under `PINNmizer/training/`, with a thin script wrapper under `scripts/`.
+- Training includes Wang-style gradient-statistic adaptive weighting for PDE/IC/BC terms.
+- Training includes causal time curriculum over the sampled PDE time horizon.
 - Final-layer bias can be initialised from the mean initial log abundance.
-- Training and fixed-grid diagnostic outputs are saved into timestamped run directories.
+- Diagnostics have been moved into package modules under `PINNmizer/diagnostics/`.
+- Training and fixed-grid diagnostic outputs are saved into timestamped run directories under `runs/`.
 
 ### Current training entry point
 
 ```bash
-python -m validation_steps.train_pde_only_single_species
+python scripts/train_pde_only_single_species.py
 ```
 
-The default input directory in the script is:
+The script is intentionally thin and delegates to:
 
 ```text
-py_inputs_ns_first_species
+PINNmizer.training.train_pde_only_single_species.main
+```
+
+The default input directory is now:
+
+```text
+validation/fixtures/pde_single_species
 ```
 
 The default run directory pattern is:
@@ -69,13 +78,21 @@ runs/pde_only_single_species/YYYYMMDD_HHMMSS
 - `initial_w_pde = 1.0`
 - `initial_w_ic = 1.0`
 - `initial_w_bc = 1e-3`
-- `weighting = wang_gradient_statistics`
+- `weighting = wang_gradient_statistics` unless `--disable-wang-weights` is used
 - `causal_curriculum = linear`
 - `causal_start_fraction = 0.05`
 - `causal_ramp_steps = 1500`
 - `init_final_bias_from_ic = True`
 
 Important implication: although boundary-loss machinery is implemented, the default command currently has `lambda_bc = 0.0` unless overridden.
+
+## Recent repository transition and cleanup
+
+- `LucaBroadbentCefas/mizerPINN` is now the canonical repository.
+- `LucaBroadbentCefas/PINNs` is deprecated and expected to be deleted.
+- Do not inspect `PINNs` when asked about the active project unless explicitly asked for historical comparison.
+- Recent `mizerPINN` work moved code toward a clearer package structure: reusable package code under `PINNmizer/`, scripts under `scripts/`, fixtures/checks/comparisons under `validation/`, diagnostics under `PINNmizer/diagnostics/`, and generated outputs under `runs/`.
+- A stale post-run diagnostics import was fixed by moving diagnostics into package modules rather than importing them from `validation/scripts/`.
 
 ## Known live concerns
 
@@ -101,9 +118,13 @@ The recruitment-boundary loss uses clamping floors for log-form residuals and ex
 
 The strongest diagnostic is not just whether training loss falls. A key validation route is to use mizer-generated `N(w,t)` as a surrogate model output and check whether the assembled PDE residual is small within expected discretisation/interpolation error.
 
-### 4. Documentation and run logs are incomplete
+### 4. Documentation and run logs remain incomplete
 
-This context layer starts the documentation system, but it does not yet encode every historical experiment. `08_EXPERIMENT_LOG.jsonl` is intentionally sparse and should be appended after future runs.
+This context layer now records the repository transition and package structure, but it does not yet encode every historical experiment. `08_EXPERIMENT_LOG.jsonl` is intentionally sparse and should be appended after future runs.
+
+### 5. Recent structure refactor increases import-regression risk
+
+Because code was moved between package, script, diagnostics, and validation areas, future edits should check imports against the current repository before proposing patches.
 
 ## Current next sensible tasks
 
@@ -114,7 +135,10 @@ This context layer starts the documentation system, but it does not yet encode e
    - Wang weights on/off;
    - causal curriculum on/off.
 3. Add an explicit validation script that evaluates the PDE residual on mizer-generated trajectories without training.
-4. Split Wang-style loss weighting out of `train_pde_only_single_species.py` into a dedicated module if it grows further.
+4. Keep package imports clean:
+   - `PINNmizer/*` should not import from `scripts/*`;
+   - `PINNmizer/*` should not import from `validation/*`;
+   - diagnostics used by training should live under `PINNmizer/diagnostics/`.
 5. Keep this context layer updated at the end of each major debugging or implementation session.
 
 ## Do not revisit without new evidence
@@ -123,3 +147,4 @@ This context layer starts the documentation system, but it does not yet encode e
 - Do not infer that falling PDE loss means correct dynamics.
 - Do not assume the fixed-grid FFT path and continuous off-grid path are interchangeable without validation.
 - Do not treat ChatGPT memory or chat history as canonical project state.
+- Do not use `LucaBroadbentCefas/PINNs` as the active repository.
