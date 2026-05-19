@@ -2,7 +2,7 @@
 
 PyTorch PINN code for a mizer-style marine size-spectrum PDE model.
 
-This repository now separates the codebase by scientific and implementation role. The split is deliberately conservative: new thematic modules have been added first, 
+This repository separates the codebase by scientific and implementation role. 
 
 ## Main layout
 
@@ -67,7 +67,7 @@ Diagnostics are read-only checks. Fixed-grid mizer-style checks should remain st
 
 
 
-Existing commands should continue to work. A script wrapper has also been added:
+Canonical training command:
 
 ```bash
 python -m scripts.train_pde_only_single_species

@@ -7,13 +7,13 @@ PINNmizer/
   params.py
   io.py
   mizer_grid_ops.py
-  continuous_biology.py
+  biology/{kernels,encounter,growth,mortality,recruitment}.py
   pde_residual.py
   utils.py
 
-validation_steps/
+validation/scripts/
   train_pde_only_single_species.py
-  pinn_diagnostics.py
+  PINNmizer/diagnostics/{fixed_grid,metrics,outputs,plots,fields}.py
   pde_output_diagnostics.py
   other validation/export/debug scripts
 
@@ -31,7 +31,7 @@ The project has two biological-computation paths:
    - useful for validation and comparison against mizer/TMB conventions.
 
 2. **Continuous/off-grid PDE path**
-   - implemented mainly in `PINNmizer/continuous_biology.py` and `PINNmizer/pde_residual.py`;
+   - implemented mainly in `PINNmizer/biology/{kernels,encounter,growth,mortality,recruitment}.py` and `PINNmizer/pinn/* modules`;
    - evaluates biology at arbitrary `w_eval = exp(x_eval)` collocation points;
    - used by the PINN PDE residual and loss.
 
@@ -127,7 +127,7 @@ Boundary:
 - This is the fixed-grid validation/reference path.
 - Do not use it as the arbitrary off-grid PDE residual path unless explicitly testing that design.
 
-### `PINNmizer/continuous_biology.py`
+### `PINNmizer/biology/{kernels,encounter,growth,mortality,recruitment}.py`
 
 Purpose:
 
@@ -158,7 +158,7 @@ Boundary:
 - Do not detach inside computations used by the PDE loss unless deliberately producing diagnostics.
 - Do not replace analytical/manual `dg_dw` with autograd without an explicit decision record.
 
-### `PINNmizer/pde_residual.py`
+### `PINNmizer/pinn/* modules`
 
 Purpose:
 
@@ -187,7 +187,7 @@ Boundary:
 - It can assemble loss components, but optimiser logic belongs elsewhere.
 - It should remain the central source for residual shape and derivative-scaling conventions.
 
-### `validation_steps/train_pde_only_single_species.py`
+### `validation/scripts/train_pde_only_single_species.py`
 
 Purpose:
 
@@ -218,7 +218,7 @@ Boundary:
 - If loss weighting grows more complicated, it should be moved into a dedicated module.
 - Do not hide major scientific assumptions in this script; document them in `docs/ai_context/`.
 
-### `validation_steps/pinn_diagnostics.py`
+### `validation/scripts/PINNmizer/diagnostics/{fixed_grid,metrics,outputs,plots,fields}.py`
 
 Purpose:
 
@@ -267,12 +267,12 @@ MizerTorchParams + n_init + n_pp
 
 ## Where new code should go
 
-- New biological equation or derivative: `PINNmizer/continuous_biology.py`, plus ADR if it changes conventions.
+- New biological equation or derivative: `PINNmizer/biology/{kernels,encounter,growth,mortality,recruitment}.py`, plus ADR if it changes conventions.
 - Fixed-grid mizer reference operation: `PINNmizer/mizer_grid_ops.py`.
-- PDE residual assembly or loss component: `PINNmizer/pde_residual.py`.
+- PDE residual assembly or loss component: `PINNmizer/pinn/* modules`.
 - General training-loss weighting: a future `PINNmizer/loss_weighting.py` or current training script until split.
-- Training script experiment only: `validation_steps/train_pde_only_single_species.py`.
-- Diagnostics/plots: `validation_steps/pinn_diagnostics.py` or related diagnostic module.
+- Training script experiment only: `validation/scripts/train_pde_only_single_species.py`.
+- Diagnostics/plots: `validation/scripts/PINNmizer/diagnostics/{fixed_grid,metrics,outputs,plots,fields}.py` or related diagnostic module.
 - Cross-chat project state: `docs/ai_context/`.
 
 ## Current architectural debt
