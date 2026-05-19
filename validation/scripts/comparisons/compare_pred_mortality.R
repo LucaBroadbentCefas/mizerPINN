@@ -99,10 +99,10 @@ q_known_fish <- sweep(
   "*"
 )
 
-write.csv(q_known_fish, "validation/outputs/pred_mort_comparison/q_known_fish.csv", row.names = FALSE)
+write.csv(q_known_fish, "validation/fixtures/py_inputs/q_known_fish.csv", row.names = FALSE)
 
 
-read_py_mat <- function(name, dir = "validation/outputs/pred_mort_comparison") {
+read_py_mat <- function(name, dir = "validation/outputs/py_known_q_direct") {
   as.matrix(read.csv(file.path(dir, paste0(name, ".csv")), check.names = FALSE))
 }
 

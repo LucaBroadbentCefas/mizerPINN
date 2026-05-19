@@ -8,8 +8,8 @@ from PINNmizer.biology.kernels import compute_phi_and_dphi_dw
 from PINNmizer.params import _params_dtype_device
 
 
-OUT_DIR = Path("validation/outputs/pred_mort_comparison")
-OUT_DIR.mkdir(exist_ok=True)
+OUT_DIR = Path("validation/fixtures/py_inputs")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def write_mat(x, name):
@@ -20,7 +20,7 @@ def write_mat(x, name):
 
 
 params, n, n_pp = load_mizer_inputs(
-    "validation/fixtures/pde_single_species",
+    "validation/fixtures/py_inputs",
     dtype=torch.float64,
     device="cpu",
 )
@@ -28,7 +28,7 @@ params, n, n_pp = load_mizer_inputs(
 dtype, device = _params_dtype_device(params)
 
 q_known_fish = load_mat(
-    Path("validation/outputs/pred_mort_comparison"),
+    Path("validation/fixtures/py_inputs"),
     "q_known_fish",
     dtype,
     device,
@@ -55,4 +55,4 @@ pred_mort_direct_known_q = params.interaction.T @ pred_rate_direct_known_q
 write_mat(pred_rate_direct_known_q, "pred_rate_direct_known_q")
 write_mat(pred_mort_direct_known_q, "pred_mort_direct_known_q")
 
-print("Wrote validation/outputs/pred_mort_comparison/")
+print("Wrote validation/outputs/py_known_q_direct/")
