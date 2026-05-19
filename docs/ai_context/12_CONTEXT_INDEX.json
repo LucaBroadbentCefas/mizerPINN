@@ -1,10 +1,20 @@
 {
   "project": "PINNmizer",
-  "repository": "LucaBroadbentCefas/PINNs",
-  "last_updated": "2026-05-18",
+  "repository": "LucaBroadbentCefas/mizerPINN",
+  "last_updated": "2026-05-19",
   "source_ref": {
     "branch": "main",
-    "commit": "cf437f8da7ba73678971b69f56d746eb93ee0703"
+    "commit": "79c027aa3c12cc6675a7ae023394b186159c4b84"
+  },
+  "repository_status": {
+    "canonical_repository": "LucaBroadbentCefas/mizerPINN",
+    "deprecated_repositories": [
+      {
+        "repository": "LucaBroadbentCefas/PINNs",
+        "status": "deprecated_pending_deletion",
+        "note": "Do not use this repository for new project context or codebase summaries. The active project has moved to LucaBroadbentCefas/mizerPINN."
+      }
+    ]
   },
   "canonical_docs": [
     "docs/ai_context/00_PROJECT_BRIEF.md",
@@ -46,12 +56,32 @@
     "PINNmizer/params.py",
     "PINNmizer/io.py",
     "PINNmizer/mizer_grid_ops.py",
-    "PINNmizer/continuous_biology.py",
-    "PINNmizer/pde_residual.py",
-    "validation_steps/train_pde_only_single_species.py",
-    "validation_steps/pinn_diagnostics.py"
+    "PINNmizer/biology/kernels.py",
+    "PINNmizer/biology/encounter.py",
+    "PINNmizer/biology/growth.py",
+    "PINNmizer/biology/mortality.py",
+    "PINNmizer/biology/recruitment.py",
+    "PINNmizer/pinn/models.py",
+    "PINNmizer/pinn/sampling.py",
+    "PINNmizer/pinn/model_eval.py",
+    "PINNmizer/pinn/derivatives.py",
+    "PINNmizer/pinn/pde_state.py",
+    "PINNmizer/pinn/residual.py",
+    "PINNmizer/pinn/losses.py",
+    "PINNmizer/training/train_pde_only_single_species.py",
+    "PINNmizer/training/loop.py",
+    "PINNmizer/training/weighting.py",
+    "PINNmizer/training/config.py",
+    "PINNmizer/training/outputs.py",
+    "PINNmizer/training/checkpointing.py",
+    "PINNmizer/diagnostics/fixed_grid.py",
+    "PINNmizer/diagnostics/metrics.py",
+    "PINNmizer/diagnostics/outputs.py",
+    "PINNmizer/diagnostics/plots.py",
+    "PINNmizer/diagnostics/fields.py",
+    "scripts/train_pde_only_single_species.py"
   ],
-  "current_training_entrypoint": "python -m validation_steps.train_pde_only_single_species",
+  "current_training_entrypoint": "python scripts/train_pde_only_single_species.py",
   "current_training_scope": "single_species_only",
   "model_conventions": {
     "input_columns": ["x_scaled", "t_scaled"],
@@ -78,6 +108,7 @@
     "fixed_grid_diagnostics": true
   },
   "do_not_change_without_explicit_instruction": [
+    "canonical repository LucaBroadbentCefas/mizerPINN",
     "model input order [x_scaled, t_scaled]",
     "model output interpretation as log_N",
     "coordinate scaling conventions",
@@ -91,7 +122,7 @@
     "boundary loss sensitivity to clamping and scaling",
     "need formal PDE residual validation on mizer-generated trajectories",
     "continuous kernel support convention may not fully match mizer",
-    "Wang weighting still embedded in training script",
+    "recent package-structure refactor means imports and docs must be checked against current files",
     "training script currently single-species only"
   ]
 }
