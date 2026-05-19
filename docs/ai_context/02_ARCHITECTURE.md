@@ -11,11 +11,13 @@ PINNmizer/
   pde_residual.py
   utils.py
 
-validation/scripts/
+scripts/
   train_pde_only_single_species.py
-  PINNmizer/diagnostics/{fixed_grid,metrics,outputs,plots,fields}.py
-  pde_output_diagnostics.py
-  other validation/export/debug scripts
+
+PINNmizer/diagnostics/{fixed_grid,metrics,outputs,plots,fields,output_surface}.py
+
+validation/scripts/
+  checks/, comparisons/, export/, legacy/
 
 docs/ai_context/
   project continuity documentation for ChatGPT and future contributors
@@ -187,13 +189,12 @@ Boundary:
 - It can assemble loss components, but optimiser logic belongs elsewhere.
 - It should remain the central source for residual shape and derivative-scaling conventions.
 
-### `validation/scripts/train_pde_only_single_species.py`
+### `PINNmizer/training/train_pde_only_single_species.py`
 
 Purpose:
 
-- Current executable single-species training script.
-- Defines the MLP.
-- Runs sampling, loss computation, Wang-style weighting, optimisation, diagnostics, checkpoints, and final output exports.
+- Package-level single-species training workflow.
+- Orchestrates sampling, loss computation, Wang-style weighting, optimisation, diagnostics, checkpoints, and final output exports.
 
 Important functions/classes:
 
@@ -218,7 +219,7 @@ Boundary:
 - If loss weighting grows more complicated, it should be moved into a dedicated module.
 - Do not hide major scientific assumptions in this script; document them in `docs/ai_context/`.
 
-### `validation/scripts/PINNmizer/diagnostics/{fixed_grid,metrics,outputs,plots,fields}.py`
+### `PINNmizer/diagnostics/{fixed_grid,metrics,outputs,plots,fields,output_surface}.py`
 
 Purpose:
 
@@ -239,8 +240,9 @@ Important functions:
 
 Boundary:
 
-- Diagnostics may use plotting, pandas, and NumPy.
+- Diagnostics may use plotting, pandas, and NumPy after detaching tensors.
 - Differentiable training/PDE loss code should not inherit these dependencies unless necessary.
+- Package training code should import diagnostics from `PINNmizer.diagnostics.*`, not from `validation/scripts/*`.
 
 ## Data flow
 
