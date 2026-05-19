@@ -3,10 +3,9 @@ import torch
 
 from PINNmizer.io import load_mizer_inputs
 from PINNmizer.mizer_grid_ops import mizer_operators
-from PINNmizer.biology import (
-    compute_growth_direct_at_eval,
-    compute_total_mortality_direct_at_eval,
-)
+from PINNmizer.biology.growth import compute_growth_direct_at_eval
+from PINNmizer.biology.mortality import compute_total_mortality_direct_at_eval
+
 
 
 def cmp(name, direct, ref, eps=1e-12):

@@ -1,13 +1,13 @@
-"""
-Biological operators for the mizer-style size-spectrum PINN.
+from .kernels import compute_phi_and_dphi_dw
+from .encounter import compute_encounter_direct_at_eval, evaluate_gamma_continuous
+from .growth import compute_growth_direct_at_eval, evaluate_intake_max_continuous, evaluate_metab_continuous, evaluate_psi_continuous
+from .mortality import evaluate_mu_b_continuous, compute_pred_mortality_direct_at_eval, compute_total_mortality_direct_at_eval, compute_pred_mortality_direct_at_eval_from_growth_grid, compute_total_mortality_direct_at_eval_from_growth_grid
+from .recruitment import compute_recruitment_direct_from_growth_grid
 
-The modules in this package hold the hand-coded biological terms used by the
-PDE residual. These functions should not evaluate the neural network or assemble
-PINN losses. They operate on tensors that already represent spectra, grids, and
-species parameters.
-
-Public compatibility imports are exposed through `PINNmizer.biology.continuous`
-and the legacy `PINNmizer.biology` module.
-"""
-
-from .continuous import *
+__all__=[
+"compute_phi_and_dphi_dw",
+"compute_encounter_direct_at_eval","evaluate_gamma_continuous",
+"compute_growth_direct_at_eval","evaluate_intake_max_continuous","evaluate_metab_continuous","evaluate_psi_continuous",
+"evaluate_mu_b_continuous","compute_pred_mortality_direct_at_eval","compute_total_mortality_direct_at_eval","compute_pred_mortality_direct_at_eval_from_growth_grid","compute_total_mortality_direct_at_eval_from_growth_grid",
+"compute_recruitment_direct_from_growth_grid",
+]

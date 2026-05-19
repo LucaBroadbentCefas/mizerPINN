@@ -15,7 +15,7 @@ from PINNmizer.params import (
     scale_t,
     scale_x,
 )
-from PINNmizer.pde_residual import compute_pde_loss
+from PINNmizer.pinn.losses import compute_pde_loss
 
 
 def make_fixed_pde_batch(

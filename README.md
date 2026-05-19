@@ -2,7 +2,7 @@
 
 PyTorch PINN code for a mizer-style marine size-spectrum PDE model.
 
-This repository now separates the codebase by scientific and implementation role. The split is deliberately conservative: new thematic modules have been added first, while legacy modules remain available so existing validation commands do not break during the refactor.
+This repository now separates the codebase by scientific and implementation role. The split is deliberately conservative: new thematic modules have been added first, 
 
 ## Main layout
 
@@ -18,6 +18,7 @@ PINNmizer/
 scripts/         # runnable experiment entry points
 validation/scripts # validation-only scripts
 validation/fixtures # validation fixtures/data
+validation/outputs  # generated validation outputs
 ```
 
 ## Conceptual boundaries
@@ -62,9 +63,9 @@ Training modules are for infrastructure: configuration, optimisation loops, chec
 
 Diagnostics are read-only checks. Fixed-grid mizer-style checks should remain stable validation baselines.
 
-## Current migration state
 
-This PR introduces the clearer structure without deleting existing entry points. Some new modules currently re-export functions from older files. That is intentional: it gives the project a navigable architecture before the higher-risk step of physically moving every implementation.
+
+
 
 Existing commands should continue to work. A script wrapper has also been added:
 
@@ -72,10 +73,6 @@ Existing commands should continue to work. A script wrapper has also been added:
 python -m scripts.train_pde_only_single_species
 ```
 
-The existing command remains valid during migration:
-
-```bash
-```
 
 ## Refactor rule for future changes
 

@@ -4,11 +4,11 @@ import pandas as pd
 import torch
 
 from PINNmizer.io import load_mizer_inputs, load_mat
-from PINNmizer.biology import compute_phi_and_dphi_dw
+from PINNmizer.biology.kernels import compute_phi_and_dphi_dw
 from PINNmizer.params import _params_dtype_device
 
 
-OUT_DIR = Path("validation/fixtures/known_q_direct")
+OUT_DIR = Path("validation/outputs/pred_mort_comparison")
 OUT_DIR.mkdir(exist_ok=True)
 
 
@@ -55,4 +55,4 @@ pred_mort_direct_known_q = params.interaction.T @ pred_rate_direct_known_q
 write_mat(pred_rate_direct_known_q, "pred_rate_direct_known_q")
 write_mat(pred_mort_direct_known_q, "pred_mort_direct_known_q")
 
-print("Wrote validation/fixtures/known_q_direct/")
+print("Wrote validation/outputs/pred_mort_comparison/")

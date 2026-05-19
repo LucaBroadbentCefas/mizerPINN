@@ -103,7 +103,7 @@ def initialise_final_bias_from_ic(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--input-dir", default="validation/fixtures/validation/fixtures/pde_single_species")
+    parser.add_argument("--input-dir", default="validation/fixtures/pde_single_species")
     parser.add_argument("--n-steps", type=int, default=2000)
     parser.add_argument("--n-time", type=int, default=10)
     parser.add_argument("--n-eval", type=int, default=30)

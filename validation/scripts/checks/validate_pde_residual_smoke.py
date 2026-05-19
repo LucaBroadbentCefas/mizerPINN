@@ -3,7 +3,8 @@ import torch
 
 from PINNmizer.io import load_mizer_inputs
 from PINNmizer.params import _params_dtype_device, _n_species
-from PINNmizer.pinn import sample_pde_batch, compute_pde_loss
+from PINNmizer.pinn.sampling import sample_pde_batch
+from PINNmizer.pinn.losses import compute_pde_loss
 
 params, n_init, n_pp = load_mizer_inputs(
     "validation/fixtures/mizer_full",
