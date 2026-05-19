@@ -8,7 +8,7 @@ from PINNmizer.biology.kernels import compute_phi_and_dphi_dw
 from PINNmizer.params import _params_dtype_device
 
 
-OUT_DIR = Path("validation/fixtures/py_inputs")
+OUT_DIR = Path("validation/outputs/py_known_q_direct")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
