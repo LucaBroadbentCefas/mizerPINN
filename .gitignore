@@ -4,7 +4,7 @@
 .Ruserdata
 __pycache__/
 *.py[cod]
-
+/runs
 /py_growth_derivative*/
 /py_known*/
 /py_mizer*/
