@@ -5,11 +5,17 @@ from PINNmizer.io import load_mizer_inputs
 from PINNmizer.params import _params_dtype_device, _n_species
 from PINNmizer.pde_residual import sample_pde_batch, compute_pde_loss
 
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+FIXTURE_ROOT = REPO_ROOT / "validation" / "fixtures"
+
 params, n_init, n_pp = load_mizer_inputs(
-    "py_inputs",
+    FIXTURE_ROOT / "py_inputs",
     dtype=torch.float64,
     device="cpu",
 )
+
 class TinyLogPINN(torch.nn.Module):
     """
     Dummy model for testing only.

@@ -515,7 +515,7 @@ def main() -> None:
 
     print("Finished.")
     print(f"Run directory: {run_dir}")
-    from validation_steps.pde_output_diagnostics import save_output_surface_diagnostics
+    from PINNmizer/diagnostics/output_surfaces.py import save_output_surface_diagnostics
 
     save_output_surface_diagnostics(
        model=model,

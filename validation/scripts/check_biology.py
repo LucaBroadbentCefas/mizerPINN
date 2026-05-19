@@ -1,4 +1,4 @@
-#python -m validation_steps.check_biology
+## python -m validation.scripts.check_biology
 import torch
 
 from PINNmizer.io import load_mizer_inputs
@@ -22,8 +22,13 @@ def cmp(name, direct, ref, eps=1e-12):
     )
 
 
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+FIXTURE_ROOT = REPO_ROOT / "validation" / "fixtures"
+
 params, n, n_pp = load_mizer_inputs(
-    "py_inputs",
+    FIXTURE_ROOT / "py_inputs",
     dtype=torch.float64,
     device="cpu",
 )

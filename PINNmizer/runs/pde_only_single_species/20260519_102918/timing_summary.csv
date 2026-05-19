@@ -1,0 +1,2 @@
+warmup_steps,seconds_per_step,estimated_seconds_for_2000_steps,actual_total_seconds
+10,0.6340447299997323,1268.0894599994645,6.994867899978999
