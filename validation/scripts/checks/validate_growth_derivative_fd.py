@@ -9,7 +9,7 @@ from PINNmizer.biology.growth import compute_growth_direct_at_eval
 
 
 OUT_DIR = Path("validation/fixtures/growth_derivative_fd")
-OUT_DIR.mkdir(exist_ok=True)
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def write_mat(x: torch.Tensor, name: str) -> None:
