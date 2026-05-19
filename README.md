@@ -16,7 +16,8 @@ PINNmizer/
   params.py      # parameter dataclass, grids, scaling helpers
 
 scripts/         # runnable experiment entry points
-validation_steps/# existing validation and migration entry points
+validation/scripts # validation-only scripts
+validation/fixtures # validation fixtures/data
 ```
 
 ## Conceptual boundaries
@@ -74,7 +75,6 @@ python -m scripts.train_pde_only_single_species
 The existing command remains valid during migration:
 
 ```bash
-python -m validation_steps.train_pde_only_single_species
 ```
 
 ## Refactor rule for future changes
