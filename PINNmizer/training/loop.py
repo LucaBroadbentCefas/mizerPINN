@@ -9,7 +9,7 @@ import torch.nn as nn
 from PINNmizer.pinn.sampling import sample_pde_batch
 from PINNmizer.pinn.losses import compute_pde_loss
 from PINNmizer.training.weighting import update_wang_gradient_weights_
-from PINNmizer.timestep_consistency import compute_timestep_consistency_loss
+from PINNmizer.pinn.timestep_consistency import compute_timestep_consistency_loss
 
 
 def scalar_min(x: torch.Tensor) -> float:
@@ -93,10 +93,28 @@ def train_one_step(
         bc_eps=bc_eps,
     )
 
+    timestep_out = None
+    if lambda_timestep > 0.0:
+        t0 = batch["t_eval"][:1]
+        loss_timestep, timestep_out = compute_timestep_consistency_loss(
+            model=model,
+            params=params,
+            n_pp=n_pp,
+            t0=t0,
+            dt=timestep_dt,
+            loss_form=timestep_loss_form,
+            detach_step_target=detach_step_target,
+            species_idx=0,
+            eps=eps,
+        )
+        
+        out["loss_timestep"] = loss_timestep
+
     raw_losses = {
         "pde": out["loss_pde"],
         "ic": out["loss_ic"],
         "bc": out["loss_bc"],
+        "dt":, out["loss_timestep"],
     }
 
     weight_stats = {
@@ -138,30 +156,16 @@ def train_one_step(
             lambda_pde * out["loss_pde"]
             + lambda_ic * out["loss_ic"]
             + lambda_bc * out["loss_bc"]
+            + lambda_timestep * out["loss_timestep"]
         )
     else:
         loss = (
             lambda_pde * loss_weights["pde"] * out["loss_pde"]
             + lambda_ic * loss_weights["ic"] * out["loss_ic"]
             + lambda_bc * loss_weights["bc"] * out["loss_bc"]
+            + lambda_timestep * out["loss_timestep"]
         )
 
-    timestep_out = None
-    if lambda_timestep > 0.0:
-        t0 = batch["t_eval"][:1]
-        loss_timestep, timestep_out = compute_timestep_consistency_loss(
-            model=model,
-            params=params,
-            n_pp=n_pp,
-            t0=t0,
-            dt=timestep_dt,
-            loss_form=timestep_loss_form,
-            detach_step_target=detach_step_target,
-            species_idx=0,
-            eps=eps,
-        )
-        loss = loss + lambda_timestep * loss_timestep
-        out["loss_timestep"] = loss_timestep
 
     out["loss"] = loss
 
