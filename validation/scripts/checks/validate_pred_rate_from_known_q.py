@@ -8,7 +8,7 @@ from PINNmizer.biology.kernels import compute_phi_and_dphi_dw
 from PINNmizer.params import _params_dtype_device
 
 
-OUT_DIR = Path("validation/outputs/py_known_q_direct")
+OUT_DIR = Path("validation/outputs/known_q_direct")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -55,4 +55,4 @@ pred_mort_direct_known_q = params.interaction.T @ pred_rate_direct_known_q
 write_mat(pred_rate_direct_known_q, "pred_rate_direct_known_q")
 write_mat(pred_mort_direct_known_q, "pred_mort_direct_known_q")
 
-print("Wrote validation/outputs/py_known_q_direct/")
+print("Wrote validation/outputs/known_q_direct/")

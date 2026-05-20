@@ -136,7 +136,7 @@ compare_mat <- function(a, b, eps = 1e-14) {
   )
 }
 
-direct_dir <- "py_known_encounter_direct"
+direct_dir <- "validation/outputs/known_encounter_direct"
 mizer_dir <- "validation/fixtures/pde_single_species"
 
 quantities <- c(

@@ -102,7 +102,7 @@ q_known_fish <- sweep(
 write.csv(q_known_fish, "validation/fixtures/py_inputs/q_known_fish.csv", row.names = FALSE)
 
 
-read_py_mat <- function(name, dir = "validation/outputs/py_known_q_direct") {
+read_py_mat <- function(name, dir = "validation/outputs/known_q_direct") {
   as.matrix(read.csv(file.path(dir, paste0(name, ".csv")), check.names = FALSE))
 }
 

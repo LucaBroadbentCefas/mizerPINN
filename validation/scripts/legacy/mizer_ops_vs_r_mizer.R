@@ -16,7 +16,7 @@ pred_mort <- rate_funcs$PredMort(NS_params, NS_params@initial_n, NS_params@initi
                                  NS_params@initial_n_other, 0.1, pred_rate)
 
 
-read_py_mat <- function(name, dir = "py_mizer_ops") {
+read_py_mat <- function(name, dir = "validation/outputs/mizer_ops") {
   as.matrix(
     read.csv(
       file.path(dir, paste0(name, ".csv")),

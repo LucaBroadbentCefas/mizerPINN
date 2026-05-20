@@ -4,10 +4,9 @@
 .Ruserdata
 __pycache__/
 *.py[cod]
-runs/
-/py_growth_derivative_fd/
-/py_known_encounter_direct/
-/py_known_q_direct/
-/py_mizer_ops/
-/py_pred_mort_debug/
+/runs
+/py_growth_derivative*/
+/py_known*/
+/py_mizer*/
+/py_pred*/
 /validation/outputs/

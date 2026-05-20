@@ -11,8 +11,8 @@ from PINNmizer.biology.kernels import compute_phi_and_dphi_dw
 from PINNmizer.params import _params_dtype_device
 
 
-OUT_DIR = Path("validation/fixtures/pred_mort_debug")
-OUT_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR = Path("validation/outputs/pred_mort_debug")
+OUT_DIR.mkdir(exist_ok=True)
 
 
 def write_tensor(x: torch.Tensor, name: str) -> None:
