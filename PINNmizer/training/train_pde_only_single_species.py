@@ -147,6 +147,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--initial-w-pde", type=float, default=1.0)
     parser.add_argument("--initial-w-ic", type=float, default=1.0)
     parser.add_argument("--initial-w-bc", type=float, default=1e-3)
+    parser.add_argument("--initial-w-timestep", type=float, default=1.0)
     
     parser.add_argument(
         "--hard-set-first-weight-update",
@@ -187,6 +188,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lambda-ic", type=float, default=1.0)
     parser.add_argument("--lambda-bc", type=float, default=0.0)
     parser.add_argument("--disable-wang-weights", action="store_true") 
+    parser.add_argument("--lambda-timestep", type=float, default=0.0)
+    parser.add_argument("--timestep-loss-form", choices=["physical", "log", "relative"], default="physical")
+    parser.add_argument("--detach-step-target", action="store_true", default=True)
+    parser.add_argument("--no-detach-step-target", dest="detach_step_target", action="store_false")
+    parser.add_argument("--timestep-dt", type=float, default=None)
+    parser.add_argument("--timestep-n-pairs", type=int, default=1)
 
     return parser.parse_args()
 
@@ -243,6 +250,7 @@ def main() -> None:
         "pde": args.initial_w_pde,
         "ic": args.initial_w_ic,
         "bc": args.initial_w_bc,
+        "timestep": args.initial_w_timestep,
     }
     
     weight_state = {
@@ -286,6 +294,7 @@ def main() -> None:
         "initial_w_pde": args.initial_w_pde,
         "initial_w_ic": args.initial_w_ic,
         "initial_w_bc": args.initial_w_bc,
+        "initial_w_timestep": args.initial_w_timestep,
         "hard_set_first_weight_update": args.hard_set_first_weight_update,
         "init_final_bias_from_ic": args.init_final_bias_from_ic,
         "causal_curriculum": args.causal_curriculum,
@@ -296,6 +305,11 @@ def main() -> None:
         "lambda_ic": args.lambda_ic,
         "lambda_bc": args.lambda_bc,
         "disable_wang_weights": args.disable_wang_weights,
+        "lambda_timestep": args.lambda_timestep,
+        "timestep_loss_form": args.timestep_loss_form,
+        "detach_step_target": args.detach_step_target,
+        "timestep_dt": args.timestep_dt,
+        "timestep_n_pairs": args.timestep_n_pairs,
         "note": (
             "Composite PINN loss with PDE, IC, and recruitment boundary terms. "
             "IC/BC weights are adapted using Wang-style gradient statistics."
@@ -354,6 +368,11 @@ def main() -> None:
                 lambda_ic=args.lambda_ic,
                 lambda_bc=args.lambda_bc,
                 disable_wang_weights=args.disable_wang_weights,
+                lambda_timestep=args.lambda_timestep,
+                timestep_loss_form=args.timestep_loss_form,
+                detach_step_target=args.detach_step_target,
+                timestep_dt=args.timestep_dt,
+                timestep_n_pairs=args.timestep_n_pairs,
             )
 
             history.append(row)
@@ -432,6 +451,9 @@ def main() -> None:
                     f"wpde={row['weighted_loss_pde']:.3e} "
                     f"wic={row['weighted_loss_ic']:.3e} "
                     f"wbc={row['weighted_loss_bc']:.3e} "
+                    f"loss_ts={row['loss_timestep']:.3e} "
+                    f"w_ts={row['w_timestep']:.3e} "
+                    f"wts={row['weighted_loss_timestep']:.3e} "
                     f"bc_clamp_flux={row['frac_flux_left_clamped']:.3e} "
                     f"bc_clamp_rec={row['frac_recruitment_flux_clamped']:.3e} "
                 )
