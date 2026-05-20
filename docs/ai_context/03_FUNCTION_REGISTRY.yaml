@@ -4,11 +4,16 @@
 modules:
   PINNmizer.params:
     file: PINNmizer/params.py
-    role: Parameter container, shape helpers, dtype/device helpers, and coordinate scaling.
+    role: Parameter container, shape helpers, dtype/device helpers, coordinate scaling, and optional fixture timestep storage.
     functions:
       MizerTorchParams:
         kind: dataclass
-        purpose: Holds grids, FFT reference arrays, continuous biological parameters, interaction matrices, reproduction parameters, mortality parameters, and time bounds.
+        purpose: Holds grids, FFT reference arrays, continuous biological parameters, interaction matrices, reproduction parameters, mortality parameters, time bounds, and optional fixture timestep.
+        status: active
+      dt:
+        kind: dataclass_field
+        purpose: Optional physical timestep loaded from fixture/export `dt.csv` and used by timestep-consistency loss when no explicit `timestep_dt` is supplied.
+        shape: scalar tensor or None
         status: active
       fish_start:
         purpose: Return index where fish grid starts within full resource+fish grid.
@@ -33,14 +38,24 @@ modules:
       load_mizer_inputs:
         purpose: Load exported inputs and construct MizerTorchParams, n_init, and n_pp.
         returns: [params, n_init, n_pp]
+        notes:
+          - Optionally loads `dt.csv` into `params.dt`.
+          - `params.dt` should represent the mizer timestep used by the fixture/export.
+          - CLI `--timestep-dt` is an explicit experimental override of fixture `params.dt`.
         status: active
       load_complex_mat:
         purpose: Load real/imag CSV pairs as complex tensors.
         status: active
+      maybe_vec:
+        purpose: Load an optional vector CSV if present, otherwise return None.
+        status: active_internal
+      maybe_mat:
+        purpose: Load an optional matrix CSV if present, otherwise return None.
+        status: active_internal
 
   PINNmizer.mizer_grid_ops:
     file: PINNmizer/mizer_grid_ops.py
-    role: Fixed-grid FFT-style mizer/TMB operator path for validation/reference.
+    role: Fixed-grid FFT-style mizer/TMB operator path for validation/reference and timestep projection.
     functions:
       compute_prey:
         purpose: Build prey spectrum over full grid with resource and fish prey contributions.
@@ -64,71 +79,37 @@ modules:
         purpose: Compute fixed-grid operator dictionary.
         status: validation_reference
       step:
-        purpose: One AD-safe projection step using fixed-grid operators.
-        status: validation_or_simulation_reference
+        purpose: One AD-safe fixed-grid projection step used by validation/reference workflows and by optional timestep-consistency loss.
+        status: validation_reference_and_timestep_loss_target
 
-  PINNmizer.continuous_biology:
-    file: PINNmizer/continuous_biology.py
-    role: Continuous/off-grid biological path for PDE residual.
-    functions:
-      compute_encounter_direct_at_eval:
-        purpose: Compute direct encounter and dencounter/dw at arbitrary predator weights.
-        inputs:
-          n_pp: '[k_full]'
-          n_grid: '[n_species, n_w]'
-          w_eval: '[n_eval]'
-        returns:
-          encounter_eval: '[n_species, n_eval]'
-          dencounter_dw: '[n_species, n_eval]'
-        status: active
-      evaluate_gamma_continuous:
-        purpose: Evaluate gamma_i(w) = gamma_i * w^q_i and derivative.
-        returns:
-          gamma_eval: '[n_species, n_eval]'
-          dgamma_dw: '[n_species, n_eval]'
-        status: active
-      evaluate_intake_max_continuous:
-        purpose: Evaluate h_i(w) = h_i * w^n_i and derivative.
-        status: active
-      evaluate_metab_continuous:
-        purpose: Evaluate metab_i(w) = ks_i * w^p_i + k_i * w and derivative.
-        status: active
-      evaluate_psi_continuous:
-        purpose: Evaluate reproduction allocation psi_i(w) and derivative, including immature and above-repro cutoffs.
-        status: active
-      compute_phi_and_dphi_dw:
-        purpose: Evaluate log-normal predation kernel and derivative with respect to predator weight.
-        returns:
-          phi: '[n_species, n_pred, n_prey]'
-          dphi_dw_pred: '[n_species, n_pred, n_prey]'
-        status: active
-      evaluate_mu_b_continuous:
-        purpose: Evaluate constant or allometric background mortality.
-        returns: '[n_species, n_eval]'
-        status: active
-      compute_growth_direct_at_eval:
-        purpose: Compute continuous growth-side terms and manual dg/dw.
-        important_outputs:
-          - encounter_eval
-          - feeding_eval
-          - erepog_eval
-          - e_repro_eval
-          - e_growth_eval
-          - dg_dw
-        status: active
-      compute_pred_mortality_direct_at_eval_from_growth_grid:
-        purpose: Compute direct predation mortality using already-computed grid growth.
-        status: active
-      compute_total_mortality_direct_at_eval_from_growth_grid:
-        purpose: Return mu_b_eval, pred_mort_eval, and total mu_eval.
-        status: active
-      compute_recruitment_direct_from_growth_grid:
-        purpose: Compute reproductive integral and RDI/RDD recruitment flux from predicted grid spectrum.
-        status: active
+  PINNmizer.biology.kernels:
+    file: PINNmizer/biology/kernels.py
+    role: Continuous/off-grid predation kernel and derivative terms.
+    status: active
 
-  PINNmizer.pde_residual:
-    file: PINNmizer/pde_residual.py
-    role: Model evaluation, derivative computation, PDE state cache, residual and loss assembly.
+  PINNmizer.biology.encounter:
+    file: PINNmizer/biology/encounter.py
+    role: Continuous/off-grid encounter/search terms at arbitrary physical weights.
+    status: active
+
+  PINNmizer.biology.growth:
+    file: PINNmizer/biology/growth.py
+    role: Continuous/off-grid intake, metabolism, reproduction allocation, growth, and manual dg_dw.
+    status: active
+
+  PINNmizer.biology.mortality:
+    file: PINNmizer/biology/mortality.py
+    role: Continuous/off-grid background and predation mortality.
+    status: active
+
+  PINNmizer.biology.recruitment:
+    file: PINNmizer/biology/recruitment.py
+    role: Continuous/off-grid recruitment boundary flux from predicted grid spectrum.
+    status: active
+
+  PINNmizer.pinn.sampling:
+    file: PINNmizer/pinn/sampling.py
+    role: PDE collocation batch sampling and scaled/physical coordinate construction.
     functions:
       sample_pde_batch:
         purpose: Sample random continuous time and log-weight collocation vectors.
@@ -142,6 +123,11 @@ modules:
           w_eval: '[n_eval]'
           x_grid_scaled: '[n_w]'
         status: active
+
+  PINNmizer.pinn.model_eval:
+    file: PINNmizer/pinn/model_eval.py
+    role: Model input construction and grid/eval-point model calls.
+    functions:
       _make_model_inputs:
         purpose: Build time-major model inputs with columns [x_scaled, t_scaled].
         returns: '[n_time * n_x, 2]'
@@ -152,20 +138,40 @@ modules:
           log_N: '[n_time, n_species, n_x]'
           N: '[n_time, n_species, n_x]'
         status: active
+
+  PINNmizer.pinn.derivatives:
+    file: PINNmizer/pinn/derivatives.py
+    role: Autograd derivatives of model output with respect to scaled coordinates and conversion to physical derivatives.
+    functions:
       evaluate_log_model_with_derivatives_at_eval:
         purpose: Evaluate model and compute dlogN/dt, dlogN/dw, dN/dt, dN/dw at collocation points.
         derivative_source: autograd_through_model
         returns_shape: '[n_time, n_species, n_eval]'
         status: active
+
+  PINNmizer.pinn.pde_state:
+    file: PINNmizer/pinn/pde_state.py
+    role: Cached model, biological, mortality, recruitment, and optional IC state for PDE losses.
+    functions:
       compute_pde_state:
         purpose: Evaluate model, biological terms, mortality, and recruitment once per batch.
         status: active
+
+  PINNmizer.pinn.residual:
+    file: PINNmizer/pinn/residual.py
+    role: Continuous/off-grid PDE residual assembly.
+    functions:
       compute_pde_residual_from_state:
         purpose: Assemble log and physical/check residuals from cached state.
         status: active
       compute_pde_residual:
         purpose: Convenience wrapper for PDE residual only.
         status: active
+
+  PINNmizer.pinn.losses:
+    file: PINNmizer/pinn/losses.py
+    role: Continuous/off-grid PDE loss plus initial-condition and recruitment-boundary losses.
+    functions:
       compute_initial_condition_loss_from_state:
         purpose: Compute log initial-condition loss using cached t_min model output.
         status: active
@@ -183,44 +189,129 @@ modules:
         purpose: Assemble weighted PDE, IC, and BC loss components and return diagnostics.
         status: active
 
-  validation_steps.train_pde_only_single_species:
-    file: validation_steps/train_pde_only_single_species.py
-    role: Current single-species training executable.
+  PINNmizer.pinn.timestep_consistency:
+    file: PINNmizer/pinn/timestep_consistency.py
+    role: Fixed-grid timestep-consistency loss for temporal regularisation and diagnostics.
+    functions:
+      compute_timestep_consistency_loss:
+        purpose: Compare model prediction at `t + dt` against `mizer_grid_ops.step(...)` applied to model prediction at `t`.
+        inputs:
+          model: neural network mapping [x_scaled, t_scaled] to log_N
+          params: MizerTorchParams
+          n_pp: '[k_full]'
+          t0: scalar or '[n_pairs]' physical time tensor
+          dt: scalar tensor, float, or None
+        outputs:
+          loss_timestep: scalar tensor
+          diagnostics:
+            - residual_timestep_physical
+            - residual_timestep_log
+            - residual_timestep_relative
+            - N0_pred
+            - N1_pred
+            - N1_step
+            - n_pp_step
+            - physical_abs_mean
+            - physical_abs_max
+            - log_abs_mean
+            - log_abs_max
+            - relative_abs_mean
+            - relative_abs_max
+        residual_forms: [physical, log, relative]
+        default_detach_step_target: true
+        shape_convention:
+          N0_pred: '[n_pairs, n_species_or_1, n_w]'
+          N1_pred: '[n_pairs, n_species_or_1, n_w]'
+          N1_step: '[n_pairs, n_species_or_1, n_w]'
+        status: active_opt_in_training_loss
+
+  PINNmizer.training.loop:
+    file: PINNmizer/training/loop.py
+    role: Per-step training logic.
+    functions:
+      train_one_step:
+        purpose: Perform one sampled training step with optional adaptive weighting and diagnostics row output.
+        timestep_loss:
+          active_when: lambda_timestep > 0
+          weighted_by: lambda_timestep * loss_weights["timestep"] unless Wang weights are disabled
+          parameters:
+            - lambda_timestep
+            - timestep_loss_form
+            - detach_step_target
+            - timestep_dt
+            - timestep_n_pairs
+          diagnostics:
+            - loss_timestep
+            - lambda_timestep
+            - w_timestep
+            - weighted_loss_timestep
+            - grad_timestep_mean_for_weighting
+            - target_w_timestep
+            - timestep_physical_abs_mean
+            - timestep_physical_abs_max
+            - timestep_log_abs_mean
+            - timestep_log_abs_max
+            - timestep_relative_abs_mean
+            - timestep_relative_abs_max
+        known_risk:
+          - valid timestep-pair filtering can make t0 empty before compute_timestep_consistency_loss() if all sampled t0 + dt exceed t_max.
+        status: active
+
+  PINNmizer.training.weighting:
+    file: PINNmizer/training/weighting.py
+    role: Wang-style gradient-statistics weighting.
+    functions:
+      update_wang_gradient_weights_:
+        purpose: Update arbitrary non-PDE loss weights using PDE max gradient as anchor.
+        anchor: PDE weight fixed at 1.0
+        formula: target_weight = max_abs_grad(loss_pde) / mean_abs_grad(loss_component)
+        postprocessing:
+          - clip target to [weight_min, weight_max]
+          - hard-set or exponentially smooth depending on configuration
+        supports_loss_keys:
+          - ic
+          - bc
+          - timestep
+          - future non-PDE scalar losses
+        status: active
+
+  PINNmizer.training.train_pde_only_single_species:
+    file: PINNmizer/training/train_pde_only_single_species.py
+    role: Package-level single-species training workflow and CLI argument parsing.
     functions:
       MLP:
-        kind: nn.Module
+        kind: imported nn.Module
+        source: PINNmizer.pinn.models.MLP
         purpose: Simple fully-connected tanh network mapping [x_scaled, t_scaled] to species log_N.
         status: active
       initialise_final_bias_from_ic:
         purpose: Set final-layer bias to mean initial log abundance per species.
         status: active
-      causal_time_fraction:
-        purpose: Compute time-domain fraction for causal curriculum.
-        modes: [off, linear, step]
-        status: active
-      causal_t_max_current:
-        purpose: Convert causal fraction to physical t_max_current.
-        status: active
-      train_one_step:
-        purpose: Perform one sampled training step with optional adaptive weighting and diagnostics row output.
-        status: active
-      update_wang_gradient_weights_:
-        purpose: Update PDE/IC/BC weights using Wang-style gradient statistics.
-        anchor: PDE weight fixed at 1.0
-        status: active_but_candidate_for_module_split
-      save_final_predictions:
-        purpose: Export final model predictions on a fixed grid.
-        status: active
-      save_final_residual_sample:
-        purpose: Export final residual sample.
+      parse_args:
+        purpose: Expose training CLI/config including timestep-consistency options.
+        timestep_cli_args:
+          - --initial-w-timestep
+          - --lambda-timestep
+          - --timestep-loss-form {physical,log,relative}
+          - --detach-step-target
+          - --no-detach-step-target
+          - --timestep-dt
+          - --timestep-n-pairs
+        timestep_defaults:
+          lambda_timestep: 0.0
+          initial_w_timestep: 1.0
+          timestep_loss_form: physical
+          detach_step_target: true
+          timestep_dt: null
+          timestep_n_pairs: 1
         status: active
       main:
         purpose: Full command-line training run.
         status: active
 
-  validation_steps.pinn_diagnostics:
-    file: validation_steps/pinn_diagnostics.py
-    role: Deterministic fixed-grid diagnostics and plotting.
+  PINNmizer.diagnostics.fixed_grid:
+    file: PINNmizer/diagnostics/fixed_grid.py
+    role: Deterministic fixed-grid diagnostics for package training workflows.
     functions:
       make_fixed_pde_batch:
         purpose: Build deterministic Cartesian diagnostic grid.
@@ -231,18 +322,21 @@ modules:
       compute_fixed_diagnostics:
         purpose: Compute fixed-grid losses, residual metrics, PDE term magnitudes, BC diagnostics, and gradient diagnostics.
         status: active
-      append_diagnostic_row:
-        purpose: Append one diagnostic row to CSV.
-        status: active
-      save_training_diagnostic_plots:
-        purpose: Save standard diagnostic line plots from training and fixed diagnostic histories.
-        status: active
-      save_latest_metrics_table:
-        purpose: Save latest metrics as CSV and PNG table.
-        status: active
-      save_fixed_grid_fields_and_plots:
-        purpose: Save final fixed-grid fields and heatmaps.
-        status: active
+
+  PINNmizer.diagnostics.outputs:
+    file: PINNmizer/diagnostics/outputs.py
+    role: Diagnostic table/file outputs.
+    status: active
+
+  PINNmizer.diagnostics.plots:
+    file: PINNmizer/diagnostics/plots.py
+    role: Diagnostic plotting utilities.
+    status: active_optional_plotting
+
+  PINNmizer.diagnostics.fields:
+    file: PINNmizer/diagnostics/fields.py
+    role: Final fixed-grid fields and plots.
+    status: active_optional_plotting
 
 cross_cutting_invariants:
   - Preserve PyTorch-only differentiable loss path.
@@ -250,4 +344,6 @@ cross_cutting_invariants:
   - Preserve model input column order [x_scaled, t_scaled].
   - Preserve model output interpretation as log_N unless an explicit ADR changes it.
   - Preserve manual/analytical dg_dw path unless an explicit ADR changes it.
-  - Treat fixed-grid FFT operators as validation/reference unless explicitly changing the PDE path.
+  - Treat the continuous/off-grid PDE residual path and fixed-grid mizer/TMB path as distinct.
+  - Treat timestep consistency as a fixed-grid temporal regulariser distinct from the continuous PDE residual.
+  - Generated validation outputs belong under validation/outputs/, not root-level py_* folders.
