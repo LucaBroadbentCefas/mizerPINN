@@ -1,8 +1,24 @@
 # PINNmizer Project Brief
 
+## Repository status
+
+The canonical repository is now:
+
+```text
+LucaBroadbentCefas/mizerPINN
+```
+
+The previous repository:
+
+```text
+LucaBroadbentCefas/PINNs
+```
+
+is deprecated and expected to be deleted. Do not use `PINNs` for new source inspection, project summaries, context updates, or implementation advice unless explicitly asked for historical comparison.
+
 ## Purpose
 
-This repository develops a PyTorch PINN workflow for a mizer-style size-spectrum model. The immediate aim is to make the PDE residual, biological operators, training diagnostics, and experimental decisions explicit enough that a new ChatGPT session or a future contributor can recover the current project state quickly.
+This repository develops a PyTorch PINN workflow for a mizer-style size-spectrum model. The immediate aim is to make the PDE residual, biological operators, training diagnostics, validation pathways, and experimental decisions explicit enough that a new ChatGPT session or a future contributor can recover the current project state quickly.
 
 This document is a high-level entry point. More detailed conventions are in the other files in `docs/ai_context/`.
 
@@ -33,14 +49,16 @@ Current source inspection of `main` shows:
 - `PINNmizer/params.py` defines `MizerTorchParams`, grid helpers, scaling helpers, and shape validation.
 - `PINNmizer/io.py` loads exported mizer/TMB CSV inputs into tensors.
 - `PINNmizer/mizer_grid_ops.py` contains fixed-grid FFT-style mizer operators used as validation/reference machinery.
-- `PINNmizer/continuous_biology.py` contains the continuous/off-grid biological path used by the PDE residual.
-- `PINNmizer/pde_residual.py` samples PDE batches, evaluates the model and derivatives, assembles PDE/IC/recruitment-boundary losses, and returns diagnostics.
-- `validation_steps/train_pde_only_single_species.py` contains the current single-species training script with Wang-style gradient-statistic loss weighting, causal time curriculum, diagnostics, checkpointing, and final-output saving.
-- `validation_steps/pinn_diagnostics.py` contains deterministic fixed-grid diagnostics, gradient diagnostics, and plotting/export utilities.
+- `PINNmizer/biology/` contains the continuous/off-grid biological path used by the PDE residual.
+- `PINNmizer/pinn/` contains collocation sampling, model evaluation, autograd derivatives, PDE-state construction, residual assembly, and loss assembly.
+- `PINNmizer/training/` contains the package-level single-species training workflow, training loop helpers, loss weighting, checkpointing, configuration helpers, and output saving.
+- `PINNmizer/diagnostics/` contains deterministic fixed-grid diagnostics, metric/output helpers, plotting utilities, and final field exports.
+- `scripts/train_pde_only_single_species.py` is the thin executable wrapper for the current training workflow.
+- `validation/` contains fixtures, checks, comparisons, export scripts, and legacy validation material.
 
 ## Neural-network convention
 
-The active training script defines an MLP with:
+The active training workflow defines or imports an MLP with:
 
 - input dimension 2;
 - input columns `[x_scaled, t_scaled]`;
@@ -84,7 +102,7 @@ The fixed-grid FFT-style mizer operators remain important as validation/referenc
 
 ## Current training convention
 
-The current single-species training script supports:
+The current single-species training workflow supports:
 
 - PDE loss;
 - initial-condition loss;
@@ -97,8 +115,16 @@ The current single-species training script supports:
 - final-layer bias initialisation from the initial condition;
 - fixed-grid diagnostics and output surface diagnostics.
 
+The current executable entry point is:
+
+```bash
+python scripts/train_pde_only_single_species.py
+```
+
 ## Non-negotiable project rules
 
+- Use `LucaBroadbentCefas/mizerPINN` as the active repository.
+- Do not use `LucaBroadbentCefas/PINNs` as the active repository.
 - Do not infer file structure from memory when repository files are available.
 - Do not rewrite broad source files when a small patch is enough.
 - Do not change biological equations while implementing unrelated training or documentation changes.
@@ -106,6 +132,7 @@ The current single-species training script supports:
 - Do not detach tensors in the PDE loss path unless the reason is explicit and documented.
 - Preserve dtype/device consistency.
 - Preserve tensor shape contracts documented in `04_DATA_AND_SHAPES.md`.
+- Keep package code under `PINNmizer/` independent of `scripts/` and `validation/` imports.
 - Treat this documentation as a working context layer, not as a replacement for Git history or tests.
 
 ## Scope boundary
