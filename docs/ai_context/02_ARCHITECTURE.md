@@ -4,7 +4,7 @@
 
 This document records the intended structure of `mizerPINN` so that future edits keep the scientific code, training workflows, diagnostics, validation scripts, and generated outputs separated.
 
-The main rule is simple: reusable package code belongs under `PINNmizer/`; thin executable entry points belong under `scripts/`; validation fixtures and one-off comparison scripts belong under `validation/`; generated outputs belong under `runs/`; project context and design notes belong under `docs/`.
+The main rule is simple: reusable package code belongs under `PINNmizer/`; thin executable entry points belong under `scripts/`; validation fixtures and one-off comparison scripts belong under `validation/`; generated validation outputs belong under `validation/outputs/`; generated training outputs belong under `runs/`; project context and design notes belong under `docs/`.
 
 ## Top-level project split
 
@@ -23,6 +23,7 @@ PINNmizer/
     pde_state.py
     residual.py
     losses.py
+    timestep_consistency.py
   training/
     train_pde_only_single_species.py
     loop.py
@@ -46,6 +47,7 @@ scripts/
 
 validation/
   fixtures/
+  outputs/
   scripts/
     checks/
     comparisons/
@@ -62,7 +64,7 @@ docs/
 
 ## Architectural principle
 
-The project has two biological-computation paths. They are related, but they should not be casually merged.
+The project has two biological-computation paths plus one deliberate fixed-grid temporal consistency loss. They are related, but they should not be casually merged.
 
 ### 1. Fixed-grid mizer/TMB-style path
 
@@ -108,6 +110,27 @@ Boundary:
 - Do not replace analytical/manual `dg_dw` with autograd without an explicit design decision.
 - Diagnostics may detach tensors and use pandas, NumPy, or matplotlib after the differentiable computation is complete.
 
+### 3. Fixed-grid timestep-consistency loss
+
+Implemented in:
+
+```text
+PINNmizer/pinn/timestep_consistency.py
+```
+
+Purpose:
+
+- compare `N_theta(w_grid, t + dt)` with `mizer_grid_ops.step(n_pp, N_theta(w_grid, t), params, dt)`;
+- provide optional temporal regularisation and diagnostics on the fixed mizer grid;
+- reuse the existing fixed-grid `step(...)` operator rather than approximating this with the continuous PDE residual.
+
+Boundary:
+
+- The timestep-consistency loss intentionally uses the fixed-grid `mizer_grid_ops.step(...)` operator.
+- This is an exception to the usual separation between the continuous/off-grid PDE residual path and fixed-grid validation path.
+- Treat it as a separate temporal regularisation/validation loss, not as part of the continuous PDE residual.
+- Do not document or import it as `PINNmizer/timestep_consistency.py`; the actual implementation is `PINNmizer/pinn/timestep_consistency.py`.
+
 ## Package module map
 
 ### `PINNmizer/params.py`
@@ -115,12 +138,13 @@ Boundary:
 Purpose:
 
 - define `MizerTorchParams`;
-- hold grids, FFT/reference tensors, continuous biological parameters, interaction matrices, reproduction parameters, mortality parameters, and physical time bounds;
+- hold grids, FFT/reference tensors, continuous biological parameters, interaction matrices, reproduction parameters, mortality parameters, physical time bounds, and optional fixture timestep `dt`;
 - provide coordinate-scaling, dtype/device, and dimension helpers.
 
 Important responsibilities:
 
 - `MizerTorchParams`
+- optional `dt: Optional[torch.Tensor] = None`
 - `fish_start()`
 - `_params_dtype_device()`
 - `_to_param_tensor()`
@@ -145,6 +169,7 @@ Purpose:
 
 - load CSV exports from R/mizer/TMB into PyTorch tensors;
 - construct `MizerTorchParams`;
+- optionally load `dt.csv` into `params.dt`;
 - return `(params, n_init, n_pp)`.
 
 Boundary:
@@ -166,6 +191,7 @@ Boundary:
 
 - This is the fixed-grid validation/reference path.
 - Do not use this as the arbitrary off-grid PDE residual path.
+- It is deliberately reused by `PINNmizer/pinn/timestep_consistency.py` for the optional fixed-grid temporal consistency loss.
 - Do not place continuous collocation-point biology here.
 
 ### `PINNmizer/biology/*`
@@ -198,7 +224,8 @@ Purpose:
 - evaluate the neural network on scaled coordinates `[x_scaled, t_scaled]`;
 - compute model derivatives with autograd;
 - build cached PDE state;
-- assemble PDE residuals and loss components.
+- assemble PDE residuals and loss components;
+- provide the optional fixed-grid timestep-consistency loss.
 
 Current modules:
 
@@ -208,12 +235,14 @@ Current modules:
 - `pde_state.py`: cached state containing model outputs, growth, mortality, recruitment, and optional IC outputs.
 - `residual.py`: PDE residual assembly.
 - `losses.py`: PDE loss, initial-condition loss, and recruitment-boundary loss.
+- `timestep_consistency.py`: fixed-grid temporal consistency loss comparing `N_theta(w,t+dt)` with `step(N_theta(w,t), dt)` on the mizer weight grid.
 
 Boundary:
 
 - `PINNmizer/pinn/*` should not contain the full optimiser/training loop.
 - It may assemble loss terms, but optimiser steps and experiment orchestration belong under `PINNmizer/training/`.
 - This package area should remain the source of truth for residual shape conventions and derivative-scaling conventions.
+- `timestep_consistency.py` is not part of the continuous/off-grid PDE residual path, even though it lives under `PINNmizer/pinn/` because it is a neural-network loss term.
 
 ### `PINNmizer/training/*`
 
@@ -226,8 +255,8 @@ Purpose:
 Current modules:
 
 - `train_pde_only_single_species.py`: package-level single-species training workflow and CLI argument parsing.
-- `loop.py`: per-step training logic.
-- `weighting.py`: Wang-style gradient-statistics weighting.
+- `loop.py`: per-step training logic, including optional timestep-consistency loss integration.
+- `weighting.py`: Wang-style gradient-statistics weighting for arbitrary non-PDE scalar losses included in `raw_losses`.
 - `config.py`: causal curriculum and configuration helpers.
 - `outputs.py`: final training-output exports.
 - `checkpointing.py`: checkpoint saving.
@@ -300,8 +329,15 @@ Purpose:
 - R/mizer export checks;
 - fixed-grid comparisons;
 - smoke checks;
+- generated validation outputs;
 - legacy scripts;
 - one-off debugging scripts.
+
+Generated validation-output layout:
+
+- Generated validation outputs belong under `validation/outputs/`.
+- Root-level `py_*` validation outputs are legacy artifacts and should not be reintroduced.
+- Missing root-level folders such as `py_growth_derivative*`, `py_known*`, `py_mizer*`, and `py_pred*` should not be treated as a repository problem.
 
 Boundary:
 
@@ -313,7 +349,7 @@ Boundary:
 
 Purpose:
 
-- generated outputs only.
+- generated training and training-diagnostic outputs only.
 
 Boundary:
 
@@ -345,12 +381,16 @@ R/mizer/TMB CSV exports
 PINNmizer.io.load_mizer_inputs()
         |
         v
-MizerTorchParams + n_init + n_pp
+MizerTorchParams + n_init + n_pp + optional params.dt
         |
         +--> fixed-grid reference/validation path
         |       PINNmizer.mizer_grid_ops
         |
-        +--> continuous/off-grid PINN path
+        +--> fixed-grid timestep-consistency loss
+        |       PINNmizer.pinn.timestep_consistency
+        |       N_theta(w_grid, t + dt) versus step(n_pp, N_theta(w_grid, t), params, dt)
+        |
+        +--> continuous/off-grid PINN PDE path
                 PINNmizer.pinn.sampling.sample_pde_batch()
                 PINNmizer.pinn.model_eval / derivatives
                 model([x_scaled, t_scaled]) -> log_N
@@ -368,10 +408,12 @@ MizerTorchParams + n_init + n_pp
 - New continuous biological equation or analytical derivative: `PINNmizer/biology/*`.
 - Fixed-grid mizer/TMB reference operation: `PINNmizer/mizer_grid_ops.py`.
 - PDE residual assembly, derivative-scaling convention, or loss component: `PINNmizer/pinn/*`.
+- Fixed-grid timestep-consistency changes: `PINNmizer/pinn/timestep_consistency.py`, with the fixed-grid operator itself remaining in `PINNmizer/mizer_grid_ops.py`.
 - Training-loop logic, adaptive weighting, checkpointing, or CLI-backed training workflow: `PINNmizer/training/*`.
 - Thin executable entry point: `scripts/*`.
 - Diagnostic table/plot/surface output used by package training workflows: `PINNmizer/diagnostics/*`.
 - One-off validation, fixture export, comparison, or legacy debugging script: `validation/scripts/*`.
+- Generated validation outputs: `validation/outputs/*`.
 - Test/smoke check: `tests/` if a test suite exists, otherwise `validation/scripts/checks/` until tests are formalised.
 - Design decision or cross-chat context: `docs/ai_context/`.
 
@@ -412,7 +454,11 @@ These are known improvement targets, not blockers for current experiments.
    - Add a fixture manifest and clearer missing-file messages when the export format stabilises.
 
 7. **Architecture docs must stay current.**
-   - When moving files between `validation/`, `scripts/`, and `PINNmizer/`, update this document and the function registry.
+   - When moving files between `validation/`, `scripts/`, `PINNmizer/`, and generated-output locations, update this document and the function registry.
+
+8. **Timestep-consistency boundary must remain explicit.**
+   - The timestep loss deliberately crosses from a neural-network loss into the fixed-grid `step(...)` operator.
+   - Future edits should preserve the distinction between this fixed-grid temporal regulariser and the continuous/off-grid PDE residual.
 
 ## Recent issue to avoid repeating
 
@@ -423,3 +469,5 @@ ModuleNotFoundError: No module named 'validation.scripts.pde_output_diagnostics'
 ```
 
 The lesson is structural: package training code should not import post-run diagnostics from `validation/scripts/*`. If a diagnostic is part of the package training workflow, place it under `PINNmizer/diagnostics/` and import it from there. If a diagnostic is optional, guard only the optional diagnostic import/call and report a clear warning without hiding unrelated diagnostic errors.
+
+A separate documentation issue is now resolved: root-level `py_*` validation-output folders are legacy generated artifacts. Future sessions should expect generated validation outputs under `validation/outputs/` instead.
