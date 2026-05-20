@@ -75,7 +75,7 @@ class MizerTorchParams:
     # background mortality mode
     z0: Optional[torch.Tensor] = None
     mu_b_allometric: bool = False
-
+    dt: Optional[torch.Tensor] = None
 
 def fish_start(params: MizerTorchParams) -> int:
     return params.w_full.numel() - params.w.numel()

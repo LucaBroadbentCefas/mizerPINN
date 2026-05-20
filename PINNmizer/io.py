@@ -44,7 +44,7 @@ def load_mizer_inputs(
 
     n_init = load_mat(root, "n", dtype, device)
     n_pp = load_vec(root, "n_pp", dtype, device)
-
+    dt = maybe_vec(root, "dt", dtype, device)
     t_min = maybe_vec(root, "t_min", dtype, device)
     t_max = maybe_vec(root, "t_max", dtype, device)
 
@@ -106,6 +106,7 @@ def load_mizer_inputs(
 
         t_min=float(t_min[0]) if t_min is not None else 0.0,
         t_max=float(t_max[0]) if t_max is not None else 1.0,
+        dt=dt[0] if dt is not None else None,
     )
 
     return params, n_init, n_pp

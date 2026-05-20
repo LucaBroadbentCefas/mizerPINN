@@ -98,6 +98,13 @@ def train_one_step(
     timestep_out = None
     if lambda_timestep > 0.0:
         t0 = batch["t_eval"][:max(1, timestep_n_pairs)]
+
+        dt_value = getattr(params, "dt") if timestep_dt is None else timestep_dt
+        dt_tensor = torch.as_tensor(dt_value, dtype=t0.dtype, device=t0.device)
+        
+        valid = (t0 + dt_tensor) <= torch.as_tensor(params.t_max, dtype=t0.dtype, device=t0.device)
+        t0 = t0[valid]
+        
         loss_timestep, timestep_out = compute_timestep_consistency_loss(
             model=model,
             params=params,
