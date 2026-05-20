@@ -9,7 +9,7 @@ import torch.nn as nn
 from PINNmizer.pinn.sampling import sample_pde_batch
 from PINNmizer.pinn.losses import compute_pde_loss
 from PINNmizer.training.weighting import update_wang_gradient_weights_
-from PINNmizer.timestep_consistency import compute_timestep_consistency_loss
+from PINNmizer.pinn.timestep_consistency import compute_timestep_consistency_loss
 
 
 def scalar_min(x: torch.Tensor) -> float:

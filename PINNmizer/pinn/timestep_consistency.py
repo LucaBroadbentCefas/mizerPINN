@@ -7,15 +7,6 @@ from PINNmizer.params import MizerTorchParams, _params_dtype_device, scale_t, sc
 from PINNmizer.pinn.model_eval import evaluate_log_model_on_points
 
 
-def _as_1d_time(x: torch.Tensor | float, *, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
-    t = torch.as_tensor(x, dtype=dtype, device=device)
-    if t.ndim == 0:
-        t = t.reshape(1)
-    if t.ndim != 1:
-        raise ValueError(f"Expected scalar or 1D time tensor, got shape {tuple(t.shape)}")
-    return t
-
-
 def compute_timestep_consistency_loss(
     model,
     params: MizerTorchParams,
@@ -31,60 +22,63 @@ def compute_timestep_consistency_loss(
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor | str | bool]]:
     dtype, device = _params_dtype_device(params)
 
-    t0_vec = _as_1d_time(t0, dtype=dtype, device=device)
-    dt_raw = getattr(params, "dt", None) if dt is None else dt
-    if dt_raw is None:
-        raise ValueError("dt is required: pass dt explicitly because params.dt is unavailable.")
-    dt_vec = _as_1d_time(dt_raw, dtype=dtype, device=device)
-    if dt_vec.numel() == 1 and t0_vec.numel() > 1:
-        dt_vec = dt_vec.expand_as(t0_vec)
-    if dt_vec.shape != t0_vec.shape:
-        raise ValueError(f"dt shape {tuple(dt_vec.shape)} must match t0 shape {tuple(t0_vec.shape)} or be scalar.")
+    t0 = torch.as_tensor(t0, dtype=dtype, device=device).reshape(-1)
+    if dt is None:
+        if not hasattr(params, "dt"):
+            raise ValueError("dt is None and params has no dt attribute.")
+        dt = getattr(params, "dt")
+    dt_tensor = torch.as_tensor(dt, dtype=dtype, device=device)
 
-    t1_vec = t0_vec + dt_vec
+    t1 = t0 + dt_tensor
     t_max = torch.as_tensor(params.t_max, dtype=dtype, device=device)
-    if torch.any(t1_vec > t_max):
-        raise ValueError("All t0 + dt must satisfy t0 + dt <= t_max.")
+    if not torch.all(t1 <= t_max):
+        raise ValueError("All t0 + dt must be <= params.t_max.")
 
-    x_grid = torch.log(params.w.to(dtype=dtype, device=device))
-    x_scaled = scale_x(x_grid, params)
+    x_grid = torch.log(params.w).to(dtype=dtype, device=device)
+    x_grid_scaled = scale_x(x_grid, params)
 
-    t_scaled_0 = scale_t(t0_vec, params)
-    t_scaled_1 = scale_t(t1_vec, params)
-    out0 = evaluate_log_model_on_points(model=model, x_scaled=x_scaled, t_scaled=t_scaled_0, params=params)
-    out1 = evaluate_log_model_on_points(model=model, x_scaled=x_scaled, t_scaled=t_scaled_1, params=params)
+    pred0 = evaluate_log_model_on_points(model, x_grid_scaled, scale_t(t0, params), params)
+    pred1 = evaluate_log_model_on_points(model, x_grid_scaled, scale_t(t1, params), params)
 
-    N0_pred_all = out0["N"]
-    N1_pred_all = out1["N"]
+    N0_pred = pred0["N"]
+    N1_pred = pred1["N"]
 
     if species_idx is not None:
-        N0_pred_all = N0_pred_all[:, species_idx : species_idx + 1, :]
-        N1_pred_all = N1_pred_all[:, species_idx : species_idx + 1, :]
+        N0_pred = N0_pred[:, species_idx:species_idx + 1, :]
+        N1_pred = N1_pred[:, species_idx:species_idx + 1, :]
 
+    n_pairs = t0.numel()
     stepped = []
-    npp_steps = []
-    ops_e_growth = []
-    ops_mort = []
-    ops_rdd = []
-    for i in range(t0_vec.numel()):
-        n_for_step = N0_pred_all[i]
+    n_pp_step_list = []
+    ops_growth, ops_mort, ops_rdd = [], [], []
+
+    n_pp_in = n_pp.to(dtype=dtype, device=device)
+
+    for i in range(n_pairs):
+        n0_i = N0_pred[i]
         if detach_step_target:
-            n_for_step = n_for_step.detach()
-        n_pp_new, n_new, ops0 = step(n_pp=n_pp, n=n_for_step, params=params, dt=dt_vec[i])
-        stepped.append(n_new)
-        npp_steps.append(n_pp_new)
-        ops_e_growth.append(ops0["e_growth"])
-        ops_mort.append(ops0["mort"])
-        ops_rdd.append(ops0["rdd"])
+            n0_i = n0_i.detach()
+        n_pp_new_i, n1_step_i, ops_i = step(
+            n_pp=n_pp_in,
+            n=n0_i,
+            params=params,
+            dt=dt_tensor,
+        )
+        stepped.append(n1_step_i)
+        n_pp_step_list.append(n_pp_new_i)
+        if "e_growth" in ops_i:
+            ops_growth.append(ops_i["e_growth"])
+        if "mort" in ops_i:
+            ops_mort.append(ops_i["mort"])
+        if "rdd" in ops_i:
+            ops_rdd.append(ops_i["rdd"])
 
-    N1_step_all = torch.stack(stepped, dim=0)
-    n_pp_step = torch.stack(npp_steps, dim=0)
+    N1_step = torch.stack(stepped, dim=0)
+    n_pp_step = torch.stack(n_pp_step_list, dim=0)
 
-    residual_physical = N1_pred_all - N1_step_all
-    log_N1_pred = torch.log(torch.clamp(N1_pred_all, min=eps))
-    log_N1_step = torch.log(torch.clamp(N1_step_all, min=eps))
-    residual_log = log_N1_pred - log_N1_step
-    residual_relative = residual_physical / torch.clamp(torch.abs(N1_step_all), min=relative_eps)
+    residual_physical = N1_pred - N1_step
+    residual_log = torch.log(torch.clamp(N1_pred, min=eps)) - torch.log(torch.clamp(N1_step, min=eps))
+    residual_relative = residual_physical / torch.clamp(torch.abs(N1_step), min=relative_eps)
 
     if loss_form == "physical":
         loss_timestep = torch.mean(residual_physical ** 2)
@@ -93,20 +87,20 @@ def compute_timestep_consistency_loss(
     elif loss_form == "relative":
         loss_timestep = torch.mean(residual_relative ** 2)
     else:
-        raise ValueError("loss_form must be one of: physical, log, relative")
+        raise ValueError("loss_form must be one of {'physical','log','relative'}")
 
-    out_diag: dict[str, torch.Tensor | str | bool] = {
+    diagnostics: dict[str, torch.Tensor | str | bool] = {
         "loss_timestep": loss_timestep,
         "residual_timestep_physical": residual_physical,
         "residual_timestep_log": residual_log,
         "residual_timestep_relative": residual_relative,
-        "N0_pred": N0_pred_all,
-        "N1_pred": N1_pred_all,
-        "N1_step": N1_step_all,
+        "N0_pred": N0_pred,
+        "N1_pred": N1_pred,
+        "N1_step": N1_step,
         "n_pp_step": n_pp_step,
-        "t0": t0_vec,
-        "t1": t1_vec,
-        "dt": dt_vec,
+        "t0": t0,
+        "t1": t1,
+        "dt": dt_tensor,
         "loss_form": loss_form,
         "detach_step_target": detach_step_target,
         "physical_abs_mean": torch.mean(torch.abs(residual_physical)),
@@ -117,11 +111,15 @@ def compute_timestep_consistency_loss(
         "relative_abs_max": torch.max(torch.abs(residual_relative)),
         "has_nan_loss": torch.isnan(loss_timestep),
         "has_inf_loss": torch.isinf(loss_timestep),
-        "has_nan_physical": torch.isnan(residual_physical).any(),
-        "has_inf_physical": torch.isinf(residual_physical).any(),
-        "ops_e_growth": torch.stack(ops_e_growth, dim=0),
-        "ops_mort": torch.stack(ops_mort, dim=0),
-        "ops_rdd": torch.stack(ops_rdd, dim=0),
+        "has_nan_residual": torch.isnan(residual_physical).any(),
+        "has_inf_residual": torch.isinf(residual_physical).any(),
     }
 
-    return loss_timestep, out_diag
+    if ops_growth:
+        diagnostics["ops_e_growth"] = torch.stack(ops_growth, dim=0)
+    if ops_mort:
+        diagnostics["ops_mort"] = torch.stack(ops_mort, dim=0)
+    if ops_rdd:
+        diagnostics["ops_rdd"] = torch.stack(ops_rdd, dim=0)
+
+    return loss_timestep, diagnostics
