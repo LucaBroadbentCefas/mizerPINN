@@ -7,7 +7,7 @@ from PINNmizer.io import load_mizer_inputs
 from PINNmizer.mizer_grid_ops import mizer_operators
 
 
-OUT_DIR = Path("py_mizer_ops")
+OUT_DIR = Path("validation/outputs/mizer_ops")
 OUT_DIR.mkdir(exist_ok=True)
 
 

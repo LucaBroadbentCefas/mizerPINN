@@ -171,6 +171,7 @@ def train_one_step(
             + lambda_timestep * loss_weights["timestep"] * out["loss_timestep"]
         )
 
+
     out["loss"] = loss
 
     if not torch.isfinite(loss):
@@ -184,7 +185,7 @@ def train_one_step(
 
     residual_log = out["residual_log"].detach()
 
-    return {
+    base = {
         "step": step,
         "loss": float(out["loss"].detach().cpu()),
         "loss_pde": float(out["loss_pde"].detach().cpu()),
@@ -240,3 +241,4 @@ def train_one_step(
         "timestep_relative_abs_mean": float((timestep_out["relative_abs_mean"] if timestep_out is not None else torch.tensor(float("nan"))).detach().cpu()),
         "timestep_relative_abs_max": float((timestep_out["relative_abs_max"] if timestep_out is not None else torch.tensor(float("nan"))).detach().cpu()),
     }
+    return base
