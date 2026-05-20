@@ -9,6 +9,7 @@ import torch.nn as nn
 from PINNmizer.pinn.sampling import sample_pde_batch
 from PINNmizer.pinn.losses import compute_pde_loss
 from PINNmizer.training.weighting import update_wang_gradient_weights_
+from PINNmizer.timestep_consistency import compute_timestep_consistency_loss
 
 
 def scalar_min(x: torch.Tensor) -> float:
@@ -62,6 +63,10 @@ def train_one_step(
     lambda_ic: float,
     lambda_bc: float,
     disable_wang_weights: bool,
+    lambda_timestep: float,
+    timestep_loss_form: str,
+    detach_step_target: bool,
+    timestep_dt: float | None,
 ) -> dict:
     optimizer.zero_grad(set_to_none=True)
 
@@ -141,6 +146,23 @@ def train_one_step(
             + lambda_bc * loss_weights["bc"] * out["loss_bc"]
         )
 
+    timestep_out = None
+    if lambda_timestep > 0.0:
+        t0 = batch["t_eval"][:1]
+        loss_timestep, timestep_out = compute_timestep_consistency_loss(
+            model=model,
+            params=params,
+            n_pp=n_pp,
+            t0=t0,
+            dt=timestep_dt,
+            loss_form=timestep_loss_form,
+            detach_step_target=detach_step_target,
+            species_idx=0,
+            eps=eps,
+        )
+        loss = loss + lambda_timestep * loss_timestep
+        out["loss_timestep"] = loss_timestep
+
     out["loss"] = loss
 
     if not torch.isfinite(loss):
@@ -154,7 +176,7 @@ def train_one_step(
 
     residual_log = out["residual_log"].detach()
 
-    return {
+    base = {
         "step": step,
         "loss": float(out["loss"].detach().cpu()),
         "loss_pde": float(out["loss_pde"].detach().cpu()),
@@ -195,4 +217,15 @@ def train_one_step(
         "weight_update_hard_set": weight_stats["hard_set"],
         "causal_fraction": float(causal_fraction),
         "t_max_current": float(t_max_current),
+        "loss_timestep": float(out.get("loss_timestep", torch.tensor(0.0)).detach().cpu()),
+        "lambda_timestep": float(lambda_timestep),
+        "timestep_loss_form": timestep_loss_form,
+        "detach_step_target": bool(detach_step_target),
+        "timestep_physical_abs_mean": float(timestep_out["physical_abs_mean"].detach().cpu()) if timestep_out is not None else math.nan,
+        "timestep_physical_abs_max": float(timestep_out["physical_abs_max"].detach().cpu()) if timestep_out is not None else math.nan,
+        "timestep_log_abs_mean": float(timestep_out["log_abs_mean"].detach().cpu()) if timestep_out is not None else math.nan,
+        "timestep_log_abs_max": float(timestep_out["log_abs_max"].detach().cpu()) if timestep_out is not None else math.nan,
+        "timestep_relative_abs_mean": float(timestep_out["relative_abs_mean"].detach().cpu()) if timestep_out is not None else math.nan,
+        "timestep_relative_abs_max": float(timestep_out["relative_abs_max"].detach().cpu()) if timestep_out is not None else math.nan,
     }
+    return base
