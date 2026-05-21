@@ -60,7 +60,7 @@ The active model outputs `log_N`.
 N = exp(log_N)
 ```
 
-This is not just a numerical detail. Loss scaling, IC loss, and collapse diagnostics depend on this convention.
+This is not just a numerical detail. Loss scaling, IC loss, timestep consistency, and collapse diagnostics depend on this convention.
 
 ## Prey construction
 
@@ -365,27 +365,88 @@ log:      log(clamp(flux_left, eps)) - log(clamp(recruitment_flux, eps))
 relative: (flux_left - recruitment_flux) / clamp(abs(recruitment_flux), eps)
 ```
 
+## Timestep-consistency loss
+
+This is not the continuous PDE residual. It is a fixed-grid temporal consistency loss.
+
+For selected physical times `t0` and timestep `dt`:
+
+```text
+N0_pred = N_theta(w_grid, t0)
+N1_pred = N_theta(w_grid, t0 + dt)
+N1_step = step(n_pp, N0_pred, params, dt)
+```
+
+The three main model/step tensors use this shape convention:
+
+```text
+N0_pred: [n_pairs, n_species_or_1, n_w]
+N1_pred: [n_pairs, n_species_or_1, n_w]
+N1_step: [n_pairs, n_species_or_1, n_w]
+```
+
+Residual forms:
+
+```text
+physical:
+    r_ts = N1_pred - N1_step
+
+log:
+    r_ts = log(clamp(N1_pred, eps)) - log(clamp(N1_step, eps))
+
+relative:
+    r_ts = (N1_pred - N1_step) / clamp(abs(N1_step), relative_eps)
+```
+
+Loss:
+
+```text
+loss_timestep = mean(r_ts^2)
+```
+
+Detach convention:
+
+```text
+if detach_step_target = True:
+    step_target_input = detach(N0_pred)
+else:
+    step_target_input = N0_pred
+```
+
+If `detach_step_target=True`, `N0_pred` is detached before calling `step(...)`. Then the timestep loss mainly trains `N_theta(w,t+dt)` toward a fixed one-step target. If false, gradients can flow through the step target as well. This changes the optimisation problem and should be compared explicitly before interpreting training behaviour.
+
+Timestep source convention:
+
+```text
+if --timestep-dt is supplied:
+    dt = --timestep-dt
+else:
+    dt = params.dt
+```
+
+`params.dt` should represent the mizer timestep used by the fixture/export. `--timestep-dt` is an explicit experimental override.
+
 ## Wang-style gradient-statistic weighting
 
-Current training script uses PDE as the anchor:
+Current training uses PDE as the anchor:
 
 ```text
 w_pde = 1
 ```
 
-For IC and BC:
+For every non-PDE loss component currently present in `raw_losses`, including IC, BC, and timestep:
 
 ```text
-target_weight = max_abs_grad(loss_pde) / mean_abs_grad(loss_component)
+target_weight_component = max_abs_grad(loss_pde) / mean_abs_grad(loss_component)
 ```
 
 Then clipped to `[weight_min, weight_max]` and updated either by hard set or exponential smoothing:
 
 ```text
-w_component = (1 - alpha) * w_component + alpha * target_weight
+w_component = (1 - alpha) * w_component + alpha * target_weight_component
 ```
 
-This is an optimisation heuristic, not a biological equation.
+This is an optimisation heuristic, not a biological equation. Because timestep is now a possible non-PDE component, adding a future loss to `raw_losses` also adds it to the adaptive weighting system unless deliberately excluded.
 
 ## Causal time curriculum
 

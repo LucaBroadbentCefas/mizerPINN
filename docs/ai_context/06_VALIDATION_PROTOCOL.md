@@ -14,6 +14,7 @@ Use this hierarchy. Do not skip directly to training interpretation if lower-lev
 3. Continuous biological operator validation
 4. Manual derivative validation
 5. PDE residual validation on known/mizer-generated trajectories
+5b. Fixed-grid timestep-consistency validation
 6. Training-loss and optimisation diagnostics
 7. Biological plausibility diagnostics on trained output
 ```
@@ -30,6 +31,10 @@ Checks:
 - model output has shape `[n_time * n_x, n_species]`.
 - reshaped model output has shape `[n_time, n_species, n_x]`.
 - PDE residual has shape `[n_time, n_species, n_eval]`.
+- timestep tensors have expected shapes when timestep consistency is active:
+  - `N0_pred`: `[n_pairs, n_species_or_1, n_w]`;
+  - `N1_pred`: `[n_pairs, n_species_or_1, n_w]`;
+  - `N1_step`: `[n_pairs, n_species_or_1, n_w]`.
 - all differentiable path tensors are PyTorch tensors.
 - no accidental NumPy arrays enter PDE loss calculation.
 - dtype/device are consistent with `params.w`.
@@ -77,6 +82,7 @@ Interpretation:
 
 - Tiny absolute errors with large relative errors near zero are not necessarily important.
 - Large errors in encounter, growth, or predation mortality must be resolved before training interpretation.
+- Timestep consistency depends on `mizer_grid_ops.step(...)`; if `step(...)` is not validated, timestep-loss training is not interpretable.
 
 ## Stage 3: continuous biological operator validation
 
@@ -84,7 +90,7 @@ Goal: validate direct/off-grid biological outputs against fixed-grid reference o
 
 Relevant code:
 
-- `PINNmizer/continuous_biology.py`
+- `PINNmizer/biology/*`
 - fixed-grid reference outputs from `mizer_grid_ops.py` or R/mizer exports.
 
 Compare at `w_eval = params.w`:
@@ -166,19 +172,64 @@ Failure interpretation:
 - Large residual on a known mizer trajectory can mean PDE mismatch, derivative scaling error, discretisation mismatch, biological operator mismatch, or time-stepping mismatch.
 - Do not treat this as a neural-network problem until the residual implementation itself passes.
 
+## Stage 5b: fixed-grid timestep-consistency validation
+
+Goal: check whether the fixed-grid one-step temporal loss is numerically meaningful before using it as a training term.
+
+Relevant code:
+
+- `PINNmizer/pinn/timestep_consistency.py`
+- `PINNmizer/mizer_grid_ops.py`
+- `PINNmizer/training/loop.py`
+
+This validation stage is not the continuous PDE residual. It checks the optional fixed-grid temporal consistency loss:
+
+```text
+N0_pred = N_theta(w_grid, t0)
+N1_pred = N_theta(w_grid, t0 + dt)
+N1_step = step(n_pp, N0_pred, params, dt)
+```
+
+Checks:
+
+- `compute_timestep_consistency_loss()` returns a scalar finite loss.
+- `N0_pred`, `N1_pred`, and `N1_step` have expected shapes.
+- physical/log/relative residual summaries are finite.
+- backward pass gives nonzero gradients when `lambda_timestep > 0`.
+- compare `detach_step_target=True` and `detach_step_target=False`.
+- verify `dt` source: explicit `--timestep-dt` versus `params.dt`.
+- verify no selected `t0` has `t0 + dt > t_max`.
+- verify at least one valid timestep pair remains after filtering.
+- compare `--timestep-loss-form physical`, `log`, and `relative` before deciding which form is usable for training.
+
+Known source-code issue to watch, not patched here:
+
+```python
+valid = (t0 + dt_tensor) <= params.t_max
+t0 = t0[valid]
+```
+
+If all sampled times are too close to `t_max`, `t0` may become empty before calling `compute_timestep_consistency_loss()`. That can lead to empty tensor reductions or NaN timestep loss. A smoke check must include a case where at least one valid pair remains, and a failure-path check should be added before relying on long training runs.
+
+Acceptance criterion:
+
+If timestep loss is active in training, the run must report and inspect `loss_timestep`, `w_timestep`, `weighted_loss_timestep`, `grad_timestep_mean_for_weighting`, `target_w_timestep`, and timestep residual summaries. A falling total loss is not interpretable unless these are inspected.
+
 ## Stage 6: training diagnostics
 
-Goal: determine whether optimisation is balancing PDE, IC, and BC constraints and whether the output is physically meaningful.
+Goal: determine whether optimisation is balancing PDE, IC, BC, and timestep constraints and whether the output is physically meaningful.
 
-Current diagnostics already exported by the training workflow include:
+Current diagnostics exported by the training workflow include:
 
 - training losses;
-- PDE/IC/BC component losses;
+- PDE/IC/BC/timestep component losses;
 - total gradient norm;
 - sampled residual summaries;
 - fixed-grid losses;
 - fixed-grid residual summaries;
 - component-wise gradient norms;
+- Wang-weighting gradient statistics;
+- timestep physical/log/relative residual summaries when active;
 - PDE term RMS values;
 - boundary flux mismatch metrics;
 - predicted `N` range;
@@ -191,10 +242,24 @@ Minimum comparison matrix:
 | PDE only | Tests whether residual can be optimised without anchors. |
 | PDE + IC | Tests temporal propagation from initial state. |
 | PDE + IC + BC | Tests whether recruitment boundary stabilises or destabilises. |
-| Wang weights on | Tests adaptive balancing. |
+| PDE + IC + timestep | Tests whether fixed-grid one-step consistency improves temporal propagation. |
+| PDE + IC + BC + timestep | Tests whether all current constraints can be balanced together. |
+| Wang weights on | Tests adaptive balancing, including timestep if active. |
 | Wang weights off | Tests baseline fixed weighting. |
 | Causal curriculum on | Tests time-marching/curriculum benefit. |
 | Causal curriculum off | Tests whether curriculum is masking failure. |
+
+Timestep-active run checks:
+
+- inspect `loss_timestep`;
+- inspect `lambda_timestep`;
+- inspect `w_timestep`;
+- inspect `weighted_loss_timestep`;
+- inspect `grad_timestep_mean_for_weighting`;
+- inspect `target_w_timestep`;
+- inspect physical/log/relative timestep residual summaries;
+- verify that timestep pairs remain valid after filtering;
+- compare detach versus no-detach target mode.
 
 ## Stage 7: biological plausibility diagnostics
 
@@ -209,6 +274,7 @@ Inspect:
 - mortality `mu(w,t)` range;
 - residual spatial/time localisation;
 - boundary flux versus recruitment flux;
+- timestep residual localisation if timestep loss is active;
 - whether abundance collapses to near-zero;
 - whether abundance explodes in small or large weights;
 - whether dynamics are time-dependent enough to match expected behaviour.
@@ -222,9 +288,12 @@ A change should not be treated as successful merely because it runs. Minimum acc
 3. Expected gradient flow to model parameters.
 4. Fixed-grid diagnostics saved successfully.
 5. Relevant operator or derivative checks pass if the change touches biology.
-6. Training comparison against a baseline if the change touches optimisation.
-7. Documentation update in `01_CURRENT_STATE.md` and, if needed, an ADR.
+6. Timestep smoke checks pass if the change touches `dt`, `step(...)`, timestep loss, or timestep training integration.
+7. Training comparison against a baseline if the change touches optimisation.
+8. Documentation update in `01_CURRENT_STATE.md` and, if needed, an ADR.
 
-## Current known weak point in validation system
+## Current known weak points in validation system
 
 The project needs an explicit, reusable script for PDE residual validation on mizer-generated trajectories. That should become a priority before relying heavily on training results.
+
+The timestep-consistency path also needs explicit smoke coverage for `params.dt`, `--timestep-dt`, valid-pair filtering, residual-form scaling, and detach/no-detach gradient paths before interpreting timestep-active training runs.

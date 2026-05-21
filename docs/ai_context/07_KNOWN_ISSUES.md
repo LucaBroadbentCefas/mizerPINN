@@ -10,12 +10,12 @@ The PINN can reduce parts of the objective while producing very small abundance 
 
 ### Evidence so far
 
-Earlier logs and discussion showed cases where predicted `N` approached extremely small values while PDE residual terms could remain partly satisfied. The current training script now includes adaptive loss weighting, causal curriculum, final-bias initialisation from IC, and diagnostics partly in response to this risk.
+Earlier logs and discussion showed cases where predicted `N` approached extremely small values while PDE residual terms could remain partly satisfied. The current training script now includes adaptive loss weighting, causal curriculum, final-bias initialisation from IC, optional timestep consistency, and diagnostics partly in response to this risk.
 
 ### Plausible causes
 
 - PDE residual alone does not identify a unique biologically correct solution.
-- Initial and boundary conditions may be too weak, badly scaled, or underweighted.
+- Initial, boundary, and timestep constraints may be too weak, badly scaled, inactive, or underweighted.
 - Log-form losses and clamping can hide physically bad flux behaviour.
 - Temporal propagation may be weak over long time horizons.
 - The network may satisfy local derivative constraints without learning the intended trajectory.
@@ -25,6 +25,7 @@ Earlier logs and discussion showed cases where predicted `N` approached extremel
 
 - Initial-condition loss.
 - Recruitment-boundary loss implementation.
+- Optional fixed-grid timestep-consistency loss.
 - Wang-style gradient-statistic weighting.
 - Causal time curriculum.
 - Final-layer bias initialisation from IC.
@@ -34,7 +35,9 @@ Earlier logs and discussion showed cases where predicted `N` approached extremel
 
 - Compare PDE+IC with and without causal curriculum.
 - Compare Wang weights on/off.
+- Compare timestep loss inactive versus active.
 - Run explicit PDE residual validation on mizer-generated trajectories.
+- Run timestep smoke checks before interpreting timestep-active training.
 - Check `N_eval_min`, `N_eval_max`, `log_N_eval_min`, and fixed-grid abundance heatmaps after every run.
 
 ## 2. Boundary loss can be numerically misleading
@@ -66,7 +69,49 @@ The current code exports:
 - Compare log, physical, and relative boundary loss forms.
 - Confirm whether default `lambda_bc = 0.0` is intentional for current experiments.
 
-## 3. PDE residual on mizer trajectory not yet formalised
+## 3. Timestep loss can dominate or go invalid
+
+Status: active
+
+### Description
+
+The timestep-consistency loss compares model-predicted `N(w,t+dt)` with the fixed-grid `step(...)` projection from `N(w,t)`. Depending on residual form, `dt`, abundance scale, and Wang weights, this term can dominate the total objective or produce unstable gradients.
+
+This loss is implemented in `PINNmizer/pinn/timestep_consistency.py`. It is an optional fixed-grid temporal regulariser, not part of the continuous/off-grid PDE residual.
+
+### Current risks
+
+- physical-form residual can be very large on abundance scale;
+- log-form residual depends on clamping;
+- relative-form residual can explode where the step target is near zero;
+- Wang weighting may amplify or suppress the term based on gradient statistics;
+- selected `t0` values near `t_max` are filtered, and all pairs may be removed;
+- `detach_step_target=False` changes the gradient path substantially;
+- if `--timestep-dt` is omitted, behaviour depends on whether `params.dt` was loaded from `dt.csv`.
+
+### Required checks
+
+- inspect `loss_timestep`, `w_timestep`, `weighted_loss_timestep`;
+- inspect `grad_timestep_mean_for_weighting` and `target_w_timestep`;
+- check timestep residual physical/log/relative summaries;
+- check whether valid timestep pairs remain after filtering;
+- compare `--timestep-loss-form physical`, `log`, and `relative`;
+- compare `--detach-step-target` against `--no-detach-step-target`;
+- verify explicit `--timestep-dt` versus fixture `params.dt`;
+- run the timestep smoke check before interpreting training.
+
+### Source-code issue recorded, not fixed here
+
+Current `PINNmizer/training/loop.py` filters sampled timestep pairs with logic equivalent to:
+
+```python
+valid = (t0 + dt_tensor) <= params.t_max
+t0 = t0[valid]
+```
+
+If all sampled times are too close to `t_max`, `t0` may become empty before calling `compute_timestep_consistency_loss()`. That could produce empty tensor reductions or NaN timestep loss. This should be patched separately if timestep-active training is used seriously.
+
+## 4. PDE residual on mizer trajectory not yet formalised
 
 Status: active
 
@@ -85,7 +130,7 @@ If the residual is large on a known mizer trajectory, training failures may come
 - biological operator comparisons at the same states;
 - finite-difference sensitivity to time/weight resolution.
 
-## 4. Continuous kernel convention may not fully match mizer
+## 5. Continuous kernel convention may not fully match mizer
 
 Status: open
 
@@ -109,29 +154,31 @@ The direct continuous encounter and predation mortality path may differ from the
 - Compare predation mortality at `w_eval = params.w`.
 - Document accepted discrepancy or add an ADR if kernel support changes.
 
-## 5. Wang-style weighting is embedded in training script
+## 6. Wang-style weighting now supports arbitrary non-PDE losses
 
-Status: technical debt
+Status: active design risk, no longer module-location debt
 
 ### Description
 
-`update_wang_gradient_weights_()` currently lives in `validation_steps/train_pde_only_single_species.py`.
+The weighting code lives in `PINNmizer/training/weighting.py` and can update any non-PDE loss key included in the raw loss dictionary. PDE remains the anchor. For each non-PDE loss component included in `raw_losses`, including IC, BC, and timestep, the target weight is:
+
+```text
+target_weight = max_abs_grad(loss_pde) / mean_abs_grad(loss_component)
+```
+
+The target is clipped to `[weight_min, weight_max]`, then either hard-set or exponentially smoothed.
 
 ### Risk
 
-As experiments grow, loss weighting may become harder to test and reuse.
+This generality is useful for timestep loss, but future losses must be added deliberately because every included loss affects adaptive weights. A diagnostic-only or experimental scalar loss should not be added to `raw_losses` unless it is intended to participate in optimisation and Wang weighting.
 
-### Options
+### Required checks
 
-1. Leave it in the script while experiments are changing quickly.
-2. Move it into `PINNmizer/loss_weighting.py` once stable.
-3. Move all training utilities into a training package if multiple scripts start sharing them.
+- Confirm which loss keys are in `raw_losses` before interpreting weights.
+- Inspect `grad_*_mean_for_weighting` and `target_w_*` for every active component.
+- Do not describe Wang weighting as hard-coded only for PDE/IC/BC.
 
-### Current recommendation
-
-Do not refactor immediately unless the next task modifies weighting substantially. Refactor after the weighting design is stable.
-
-## 6. Training script is single-species only
+## 7. Training script is single-species only
 
 Status: intentional current limitation
 
@@ -148,10 +195,11 @@ Do not assume multi-species training works simply because tensor shapes allow sp
 - Validate tensor shapes for multi-species outputs.
 - Revisit loss aggregation across species.
 - Revisit boundary condition per species.
+- Revisit timestep-consistency species slicing and aggregation.
 - Revisit diagnostics and plotting.
 - Test gradient weighting across species and loss components.
 
-## 7. Historical experiment logging is incomplete
+## 8. Historical experiment logging is incomplete
 
 Status: active
 
@@ -176,7 +224,7 @@ After each important run, append one JSONL row with:
 - result interpretation;
 - next action.
 
-## 8. Matplotlib/diagnostic dependencies may fail in some environments
+## 9. Matplotlib/diagnostic dependencies may fail in some environments
 
 Status: lower priority
 
@@ -197,3 +245,36 @@ A training run may finish but fail during plotting/output diagnostics if the env
 ### Current recommendation
 
 If this failure recurs, use option 2 or 3 rather than letting plotting failure invalidate completed training.
+
+## 10. Root-level py_* validation-output folders are legacy artifacts
+
+Status: resolved as context/documentation issue; watch for regression
+
+### Description
+
+Generated validation outputs have been moved out of repository root and into:
+
+```text
+validation/outputs/
+```
+
+Root-level generated folders such as:
+
+```text
+py_growth_derivative*
+py_known*
+py_mizer*
+py_pred*
+```
+
+should be treated as legacy generated artifacts and should not be expected at repository root.
+
+### Risk
+
+Future sessions may misinterpret missing root-level `py_*` folders as a broken validation setup. That assumption is wrong under the current layout.
+
+### Required habit
+
+- Put generated validation outputs under `validation/outputs/`.
+- Do not reintroduce root-level generated validation-output folders.
+- Do not diagnose missing root-level `py_*` folders as a source-code failure.

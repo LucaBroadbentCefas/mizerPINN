@@ -1,10 +1,10 @@
 {
   "project": "PINNmizer",
   "repository": "LucaBroadbentCefas/mizerPINN",
-  "last_updated": "2026-05-19",
+  "last_updated": "2026-05-20",
   "source_ref": {
     "branch": "main",
-    "commit": "79c027aa3c12cc6675a7ae023394b186159c4b84"
+    "commit": "aa1db27be2160a0c6a04d170c7b95e698aa08d77"
   },
   "repository_status": {
     "canonical_repository": "LucaBroadbentCefas/mizerPINN",
@@ -68,6 +68,7 @@
     "PINNmizer/pinn/pde_state.py",
     "PINNmizer/pinn/residual.py",
     "PINNmizer/pinn/losses.py",
+    "PINNmizer/pinn/timestep_consistency.py",
     "PINNmizer/training/train_pde_only_single_species.py",
     "PINNmizer/training/loop.py",
     "PINNmizer/training/weighting.py",
@@ -97,6 +98,18 @@
     "derivative_source_for_model": "autograd",
     "derivative_source_for_dg_dw": "manual_analytical_biology_path"
   },
+  "timestep_consistency_conventions": {
+    "implementation": "PINNmizer/pinn/timestep_consistency.py",
+    "operator": "PINNmizer/mizer_grid_ops.py::step",
+    "role": "fixed-grid temporal regulariser and diagnostic loss, distinct from the continuous PDE residual",
+    "comparison": "N_theta(w_grid, t + dt) versus step(n_pp, N_theta(w_grid, t), params, dt)",
+    "residual_forms": ["physical", "log", "relative"],
+    "default_active": false,
+    "default_lambda_timestep": 0.0,
+    "default_detach_step_target": true,
+    "default_timestep_dt": null,
+    "dt_source_when_not_overridden": "params.dt loaded from optional dt.csv"
+  },
   "current_training_features": {
     "pde_loss": true,
     "initial_condition_loss": true,
@@ -105,7 +118,22 @@
     "wang_gradient_statistic_weighting": true,
     "causal_time_curriculum": true,
     "final_bias_initialisation_from_ic": true,
-    "fixed_grid_diagnostics": true
+    "fixed_grid_diagnostics": true,
+    "timestep_consistency_loss_implemented": true,
+    "timestep_consistency_loss_default_active": false,
+    "timestep_loss_wang_weighting_supported": true,
+    "params_dt_loaded_from_fixture": true
+  },
+  "generated_output_layout": {
+    "training_outputs": "runs/",
+    "validation_outputs": "validation/outputs/",
+    "legacy_root_validation_outputs": [
+      "py_growth_derivative*",
+      "py_known*",
+      "py_mizer*",
+      "py_pred*"
+    ],
+    "note": "Root-level py_* validation outputs are legacy generated artifacts and should not be expected or reintroduced."
   },
   "do_not_change_without_explicit_instruction": [
     "canonical repository LucaBroadbentCefas/mizerPINN",
@@ -115,11 +143,13 @@
     "manual dg_dw path",
     "continuous/off-grid PDE biology path",
     "fixed-grid mizer/TMB validation path",
+    "timestep consistency is a fixed-grid temporal regulariser distinct from the continuous PDE residual",
     "biological equations"
   ],
   "known_active_issues": [
     "near-zero or collapsed solution risk",
     "boundary loss sensitivity to clamping and scaling",
+    "timestep loss scale, dt selection, and valid-pair filtering can dominate or destabilise training",
     "need formal PDE residual validation on mizer-generated trajectories",
     "continuous kernel support convention may not fully match mizer",
     "recent package-structure refactor means imports and docs must be checked against current files",
