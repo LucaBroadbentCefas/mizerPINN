@@ -97,25 +97,35 @@ def train_one_step(
     loss_timestep = out["loss_pde"].new_zeros(())
     timestep_out = None
     if lambda_timestep > 0.0:
-        t0 = batch["t_eval"][:max(1, timestep_n_pairs)]
-
-        dt_value = getattr(params, "dt") if timestep_dt is None else timestep_dt
-        dt_tensor = torch.as_tensor(dt_value, dtype=t0.dtype, device=t0.device)
-        
-        valid = (t0 + dt_tensor) <= torch.as_tensor(params.t_max, dtype=t0.dtype, device=t0.device)
-        t0 = t0[valid]
-        
-        loss_timestep, timestep_out = compute_timestep_consistency_loss(
-            model=model,
-            params=params,
-            n_pp=n_pp,
-            t0=t0,
-            dt=timestep_dt,
-            loss_form=timestep_loss_form,
-            detach_step_target=detach_step_target,
-            species_idx=0,
-            eps=eps,
-        )
+      n_pairs = max(1, timestep_n_pairs)
+      
+      dt_value = params.dt if timestep_dt is None else timestep_dt
+      dt_tensor = torch.as_tensor(dt_value, dtype=out["loss_pde"].dtype, device=out["loss_pde"].device)
+      
+      t_min = torch.as_tensor(params.t_min, dtype=out["loss_pde"].dtype, device=out["loss_pde"].device)
+      t_max = torch.as_tensor(params.t_max, dtype=out["loss_pde"].dtype, device=out["loss_pde"].device)
+      t_current = torch.as_tensor(t_max_current, dtype=out["loss_pde"].dtype, device=out["loss_pde"].device)
+      
+      t0_max = torch.minimum(t_current, t_max) - dt_tensor
+      
+      if t0_max > t_min:
+          t0 = t_min + (t0_max - t_min) * torch.rand(
+              n_pairs,
+              dtype=out["loss_pde"].dtype,
+              device=out["loss_pde"].device,
+          )
+      
+          loss_timestep, timestep_out = compute_timestep_consistency_loss(
+              model=model,
+              params=params,
+              n_pp=n_pp,
+              t0=t0,
+              dt=timestep_dt,
+              loss_form=timestep_loss_form,
+              detach_step_target=detach_step_target,
+              species_idx=0,
+              eps=eps,
+          )
     out["loss_timestep"] = loss_timestep
 
     raw_losses = {

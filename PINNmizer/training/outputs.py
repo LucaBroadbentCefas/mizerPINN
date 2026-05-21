@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import torch
 import torch.nn as nn
+import sys
 
 from PINNmizer.params import scale_t, scale_x
 from PINNmizer.pinn.residual import compute_pde_residual
@@ -17,6 +18,30 @@ def save_json(x: dict, path: Path) -> None:
     with path.open("w", encoding="utf-8") as f:
         json.dump(x, f, indent=2)
 
+def save_run_command(args_path: Path, module: str = "scripts.train_pde_only_single_species") -> None:
+    tokens = sys.argv[1:]
+    parts = []
+    i = 0
+
+    while i < len(tokens):
+        if tokens[i].startswith("--") and i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+            parts.append(f"{tokens[i]} {tokens[i + 1]}")
+            i += 2
+        else:
+            parts.append(tokens[i])
+            i += 1
+
+    if not parts:
+        text = f"python -m {module}\n"
+    else:
+        lines = [f"python -m {module} ^"]
+        lines.extend(
+            f"  {part}{' ^' if j < len(parts) - 1 else ''}"
+            for j, part in enumerate(parts)
+        )
+        text = "\n".join(lines) + "\n"
+
+    args_path.write_text(text, encoding="utf-8")
 
 def save_history(history: list[dict], run_dir: Path) -> None:
     pd.DataFrame(history).to_csv(run_dir / "loss_history.csv", index=False)
@@ -53,3 +78,4 @@ def save_final_residual_sample(*, run_dir: Path, model: nn.Module, params, n_pp:
     def flat(name: str):
         return out[name][:, 0, :].detach().cpu().reshape(-1).numpy()
     pd.DataFrame({"t_eval": tt.reshape(-1).numpy(), "w_eval": ww.reshape(-1).numpy(), "residual_log": flat("residual_log"), "residual": flat("residual"), "log_N_eval": flat("log_N_eval"), "N_eval": flat("N_eval"), "g_eval": flat("g_eval"), "dg_dw": flat("dg_dw"), "mu_eval": flat("mu_eval")}).to_csv(run_dir / "final_residual_sample.csv", index=False)
+

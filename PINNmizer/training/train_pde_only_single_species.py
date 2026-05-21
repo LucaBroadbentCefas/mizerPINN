@@ -24,6 +24,7 @@ from PINNmizer.training.outputs import (
     save_final_residual_sample,
     save_history,
     save_json,
+    save_run_command,
 )
 from PINNmizer.training.loop import train_one_step, total_grad_norm_and_check, scalar_min, scalar_max, scalar_mean
 
@@ -202,6 +203,7 @@ def main() -> None:
     args = parse_args()
 
     run_dir = make_run_dir()
+    save_run_command(run_dir / "run_command.txt")
 
     params, n_init, n_pp = load_mizer_inputs(
         args.input_dir,
