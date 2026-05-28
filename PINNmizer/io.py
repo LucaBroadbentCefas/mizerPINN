@@ -42,7 +42,7 @@ def load_mizer_inputs(
     root = Path(outdir)
     device = torch.device(device)
 
-    n_init = load_mat(root, "n", dtype, device)
+    n_init = load_mat(root, "n_init_full", dtype, device)
     n_pp = load_vec(root, "n_pp", dtype, device)
     dt = maybe_vec(root, "dt", dtype, device)
     t_min = maybe_vec(root, "t_min", dtype, device)

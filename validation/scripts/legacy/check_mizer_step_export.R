@@ -162,8 +162,19 @@ export_mizer_inputs_for_python <- function(params,
 
   write_vec(params@rr_pp, "rr_pp")
   write_vec(params@cc_pp, "cc_pp")
+  if (ncol(n) > length(params@w)) {
+    stop("n has more columns than params@w; cannot create n_init_full.")
+  }
 
-  write_mat(n, "n")
+  n_init_full <- matrix(
+    0,
+    nrow = nrow(n),
+    ncol = length(params@w)
+  )
+
+  n_init_full[, seq_len(ncol(n))] <- as.matrix(n)
+  colnames(n_init_full) <- signif(params@w, 12)
+  write_mat(n_init_full, "n_init_full")
   write_vec(n_pp, "n_pp")
   write_vec(dt, "dt")
 

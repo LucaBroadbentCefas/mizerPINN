@@ -150,6 +150,19 @@ def _n_w(params: MizerTorchParams) -> int:
 def _k_full(params: MizerTorchParams) -> int:
     return params.w_full.numel()
   
+def active_grid_mask(params: MizerTorchParams) -> torch.Tensor:
+    dtype, device = _params_dtype_device(params)
+    w_max = _species_vector(params, "w_max")[:, None]
+    w = params.w.to(dtype=dtype, device=device)[None, :]
+    return w <= w_max
+
+
+def active_eval_mask(w_eval: torch.Tensor, params: MizerTorchParams) -> torch.Tensor:
+    dtype, device = _params_dtype_device(params)
+    w_max = _species_vector(params, "w_max")[:, None]
+    w_eval = w_eval.to(dtype=dtype, device=device)[None, :]
+    return w_eval <= w_max  
+
 ###REMOVE LATER.
 def validate_params_shapes(params: MizerTorchParams) -> None:
     n_species = _n_species(params)

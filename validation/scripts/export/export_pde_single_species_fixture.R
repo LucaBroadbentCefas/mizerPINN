@@ -1,5 +1,9 @@
 outdir <- "validation/fixtures/pde_single_species"
 
+library(mizer)
+
+params_1 <- newMultispeciesParams(NS_params@species_params[1,])
+
 export_mizer_inputs_for_python(
   params = params_1,
   n = params_1@initial_n,

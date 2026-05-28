@@ -30,7 +30,7 @@ from PINNmizer.training.loop import train_one_step, total_grad_norm_and_check, s
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 from PINNmizer.io import load_mizer_inputs
-from PINNmizer.params import scale_x, scale_t
+from PINNmizer.params import scale_x, scale_t, active_grid_mask
 from PINNmizer.diagnostics.fixed_grid import (
     make_fixed_pde_batch,
     make_fixed_pde_batch_from_csv,
@@ -64,6 +64,7 @@ def initialise_final_bias_from_ic(
     *,
     model: nn.Module,
     n_init: torch.Tensor,
+    params,
     eps: float,
 ) -> None:
     """
@@ -83,8 +84,15 @@ def initialise_final_bias_from_ic(
     if n_init.ndim == 1:
         n_init = n_init.reshape(1, -1)
 
-    target_bias = torch.log(torch.clamp(n_init, min=eps)).mean(dim=1)
-
+    log_init = torch.log(torch.clamp(n_init, min=eps))
+    mask = active_grid_mask(params).to(dtype=log_init.dtype, device=log_init.device)
+    
+    denom = mask.sum(dim=1)
+    if not bool((denom > 0).all().detach().cpu()):
+        raise ValueError("Cannot initialise final bias: active-grid mask has zero active entries.")
+    
+    target_bias = (log_init * mask).sum(dim=1) / denom
+        
     if final_linear.bias is None:
         raise ValueError("Final nn.Linear layer has no bias.")
 
@@ -243,6 +251,7 @@ def main() -> None:
         initialise_final_bias_from_ic(
             model=model,
             n_init=n_init,
+            params=params,
             eps=args.loss_eps,
         )
 

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import torch
 
-from PINNmizer.params import MizerTorchParams, _n_species, _n_w, _params_dtype_device
+from PINNmizer.params import (
+    MizerTorchParams,
+    _n_species,
+    _n_w,
+    _params_dtype_device,
+    active_grid_mask,
+    active_eval_mask,
+)
 from PINNmizer.pinn.pde_state import compute_pde_state
 from PINNmizer.pinn.residual import compute_pde_residual_from_state
 
@@ -33,6 +40,15 @@ def _scalar_tensor_max(x: torch.Tensor) -> torch.Tensor: return torch.max(x.deta
 def _fraction_leq(x: torch.Tensor, threshold: torch.Tensor) -> torch.Tensor: return (x.detach() <= threshold).to(dtype=x.dtype).mean()
 def _abs_quantile(x: torch.Tensor, q: float) -> torch.Tensor: return torch.quantile(torch.abs(x.detach()).reshape(-1), q)
 
+def _masked_square_mean(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    mask = mask.to(dtype=x.dtype, device=x.device)
+    mask = mask.expand_as(x)
+
+    denom = mask.sum()
+    if not bool((denom > 0).detach().cpu()):
+        raise ValueError("Masked loss has zero active entries.")
+
+    return ((x ** 2) * mask).sum() / denom
 
 def compute_initial_condition_loss_from_state(state: dict[str, object], params: MizerTorchParams, n_init: torch.Tensor, *, species_idx: int | None = None, eps: float = 1e-30) -> dict[str, torch.Tensor]:
     dtype, device = _params_dtype_device(params)
@@ -47,7 +63,12 @@ def compute_initial_condition_loss_from_state(state: dict[str, object], params: 
         N_pred = N_pred[species_idx: species_idx + 1]
         log_N_target = log_N_target[species_idx: species_idx + 1]
         n_init = n_init[species_idx: species_idx + 1]
-    loss_ic = ((log_N_pred - log_N_target) ** 2).mean()
+    ic_mask = active_grid_mask(params).to(dtype=log_N_pred.dtype, device=log_N_pred.device)
+
+    if species_idx is not None:
+       ic_mask = ic_mask[species_idx: species_idx + 1]
+
+    loss_ic = _masked_square_mean(log_N_pred - log_N_target, ic_mask)
     return {"loss_ic": loss_ic, "log_N_ic_pred": log_N_pred, "N_ic_pred": N_pred, "log_N_ic_target": log_N_target, "N_ic_target": n_init}
 
 
@@ -81,7 +102,8 @@ def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchPa
     if residual_form == "log": residual = residual_out["residual_log"]
     elif residual_form == "physical": residual = residual_out["residual"]
     else: raise ValueError("residual_form must be either 'log' or 'physical'.")
-    loss_pde = (residual ** 2).mean()
+    pde_mask = active_eval_mask(batch["w_eval"], params)[None, :, :]
+    loss_pde = _masked_square_mean(residual, pde_mask)
     dtype, device = _params_dtype_device(params)
     zero = torch.zeros((), dtype=dtype, device=device)
     if lambda_ic != 0.0:

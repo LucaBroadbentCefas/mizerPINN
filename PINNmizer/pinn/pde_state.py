@@ -5,7 +5,13 @@ import torch
 from PINNmizer.biology.growth import compute_growth_direct_at_eval
 from PINNmizer.biology.mortality import compute_total_mortality_direct_at_eval_from_growth_grid
 from PINNmizer.biology.recruitment import compute_recruitment_direct_from_growth_grid
-from PINNmizer.params import MizerTorchParams, _params_dtype_device, _t_limits, scale_t
+from PINNmizer.params import (
+    MizerTorchParams,
+    _params_dtype_device,
+    _t_limits,
+    scale_t,
+    active_grid_mask,
+)
 from PINNmizer.pinn.derivatives import evaluate_log_model_with_derivatives_at_eval
 from PINNmizer.pinn.model_eval import evaluate_log_model_on_points
 
@@ -45,10 +51,12 @@ def compute_pde_state(model, batch: dict[str, torch.Tensor], params: MizerTorchP
     growth_eval_by_time, growth_grid_by_time, mortality_by_time, recruitment_by_time = [], [], [], []
     for tt in range(n_time):
         N_t = N_grid[tt]
-        growth_eval_t = compute_growth_direct_at_eval(n_pp=n_pp, n_grid=N_t, w_eval=w_eval, params=params)
-        growth_grid_t = compute_growth_direct_at_eval(n_pp=n_pp, n_grid=N_t, w_eval=params.w, params=params)
-        mortality_t = compute_total_mortality_direct_at_eval_from_growth_grid(N_pred_grid=N_t, w_eval=w_eval, params=params, growth_grid=growth_grid_t)
-        recruitment_t = compute_recruitment_direct_from_growth_grid(N_grid=N_t, params=params, growth_grid=growth_grid_t)
+        active_mask = active_grid_mask(params).to(dtype=N_t.dtype, device=N_t.device)
+        N_t_bio = N_t * active_mask
+        growth_eval_t = compute_growth_direct_at_eval(n_pp=n_pp, n_grid=N_t_bio, w_eval=w_eval, params=params)
+        growth_grid_t = compute_growth_direct_at_eval(n_pp=n_pp, n_grid=N_t_bio, w_eval=params.w, params=params)
+        mortality_t = compute_total_mortality_direct_at_eval_from_growth_grid(N_pred_grid=N_t_bio, w_eval=w_eval, params=params, growth_grid=growth_grid_t)
+        recruitment_t = compute_recruitment_direct_from_growth_grid(N_grid=N_t_bio, params=params, growth_grid=growth_grid_t)
         growth_eval_by_time.append(growth_eval_t)
         growth_grid_by_time.append(growth_grid_t)
         mortality_by_time.append(mortality_t)
