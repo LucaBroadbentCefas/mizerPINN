@@ -20,6 +20,7 @@ Earlier logs and discussion showed cases where predicted `N` approached extremel
 - Temporal propagation may be weak over long time horizons.
 - The network may satisfy local derivative constraints without learning the intended trajectory.
 - Biological operator or derivative mismatch may create a residual that is easier to satisfy than the true mizer dynamics.
+- Collocation sampling may underrepresent difficult residual regions.
 
 ### Current mitigations
 
@@ -28,6 +29,7 @@ Earlier logs and discussion showed cases where predicted `N` approached extremel
 - Optional fixed-grid timestep-consistency loss.
 - Wang-style gradient-statistic weighting.
 - Causal time curriculum.
+- Planned R3/Causal R3 collocation to focus on high-residual paired points.
 - Final-layer bias initialisation from IC.
 - Fixed-grid diagnostics and output plots.
 
@@ -36,6 +38,7 @@ Earlier logs and discussion showed cases where predicted `N` approached extremel
 - Compare PDE+IC with and without causal curriculum.
 - Compare Wang weights on/off.
 - Compare timestep loss inactive versus active.
+- Compare uniform collocation against R3/Causal R3 after R3 is implemented.
 - Run explicit PDE residual validation on mizer-generated trajectories.
 - Run timestep smoke checks before interpreting timestep-active training.
 - Check `N_eval_min`, `N_eval_max`, `log_N_eval_min`, and fixed-grid abundance heatmaps after every run.
@@ -172,6 +175,8 @@ The target is clipped to `[weight_min, weight_max]`, then either hard-set or exp
 
 This generality is useful for timestep loss, but future losses must be added deliberately because every included loss affects adaptive weights. A diagnostic-only or experimental scalar loss should not be added to `raw_losses` unless it is intended to participate in optimisation and Wang weighting.
 
+If Causal R3 weights the PDE loss, Wang weighting should see the actual PDE objective being optimised; otherwise adaptive weighting diagnostics become hard to interpret.
+
 ### Required checks
 
 - Confirm which loss keys are in `raw_losses` before interpreting weights.
@@ -196,10 +201,86 @@ Do not assume multi-species training works simply because tensor shapes allow sp
 - Revisit loss aggregation across species.
 - Revisit boundary condition per species.
 - Revisit timestep-consistency species slicing and aggregation.
+- Revisit R3 score aggregation across species.
 - Revisit diagnostics and plotting.
 - Test gradient weighting across species and loss components.
 
-## 8. Historical experiment logging is incomplete
+## 8. R3/Causal R3 can focus training on artefacts if the residual is wrong
+
+Status: planned feature risk
+
+### Description
+
+R3 retains high-residual paired collocation points and resamples low-residual points. This can improve coverage of difficult regions, but it also means the method will concentrate training effort wherever the current residual is large.
+
+### Risk
+
+If the residual implementation is wrong, the biological operator is mismatched, or active-size masking is incomplete, R3 will concentrate points on artefactual errors rather than fixing the underlying model. R3 is therefore not a replacement for residual validation.
+
+### Required checks
+
+- Validate PDE residual on known/mizer-generated trajectories before treating R3 results as meaningful.
+- Compare R3 against uniform collocation using fixed-grid diagnostics, not only training batch loss.
+- Inspect where retained points concentrate if results look pathological.
+- Keep active `w_max` masking in both sampling and loss/scoring.
+
+## 9. R3 is paired geometry, not retained marginal x/t vectors
+
+Status: planned feature risk
+
+### Description
+
+Daw-style R3 retains/replaces collocation points as pairs `(x_j, t_j)`. Retaining separate `x_eval` and `t_eval` vectors would create new Cartesian combinations that were never scored.
+
+### Risk
+
+A superficially simple implementation that only changes `sample_pde_batch()` to retain `x_eval` and `t_eval` separately is not equivalent to R3.
+
+### Required checks
+
+- R3 population should be stored as `[n_pair, 2]` with physical columns `[x, t]`.
+- Paired residual tensors should be `[n_species, n_pair]`.
+- Paired derivative/state/loss paths should be used for R3.
+- Retained points should remain unchanged across an update.
+- Released points should be replaced as full `(x,t)` pairs.
+
+## 10. Causal R3 and old causal curriculum should not be silently stacked
+
+Status: planned feature risk
+
+### Description
+
+The existing causal curriculum truncates the sampled time horizon. Causal R3 uses a smooth gate over paired points. These are not the same mechanism.
+
+### Risk
+
+Using both at once makes it unclear whether improvements or failures come from time-domain truncation, causal gate weighting, R3 resampling, or their interaction.
+
+### Required checks
+
+- Default R3/Causal R3 runs should use `--causal-curriculum off`.
+- If stacking is later allowed, document it explicitly and run ablations.
+- Add a CLI guard unless a future ADR deliberately permits stacking.
+
+## 11. Exact paired R3 may be much slower than Cartesian sampling
+
+Status: planned feature risk
+
+### Description
+
+The current Cartesian path evaluates nonlocal biology once per sampled time and multiple weights per time. Exact paired R3 may require biology at many unique paired times.
+
+### Risk
+
+A large `--r3-population-size` may make training much slower than expected.
+
+### Required checks
+
+- Start R3 with small smoke runs.
+- Compare runtime per step against uniform collocation.
+- Do not call a cheaper Cartesian approximation Daw-style R3. Name it explicitly if added later.
+
+## 12. Historical experiment logging is incomplete
 
 Status: active
 
@@ -224,7 +305,7 @@ After each important run, append one JSONL row with:
 - result interpretation;
 - next action.
 
-## 9. Matplotlib/diagnostic dependencies may fail in some environments
+## 13. Matplotlib/diagnostic dependencies may fail in some environments
 
 Status: lower priority
 
@@ -246,7 +327,7 @@ A training run may finish but fail during plotting/output diagnostics if the env
 
 If this failure recurs, use option 2 or 3 rather than letting plotting failure invalidate completed training.
 
-## 10. Root-level py_* validation-output folders are legacy artifacts
+## 14. Root-level py_* validation-output folders are legacy artifacts
 
 Status: resolved as context/documentation issue; watch for regression
 
