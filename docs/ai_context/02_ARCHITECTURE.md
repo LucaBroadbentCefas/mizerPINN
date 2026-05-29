@@ -2,9 +2,9 @@
 
 ## Purpose of this document
 
-This document records the intended structure of `mizerPINN` so that future edits keep the scientific code, training workflows, diagnostics, validation scripts, and generated outputs separated.
+This document records the intended structure of `mizerPINN` so that future edits keep scientific code, training workflows, diagnostics, validation scripts, generated outputs, and project context separated.
 
-The main rule is simple: reusable package code belongs under `PINNmizer/`; thin executable entry points belong under `scripts/`; validation fixtures and one-off comparison scripts belong under `validation/`; generated validation outputs belong under `validation/outputs/`; generated training outputs belong under `runs/`; project context and design notes belong under `docs/`.
+The main rule is simple: reusable package code belongs under `PINNmizer/`; thin executable entry points belong under `scripts/`; validation fixtures and one-off comparison scripts belong under `validation/`; generated validation outputs belong under `validation/outputs/`; generated training outputs belong under `runs/`; project context and design notes belong under `docs/ai_context/`.
 
 ## Top-level project split
 
@@ -18,6 +18,7 @@ PINNmizer/
     recruitment.py
   pinn/
     sampling.py
+    r3.py                         # planned/minimal R3 and Causal R3 state/sampling module
     model_eval.py
     derivatives.py
     pde_state.py
@@ -62,9 +63,11 @@ docs/
   design notes, architecture notes, prompts, and experiment records
 ```
 
+`PINNmizer/pinn/r3.py` is listed as the intended location for the R3/Causal R3 addition. Future assistants must inspect the source before assuming it already exists in the checked-out repository.
+
 ## Architectural principle
 
-The project has two biological-computation paths plus one deliberate fixed-grid temporal consistency loss. They are related, but they should not be casually merged.
+The project has two biological-computation paths, one deliberate fixed-grid temporal consistency loss, and a planned paired-collocation path for R3. These are related, but they should not be casually merged.
 
 ### 1. Fixed-grid mizer/TMB-style path
 
@@ -87,28 +90,34 @@ Boundary:
 - Keep FFT/reference logic here unless a function is genuinely shared by both paths.
 - If a function is shared by both fixed-grid and continuous paths, consider moving it to a neutral module rather than making continuous biology depend on `mizer_grid_ops.py`.
 
-### 2. Continuous/off-grid PINN PDE path
+### 2. Continuous/off-grid Cartesian PINN PDE path
 
 Implemented mainly in:
 
 ```text
 PINNmizer/biology/*
-PINNmizer/pinn/*
+PINNmizer/pinn/sampling.py
+PINNmizer/pinn/model_eval.py
+PINNmizer/pinn/derivatives.py
+PINNmizer/pinn/pde_state.py
+PINNmizer/pinn/residual.py
+PINNmizer/pinn/losses.py
 ```
 
 Purpose:
 
 - evaluate biological quantities at arbitrary physical weights `w_eval = exp(x_eval)`;
 - compute model derivatives using PyTorch autograd;
-- assemble the PDE residual and loss terms;
-- preserve gradient flow from the loss back to model parameters.
+- assemble the PDE residual and PDE/IC/BC loss terms;
+- preserve gradient flow from the loss back to model parameters;
+- keep the current uniform Cartesian collocation path as the default baseline.
 
 Boundary:
 
 - Do not introduce NumPy into differentiable PDE-loss calculations.
 - Do not detach tensors inside differentiable loss paths unless deliberately producing diagnostics.
 - Do not replace analytical/manual `dg_dw` with autograd without an explicit design decision.
-- Diagnostics may detach tensors and use pandas, NumPy, or matplotlib after the differentiable computation is complete.
+- Diagnostics may detach tensors and use pandas, NumPy, or matplotlib after differentiable computation is complete.
 
 ### 3. Fixed-grid timestep-consistency loss
 
@@ -122,7 +131,7 @@ Purpose:
 
 - compare `N_theta(w_grid, t + dt)` with `mizer_grid_ops.step(n_pp, N_theta(w_grid, t), params, dt)`;
 - provide optional temporal regularisation and diagnostics on the fixed mizer grid;
-- reuse the existing fixed-grid `step(...)` operator rather than approximating this with the continuous PDE residual.
+- reuse the fixed-grid `step(...)` operator rather than approximating this with the continuous PDE residual.
 
 Boundary:
 
@@ -131,6 +140,36 @@ Boundary:
 - Treat it as a separate temporal regularisation/validation loss, not as part of the continuous PDE residual.
 - Do not document or import it as `PINNmizer/timestep_consistency.py`; the actual implementation is `PINNmizer/pinn/timestep_consistency.py`.
 
+### 4. Planned paired R3 / Causal R3 collocation path
+
+Intended implementation locations:
+
+```text
+PINNmizer/pinn/r3.py
+PINNmizer/pinn/derivatives.py
+PINNmizer/pinn/pde_state.py
+PINNmizer/pinn/losses.py
+PINNmizer/training/loop.py
+PINNmizer/training/train_pde_only_single_species.py
+```
+
+Purpose:
+
+- maintain a fixed-size population of paired collocation points `(x_j, t_j)`;
+- score points by PDE residual magnitude;
+- retain high-residual points and resample low-residual points;
+- optionally apply a smooth causal gate to R3 scores and/or PDE loss;
+- expose R3 as a selectable training collocation strategy while preserving the original uniform Cartesian strategy.
+
+Boundary:
+
+- R3 is not merely a different loader for `sample_pde_batch()`.
+- Exact R3 needs paired tensor geometry and therefore paired derivative, PDE-state, and loss functions.
+- The original Cartesian residual shape is `[n_time, n_species, n_eval]`.
+- The paired R3 residual shape is `[n_species, n_pair]`.
+- A Cartesian approximation to R3 must not be called Daw-style R3; if added, name it explicitly such as `cartesian-r3-approx`.
+- Causal R3 should not be silently stacked with the existing causal time curriculum, because the old curriculum truncates the sampled time horizon while Causal R3 gates paired points smoothly.
+
 ## Package module map
 
 ### `PINNmizer/params.py`
@@ -138,8 +177,8 @@ Boundary:
 Purpose:
 
 - define `MizerTorchParams`;
-- hold grids, FFT/reference tensors, continuous biological parameters, interaction matrices, reproduction parameters, mortality parameters, physical time bounds, and optional fixture timestep `dt`;
-- provide coordinate-scaling, dtype/device, and dimension helpers.
+- hold grids, FFT/reference tensors, continuous biological parameters, interaction matrices, reproduction parameters, mortality parameters, physical time bounds, active-size vectors, and optional fixture timestep `dt`;
+- provide coordinate-scaling, active-mask, dtype/device, and dimension helpers.
 
 Important responsibilities:
 
@@ -154,6 +193,7 @@ Important responsibilities:
 - `_t_limits()`
 - `scale_x()` / `scale_t()`
 - `_n_species()` / `_n_w()` / `_k_full()`
+- `active_grid_mask()` / `active_eval_mask()`
 - `validate_params_shapes()`
 
 Boundary:
@@ -161,7 +201,6 @@ Boundary:
 - Should not implement biological operators.
 - Should not run training.
 - Should not contain experiment-specific logic.
-- Shape checking is appropriate here for now, but may later move to a dedicated validation/checks module.
 
 ### `PINNmizer/io.py`
 
@@ -174,10 +213,9 @@ Purpose:
 
 Boundary:
 
-- Should preserve caller-supplied dtype and device.
-- Should not perform biological transformations beyond loading and basic construction.
-- Should not run training or diagnostics.
-- Missing-file errors should be explicit and project-specific where possible.
+- Preserve caller-supplied dtype and device.
+- Do not perform biological transformations beyond loading and basic construction.
+- Do not run training or diagnostics.
 
 ### `PINNmizer/mizer_grid_ops.py`
 
@@ -191,7 +229,7 @@ Boundary:
 
 - This is the fixed-grid validation/reference path.
 - Do not use this as the arbitrary off-grid PDE residual path.
-- It is deliberately reused by `PINNmizer/pinn/timestep_consistency.py` for the optional fixed-grid temporal consistency loss.
+- It is deliberately reused by `PINNmizer/pinn/timestep_consistency.py` for optional fixed-grid temporal consistency.
 - Do not place continuous collocation-point biology here.
 
 ### `PINNmizer/biology/*`
@@ -221,20 +259,22 @@ Boundary:
 Purpose:
 
 - sample PDE collocation batches;
+- maintain optional R3 paired collocation populations once implemented;
 - evaluate the neural network on scaled coordinates `[x_scaled, t_scaled]`;
 - compute model derivatives with autograd;
 - build cached PDE state;
 - assemble PDE residuals and loss components;
 - provide the optional fixed-grid timestep-consistency loss.
 
-Current modules:
+Current and intended modules:
 
-- `sampling.py`: random PDE collocation batches and scaled/physical coordinate vectors.
-- `model_eval.py`: model input construction and grid/eval-point model calls.
-- `derivatives.py`: autograd derivatives of model outputs with respect to scaled coordinates, then conversion to physical derivatives.
-- `pde_state.py`: cached state containing model outputs, growth, mortality, recruitment, and optional IC outputs.
-- `residual.py`: PDE residual assembly.
-- `losses.py`: PDE loss, initial-condition loss, and recruitment-boundary loss.
+- `sampling.py`: current random Cartesian PDE collocation batches and scaled/physical coordinate vectors.
+- `r3.py`: intended minimal R3/Causal R3 population, scoring, retain/resample, and causal gate utilities.
+- `model_eval.py`: model input construction and Cartesian grid/eval-point model calls.
+- `derivatives.py`: autograd derivatives of model outputs with respect to scaled coordinates, then conversion to physical derivatives. Add paired derivative evaluation here for R3.
+- `pde_state.py`: cached state containing model outputs, growth, mortality, recruitment, and optional IC outputs. Add paired PDE state here for R3.
+- `residual.py`: PDE residual assembly shared by Cartesian and paired state where possible.
+- `losses.py`: PDE loss, initial-condition loss, recruitment-boundary loss, and paired PDE loss for R3 once implemented.
 - `timestep_consistency.py`: fixed-grid temporal consistency loss comparing `N_theta(w,t+dt)` with `step(N_theta(w,t), dt)` on the mizer weight grid.
 
 Boundary:
@@ -243,6 +283,7 @@ Boundary:
 - It may assemble loss terms, but optimiser steps and experiment orchestration belong under `PINNmizer/training/`.
 - This package area should remain the source of truth for residual shape conventions and derivative-scaling conventions.
 - `timestep_consistency.py` is not part of the continuous/off-grid PDE residual path, even though it lives under `PINNmizer/pinn/` because it is a neural-network loss term.
+- `r3.py` should manage collocation population/state and causal gating; it should not compute biology or perform optimiser steps.
 
 ### `PINNmizer/training/*`
 
@@ -250,12 +291,12 @@ Purpose:
 
 - provide reusable training workflow components;
 - keep command-line scripts thin;
-- coordinate sampling, loss computation, adaptive weighting, optimisation, diagnostics, checkpoints, and output saving.
+- coordinate sampling, R3 population state, loss computation, adaptive weighting, optimisation, diagnostics, checkpoints, and output saving.
 
 Current modules:
 
 - `train_pde_only_single_species.py`: package-level single-species training workflow and CLI argument parsing.
-- `loop.py`: per-step training logic, including optional timestep-consistency loss integration.
+- `loop.py`: per-step training logic, including optional timestep-consistency loss integration and, once implemented, a `collocation_strategy` branch for `uniform`, `r3`, and `causal-r3`.
 - `weighting.py`: Wang-style gradient-statistics weighting for arbitrary non-PDE scalar losses included in `raw_losses`.
 - `config.py`: causal curriculum and configuration helpers.
 - `outputs.py`: final training-output exports.
@@ -390,17 +431,23 @@ MizerTorchParams + n_init + n_pp + optional params.dt
         |       PINNmizer.pinn.timestep_consistency
         |       N_theta(w_grid, t + dt) versus step(n_pp, N_theta(w_grid, t), params, dt)
         |
-        +--> continuous/off-grid PINN PDE path
-                PINNmizer.pinn.sampling.sample_pde_batch()
-                PINNmizer.pinn.model_eval / derivatives
-                model([x_scaled, t_scaled]) -> log_N
-                autograd derivatives wrt scaled coordinates
-                convert derivatives to physical t and w
-                PINNmizer.biology computes g, dg_dw, mu, recruitment flux
-                PINNmizer.pinn.residual assembles PDE residuals
-                PINNmizer.pinn.losses assembles PDE/IC/BC losses
-                PINNmizer.training applies weighting and optimiser steps
-                PINNmizer.diagnostics writes optional diagnostics
+        +--> continuous/off-grid Cartesian PINN PDE path
+        |       PINNmizer.pinn.sampling.sample_pde_batch()
+        |       PINNmizer.pinn.model_eval / derivatives
+        |       model([x_scaled, t_scaled]) -> log_N
+        |       autograd derivatives wrt scaled coordinates
+        |       convert derivatives to physical t and w
+        |       PINNmizer.biology computes g, dg_dw, mu, recruitment flux
+        |       PINNmizer.pinn.residual assembles PDE residuals
+        |       PINNmizer.pinn.losses assembles PDE/IC/BC losses
+        |       PINNmizer.training applies weighting and optimiser steps
+        |       PINNmizer.diagnostics writes optional diagnostics
+        |
+        +--> planned paired R3/Causal R3 PINN PDE path
+                PINNmizer.pinn.r3 maintains paired population [(x_j,t_j)]
+                paired derivatives/state/loss use [n_species, n_pair] residual tensors
+                same biology/residual equations, different collocation geometry
+                PINNmizer.training.loop branches by collocation_strategy
 ```
 
 ## Where new code should go
@@ -408,6 +455,8 @@ MizerTorchParams + n_init + n_pp + optional params.dt
 - New continuous biological equation or analytical derivative: `PINNmizer/biology/*`.
 - Fixed-grid mizer/TMB reference operation: `PINNmizer/mizer_grid_ops.py`.
 - PDE residual assembly, derivative-scaling convention, or loss component: `PINNmizer/pinn/*`.
+- R3/Causal R3 collocation population and scoring: `PINNmizer/pinn/r3.py`.
+- Paired derivative/state/loss support for R3: `PINNmizer/pinn/derivatives.py`, `PINNmizer/pinn/pde_state.py`, and `PINNmizer/pinn/losses.py`.
 - Fixed-grid timestep-consistency changes: `PINNmizer/pinn/timestep_consistency.py`, with the fixed-grid operator itself remaining in `PINNmizer/mizer_grid_ops.py`.
 - Training-loop logic, adaptive weighting, checkpointing, or CLI-backed training workflow: `PINNmizer/training/*`.
 - Thin executable entry point: `scripts/*`.
@@ -433,7 +482,7 @@ These are known improvement targets, not blockers for current experiments.
 
 1. **State dictionaries are too loose.**
    - `compute_pde_state()` and downstream code pass large nested dictionaries.
-   - Prefer dataclasses or `TypedDict` for PDE state, growth outputs, mortality outputs, and recruitment outputs.
+   - Prefer dataclasses or `TypedDict` for PDE state, growth outputs, mortality outputs, recruitment outputs, and future paired R3 state.
 
 2. **Loss outputs and diagnostics are mixed.**
    - Core loss functions return many diagnostic fields.
@@ -441,7 +490,7 @@ These are known improvement targets, not blockers for current experiments.
 
 3. **`losses.py` has too many responsibilities.**
    - IC loss, boundary loss, composite loss, and helper functions currently share one module.
-   - Split if more loss terms are added.
+   - Adding paired R3 loss is acceptable as a small extension, but split if further losses accumulate.
 
 4. **Shape checks rely heavily on `assert`.**
    - Prefer explicit shape-check helpers with informative `ValueError` messages for user-facing paths.
@@ -460,6 +509,10 @@ These are known improvement targets, not blockers for current experiments.
    - The timestep loss deliberately crosses from a neural-network loss into the fixed-grid `step(...)` operator.
    - Future edits should preserve the distinction between this fixed-grid temporal regulariser and the continuous/off-grid PDE residual.
 
+9. **R3/Causal R3 must remain explicit about paired geometry.**
+   - R3 is not equivalent to retaining separate `x_eval` and `t_eval` vectors.
+   - Paired collocation should keep `(x_j,t_j)` together through derivative evaluation, PDE state, residual scoring, and retain/resample updates.
+
 ## Recent issue to avoid repeating
 
 A previous successful training run was followed by a crash from a stale post-run diagnostics import:
@@ -470,4 +523,4 @@ ModuleNotFoundError: No module named 'validation.scripts.pde_output_diagnostics'
 
 The lesson is structural: package training code should not import post-run diagnostics from `validation/scripts/*`. If a diagnostic is part of the package training workflow, place it under `PINNmizer/diagnostics/` and import it from there. If a diagnostic is optional, guard only the optional diagnostic import/call and report a clear warning without hiding unrelated diagnostic errors.
 
-A separate documentation issue is now resolved: root-level `py_*` validation-output folders are legacy generated artifacts. Future sessions should expect generated validation outputs under `validation/outputs/` instead.
+A separate documentation issue is resolved: root-level `py_*` validation-output folders are legacy generated artifacts. Future sessions should expect generated validation outputs under `validation/outputs/` instead.
