@@ -50,3 +50,59 @@ def evaluate_log_model_with_derivatives_at_eval(model, x_eval_scaled: torch.Tens
     dN_dt = N * dlogN_dt
     dN_dw = N * dlogN_dw
     return {"log_N_eval": log_N, "N_eval": N, "dlogN_dt": dlogN_dt, "dlogN_dw": dlogN_dw, "dN_dt": dN_dt, "dN_dw": dN_dw}
+
+def evaluate_log_model_with_derivatives_at_pairs(
+    model,
+    x_scaled_pair: torch.Tensor,
+    t_scaled_pair: torch.Tensor,
+    w_pair: torch.Tensor,
+    params: MizerTorchParams,
+) -> dict[str, torch.Tensor]:
+    """Paired off-grid derivatives. Returns [n_species, n_pair]."""
+    dtype, device = _params_dtype_device(params)
+
+    x_scaled_pair = x_scaled_pair.to(dtype=dtype, device=device)
+    t_scaled_pair = t_scaled_pair.to(dtype=dtype, device=device)
+    w_pair = w_pair.to(dtype=dtype, device=device)
+
+    inputs = torch.stack([x_scaled_pair, t_scaled_pair], dim=1)
+    inputs.requires_grad_(True)
+
+    log_N_pair = model(inputs)
+
+    n_species = _n_species(params)
+
+    dlogN_dx_scaled = []
+    dlogN_dt_scaled = []
+
+    for i in range(n_species):
+        grad_i = torch.autograd.grad(
+            log_N_pair[:, i].sum(),
+            inputs,
+            create_graph=True,
+            retain_graph=True,
+        )[0]
+        dlogN_dx_scaled.append(grad_i[:, 0])
+        dlogN_dt_scaled.append(grad_i[:, 1])
+
+    log_N = log_N_pair.T.contiguous()
+    N = torch.exp(log_N)
+
+    dlogN_dx_scaled = torch.stack(dlogN_dx_scaled, dim=0)
+    dlogN_dt_scaled = torch.stack(dlogN_dt_scaled, dim=0)
+
+    x_min, x_max = _x_limits(params)
+    t_min, t_max = _t_limits(params)
+
+    dlogN_dt = dlogN_dt_scaled / (t_max - t_min)
+    dlogN_dx = dlogN_dx_scaled / (x_max - x_min)
+    dlogN_dw = dlogN_dx / w_pair[None, :]
+
+    return {
+        "log_N_eval": log_N,
+        "N_eval": N,
+        "dlogN_dt": dlogN_dt,
+        "dlogN_dw": dlogN_dw,
+        "dN_dt": N * dlogN_dt,
+        "dN_dw": N * dlogN_dw,
+    }

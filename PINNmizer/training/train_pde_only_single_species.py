@@ -27,6 +27,7 @@ from PINNmizer.training.outputs import (
     save_run_command,
 )
 from PINNmizer.training.loop import train_one_step, total_grad_norm_and_check, scalar_min, scalar_max, scalar_mean
+from PINNmizer.pinn.r3 import make_r3_population, CausalR3
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 from PINNmizer.io import load_mizer_inputs
@@ -204,11 +205,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timestep-dt", type=float, default=None)
     parser.add_argument("--timestep-n-pairs", type=int, default=1)
 
+    parser.add_argument(
+        "--collocation-strategy",
+        choices=["uniform", "r3", "causal-r3"],
+        default="uniform",
+    )
+    parser.add_argument("--r3-population-size", type=int, default=None)
+    parser.add_argument("--r3-update-every", type=int, default=1)
+    parser.add_argument("--r3-warmup-steps", type=int, default=0)
+    parser.add_argument("--r3-score-form", choices=["abs", "squared"], default="abs")
+    parser.add_argument("--r3-seed", type=int, default=None)
+
+    parser.add_argument("--causal-r3-alpha", type=float, default=5.0)
+    parser.add_argument("--causal-r3-gamma-init", type=float, default=-0.5)
+    parser.add_argument("--causal-r3-gamma-max", type=float, default=1.5)
+    parser.add_argument("--causal-r3-weight-pde-loss", action="store_true")
+    parser.add_argument("--no-causal-r3-score", dest="causal_r3_score", action="store_false")
+    parser.set_defaults(causal_r3_score=True)
+
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+
+
 
     run_dir = make_run_dir()
     save_run_command(run_dir / "run_command.txt")
@@ -239,6 +260,30 @@ def main() -> None:
 
     if n_species != 1:
         raise ValueError(f"Expected one species, got {n_species}")
+
+    r3_population_size = (
+        args.r3_population_size
+        if args.r3_population_size is not None
+        else args.n_time * args.n_eval
+    )
+
+    r3_population = None
+    causal_r3 = None
+
+    if args.collocation_strategy in {"r3", "causal-r3"}:
+        r3_population = make_r3_population(
+            params=params,
+            n_pair=r3_population_size,
+            species_idx=0,
+            seed=args.r3_seed,
+        )
+
+    if args.collocation_strategy == "causal-r3":
+        causal_r3 = CausalR3(
+            gamma=args.causal_r3_gamma_init,
+            gamma_max=args.causal_r3_gamma_max,
+            alpha=args.causal_r3_alpha,
+        )
 
     model = MLP(
         in_dim=2,
@@ -321,6 +366,17 @@ def main() -> None:
         "detach_step_target": args.detach_step_target,
         "timestep_dt": args.timestep_dt,
         "timestep_n_pairs": args.timestep_n_pairs,
+        "collocation_strategy": args.collocation_strategy,
+        "r3_population_size": r3_population_size,
+        "r3_update_every": args.r3_update_every,
+        "r3_warmup_steps": args.r3_warmup_steps,
+        "r3_score_form": args.r3_score_form,
+        "r3_seed": args.r3_seed,
+        "causal_r3_alpha": args.causal_r3_alpha,
+        "causal_r3_gamma_init": args.causal_r3_gamma_init,
+        "causal_r3_gamma_max": args.causal_r3_gamma_max,
+        "causal_r3_weight_pde_loss": args.causal_r3_weight_pde_loss,
+        "causal_r3_score": args.causal_r3_score,
         "note": (
             "Composite PINN loss with PDE, IC, and recruitment boundary terms. "
             "IC/BC weights are adapted using Wang-style gradient statistics."
@@ -384,6 +440,14 @@ def main() -> None:
                 detach_step_target=args.detach_step_target,
                 timestep_dt=args.timestep_dt,
                 timestep_n_pairs=args.timestep_n_pairs,
+                collocation_strategy=args.collocation_strategy,
+                r3_population=r3_population,
+                r3_update_every=args.r3_update_every,
+                r3_warmup_steps=args.r3_warmup_steps,
+                r3_score_form=args.r3_score_form,
+                causal_r3=causal_r3,
+                causal_r3_weight_pde_loss=args.causal_r3_weight_pde_loss,
+                causal_r3_score=args.causal_r3_score,
             )
 
             history.append(row)

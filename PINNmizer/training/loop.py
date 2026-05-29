@@ -7,7 +7,8 @@ import torch
 import torch.nn as nn
 
 from PINNmizer.pinn.sampling import sample_pde_batch
-from PINNmizer.pinn.losses import compute_pde_loss
+from PINNmizer.pinn.losses import compute_pde_loss, compute_pde_loss_paired
+from PINNmizer.pinn.r3 import update_r3_population_
 from PINNmizer.training.weighting import update_wang_gradient_weights_
 from PINNmizer.pinn.timestep_consistency import compute_timestep_consistency_loss
 
@@ -68,31 +69,70 @@ def train_one_step(
     detach_step_target: bool = True,
     timestep_dt: float | None = None,
     timestep_n_pairs: int = 1,
+    collocation_strategy: str = "uniform",
+    r3_population=None,
+    r3_update_every: int = 1,
+    r3_warmup_steps: int = 0,
+    r3_score_form: str = "abs",
+    causal_r3=None,
+    causal_r3_weight_pde_loss: bool = False,
+    causal_r3_score: bool = True,
 ) -> dict:
     optimizer.zero_grad(set_to_none=True)
 
-    batch = sample_pde_batch(
-        params=params,
-        n_time=n_time,
-        n_eval=n_eval,
-        t_max_current=t_max_current,
-    )
+    if collocation_strategy == "uniform":
+        batch = sample_pde_batch(
+            params=params,
+            n_time=n_time,
+            n_eval=n_eval,
+            t_max_current=t_max_current,
+        )
 
-    _, out = compute_pde_loss(
-        model=model,
-        batch=batch,
-        params=params,
-        n_pp=n_pp,
-        residual_form=residual_form,
-        n_init=n_init,
-        lambda_pde=lambda_pde,
-        lambda_ic=lambda_ic,
-        lambda_bc=lambda_bc,
-        boundary_loss_form=boundary_loss_form,
-        species_idx=0,
-        eps=eps,
-        bc_eps=bc_eps,
-    )
+        _, out = compute_pde_loss(
+            model=model,
+            batch=batch,
+            params=params,
+            n_pp=n_pp,
+            residual_form=residual_form,
+            n_init=n_init,
+            lambda_pde=lambda_pde,
+            lambda_ic=lambda_ic,
+            lambda_bc=lambda_bc,
+            boundary_loss_form=boundary_loss_form,
+            species_idx=0,
+            eps=eps,
+            bc_eps=bc_eps,
+        )
+
+    elif collocation_strategy in {"r3", "causal-r3"}:
+        if r3_population is None:
+            raise ValueError("R3 collocation requires r3_population.")
+
+        batch = r3_population.as_batch(params=params)
+
+        pde_weights = None
+        if collocation_strategy == "causal-r3" and causal_r3_weight_pde_loss:
+            pde_weights = causal_r3.gate(batch["t_pair"], params)
+
+        _, out = compute_pde_loss_paired(
+            model=model,
+            batch=batch,
+            params=params,
+            n_pp=n_pp,
+            residual_form=residual_form,
+            n_init=n_init,
+            lambda_pde=lambda_pde,
+            lambda_ic=lambda_ic,
+            lambda_bc=lambda_bc,
+            boundary_loss_form=boundary_loss_form,
+            species_idx=0,
+            eps=eps,
+            bc_eps=bc_eps,
+            pde_weights=pde_weights,
+        )
+
+    else:
+        raise ValueError("collocation_strategy must be 'uniform', 'r3', or 'causal-r3'.")
 
     loss_timestep = out["loss_pde"].new_zeros(())
     timestep_out = None
@@ -200,6 +240,42 @@ def train_one_step(
 
     optimizer.step()
 
+    r3_diag = {
+        "r3_population_size": math.nan,
+        "r3_retained_fraction": math.nan,
+        "r3_resampled": math.nan,
+        "r3_score_mean": math.nan,
+        "r3_score_max": math.nan,
+        "causal_r3_gamma": math.nan,
+        "causal_r3_gamma_update": math.nan,
+        "causal_r3_gate_mean": math.nan,
+    }
+
+    if collocation_strategy in {"r3", "causal-r3"}:
+        if step > r3_warmup_steps and step % max(1, r3_update_every) == 0:
+            residual_for_score = (
+                out["residual_log"]
+                if residual_form == "log"
+                else out["residual"]
+            )
+
+            r3_diag.update(
+                update_r3_population_(
+                    population=r3_population,
+                    residual=residual_for_score,
+                    batch=batch,
+                    params=params,
+                    score_form=r3_score_form,
+                    causal=causal_r3 if collocation_strategy == "causal-r3" else None,
+                    causal_score=causal_r3_score,
+                )
+            )
+
+        if collocation_strategy == "causal-r3":
+            r3_diag.update(causal_r3.update_(out["loss_pde"]))
+            gate = causal_r3.gate(batch["t_pair"], params).detach()
+            r3_diag["causal_r3_gate_mean"] = float(gate.mean().cpu())
+
     residual_log = out["residual_log"].detach()
 
     base = {
@@ -251,6 +327,8 @@ def train_one_step(
         "lambda_timestep": float(lambda_timestep),
         "timestep_loss_form": timestep_loss_form,
         "detach_step_target": bool(detach_step_target),
+        "collocation_strategy": collocation_strategy,
+        **r3_diag,
         "timestep_physical_abs_mean": float((timestep_out["physical_abs_mean"] if timestep_out is not None else torch.tensor(float("nan"))).detach().cpu()),
         "timestep_physical_abs_max": float((timestep_out["physical_abs_max"] if timestep_out is not None else torch.tensor(float("nan"))).detach().cpu()),
         "timestep_log_abs_mean": float((timestep_out["log_abs_mean"] if timestep_out is not None else torch.tensor(float("nan"))).detach().cpu()),

@@ -10,7 +10,7 @@ from PINNmizer.params import (
     active_grid_mask,
     active_eval_mask,
 )
-from PINNmizer.pinn.pde_state import compute_pde_state
+from PINNmizer.pinn.pde_state import compute_pde_state, compute_pde_state_paired
 from PINNmizer.pinn.residual import compute_pde_residual_from_state
 
 
@@ -120,4 +120,104 @@ def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchPa
         bc_out, loss_bc = {}, zero
     loss = lambda_pde * loss_pde + lambda_ic * loss_ic + lambda_bc * loss_bc
     out = {**residual_out, **ic_out, **bc_out, "loss": loss, "loss_pde": loss_pde, "loss_ic": loss_ic, "loss_bc": loss_bc}
+    return loss, out
+
+def compute_pde_loss_paired(
+    model,
+    batch: dict[str, torch.Tensor],
+    params: MizerTorchParams,
+    n_pp: torch.Tensor,
+    residual_form: str = "log",
+    *,
+    n_init: torch.Tensor | None = None,
+    lambda_pde: float = 1.0,
+    lambda_ic: float = 0.0,
+    lambda_bc: float = 0.0,
+    boundary_loss_form: str = "log",
+    species_idx: int | None = None,
+    eps: float = 1e-30,
+    bc_eps: float | None = None,
+    pde_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    include_ic = lambda_ic != 0.0
+
+    state = compute_pde_state_paired(
+        model=model,
+        batch=batch,
+        params=params,
+        n_pp=n_pp,
+        include_ic=include_ic,
+    )
+
+    residual_out = compute_pde_residual_from_state(state)
+
+    if residual_form == "log":
+        residual = residual_out["residual_log"]
+    elif residual_form == "physical":
+        residual = residual_out["residual"]
+    else:
+        raise ValueError("residual_form must be 'log' or 'physical'.")
+
+    mask = active_eval_mask(batch["w_pair"], params).to(
+        dtype=residual.dtype,
+        device=residual.device,
+    )
+
+    if pde_weights is None:
+        weighted_mask = mask
+    else:
+        weighted_mask = mask * pde_weights.to(
+            dtype=residual.dtype,
+            device=residual.device,
+        )[None, :]
+
+    denom = mask.sum()
+    if not bool((denom > 0).detach().cpu()):
+        raise ValueError("Paired PDE loss has zero active entries.")
+
+    loss_pde = ((residual ** 2) * weighted_mask).sum() / denom
+
+    dtype, device = _params_dtype_device(params)
+    zero = torch.zeros((), dtype=dtype, device=device)
+
+    if lambda_ic != 0.0:
+        if n_init is None:
+            raise ValueError("lambda_ic != 0 requires n_init.")
+        ic_out = compute_initial_condition_loss_from_state(
+            state=state,
+            params=params,
+            n_init=n_init,
+            species_idx=species_idx,
+            eps=eps,
+        )
+        loss_ic = ic_out["loss_ic"]
+    else:
+        ic_out = {}
+        loss_ic = zero
+
+    if lambda_bc != 0.0:
+        bc_out = compute_recruitment_boundary_loss_from_state(
+            state=state,
+            params=params,
+            species_idx=species_idx,
+            loss_form=boundary_loss_form,
+            eps=eps if bc_eps is None else bc_eps,
+        )
+        loss_bc = bc_out["loss_bc"]
+    else:
+        bc_out = {}
+        loss_bc = zero
+
+    loss = lambda_pde * loss_pde + lambda_ic * loss_ic + lambda_bc * loss_bc
+
+    out = {
+        **residual_out,
+        **ic_out,
+        **bc_out,
+        "loss": loss,
+        "loss_pde": loss_pde,
+        "loss_ic": loss_ic,
+        "loss_bc": loss_bc,
+    }
+
     return loss, out

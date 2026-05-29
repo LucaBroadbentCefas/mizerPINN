@@ -34,16 +34,23 @@ def compute_timestep_consistency_loss(
     if not torch.all(t1 <= t_max):
         raise ValueError("All t0 + dt must be <= params.t_max.")
       
-    x_grid = torch.log(params.w).to(dtype=dtype, device=device)
-    x_grid_mask = active_grid_mask(params).to(dtype=dtype, device=device)
+    active = active_grid_mask(params)[0]
+    x_grid = torch.log(params.w[active]).to(dtype=dtype, device=device)
     x_grid_scaled = scale_x(x_grid, params)
 
     pred0 = evaluate_log_model_on_points(model, x_grid_scaled, scale_t(t0, params), params)
     pred1 = evaluate_log_model_on_points(model, x_grid_scaled, scale_t(t1, params), params)
 
-    mask = active_grid_mask(params).to(dtype=dtype, device=device)
-    N0_pred = N0_pred * mask[None, :, :]
-    N1_pred = N1_pred * mask[None, :, :]
+    N0_active = pred0["N"]
+    N1_active = pred1["N"]
+
+    N0_full = N0_active.new_zeros(
+        N0_active.shape[0],
+        N0_active.shape[1],
+        params.w.numel(),
+    )
+    
+    N0_full[:, :, active] = N0_active
 
     n_pairs = t0.numel()
     stepped = []
@@ -53,7 +60,7 @@ def compute_timestep_consistency_loss(
     n_pp_in = n_pp.to(dtype=dtype, device=device)
 
     for i in range(n_pairs):
-        n0_i = N0_pred[i]
+        n0_i = N0_full[i]
         if detach_step_target:
             n0_i = n0_i.detach()
         n_pp_new_i, n1_step_i, ops_i = step(
