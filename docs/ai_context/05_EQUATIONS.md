@@ -52,6 +52,8 @@ dN_dt = N * dlogN_dt
 dN_dw = N * dlogN_dw
 ```
 
+This conversion is unchanged between Cartesian and paired R3 collocation. The tensor geometry changes; the calculus does not.
+
 ## Model output
 
 The active model outputs `log_N`.
@@ -60,7 +62,7 @@ The active model outputs `log_N`.
 N = exp(log_N)
 ```
 
-This is not just a numerical detail. Loss scaling, IC loss, timestep consistency, and collapse diagnostics depend on this convention.
+This is not just a numerical detail. Loss scaling, IC loss, timestep consistency, R3 residual scoring, and collapse diagnostics depend on this convention.
 
 ## Prey construction
 
@@ -365,6 +367,29 @@ log:      log(clamp(flux_left, eps)) - log(clamp(recruitment_flux, eps))
 relative: (flux_left - recruitment_flux) / clamp(abs(recruitment_flux), eps)
 ```
 
+## Active-size masking
+
+Species active-size masks are based on:
+
+```text
+M_i(w) = 1[w <= w_max_i]
+```
+
+For fixed fish grid:
+
+```text
+active_grid_mask(params): [n_species, n_w]
+```
+
+For arbitrary residual/evaluation points:
+
+```text
+active_eval_mask(w_eval, params): [n_species, n_eval]
+active_eval_mask(w_pair, params): [n_species, n_pair]
+```
+
+Losses and R3 scores should not be influenced by inactive weights above known species `w_max`. Sampling inside `w_max` reduces wasted points but does not replace masking in the loss.
+
 ## Timestep-consistency loss
 
 This is not the continuous PDE residual. It is a fixed-grid temporal consistency loss.
@@ -426,6 +451,99 @@ else:
 
 `params.dt` should represent the mizer timestep used by the fixture/export. `--timestep-dt` is an explicit experimental override.
 
+## R3 paired collocation equations
+
+R3/Causal R3 is a collocation strategy, not a biological equation.
+
+At optimisation step `m`, maintain a fixed population of paired physical collocation points:
+
+```text
+P^(m) = {(x_j, t_j)}_{j=1}^{n_pair}
+w_j = exp(x_j)
+```
+
+Paired residual tensor convention:
+
+```text
+R_ij = residual for species i at paired point j
+R: [n_species, n_pair]
+```
+
+Active mask:
+
+```text
+M_ij = 1[w_j <= w_max_i]
+```
+
+Default absolute R3 score:
+
+```text
+s_j = sum_i M_ij |R_ij| / max(sum_i M_ij, 1)
+```
+
+Optional squared R3 score:
+
+```text
+s_j = sum_i M_ij R_ij^2 / max(sum_i M_ij, 1)
+```
+
+Mean threshold:
+
+```text
+tau = mean_j s_j
+```
+
+Retain/release rule:
+
+```text
+retain point j if s_j > tau
+release point j if s_j <= tau
+```
+
+Released points are resampled uniformly from the physical domain:
+
+```text
+x_new ~ Uniform(x_min, min(x_grid_max, log(w_max_i)))
+t_new ~ Uniform(t_min, t_max)
+```
+
+For current single-species training, use `species_idx = 0` for the sampling `w_max` bound.
+
+## Causal R3 equations
+
+Causal R3 uses a smooth time gate over paired points:
+
+```text
+t_scaled = (t - t_min) / (t_max - t_min)
+G(t; alpha, gamma) = [1 - tanh(alpha * (t_scaled - gamma))] / 2
+```
+
+Early times receive gate values near 1. Later times receive values near 0 until `gamma` increases.
+
+Causal score option:
+
+```text
+s_j_causal = s_j * G(t_j; alpha, gamma)
+```
+
+Causally weighted PDE loss option:
+
+```text
+L_PDE_causal = sum_{i,j} M_ij G(t_j) R_ij^2 / sum_{i,j} M_ij
+```
+
+Do not normalise by `sum M_ij G(t_j)` if the intention is temporal reveal/suppression. Normalising by the gate sum turns the gate into relative reweighting rather than reducing unrevealed late-time influence.
+
+A simple gamma update is:
+
+```text
+raw_update = exp(-gate_tolerance * L_PDE)
+clipped_update = min(raw_update, gate_update_clip)
+gamma <- min(gamma + gate_lr * clipped_update, gamma_max)
+```
+
+The update uses detached PDE loss. `gamma` is scheduler state, not a neural-network parameter.
+
 ## Wang-style gradient-statistic weighting
 
 Current training uses PDE as the anchor:
@@ -448,9 +566,11 @@ w_component = (1 - alpha) * w_component + alpha * target_weight_component
 
 This is an optimisation heuristic, not a biological equation. Because timestep is now a possible non-PDE component, adding a future loss to `raw_losses` also adds it to the adaptive weighting system unless deliberately excluded.
 
+If Causal R3 weights the PDE loss, the PDE loss seen by Wang weighting should be the actual PDE objective being optimised.
+
 ## Causal time curriculum
 
-Current training supports:
+Current training supports the original causal curriculum:
 
 ```text
 t_upper = t_min + fraction(step) * (t_max - t_min)
@@ -467,3 +587,5 @@ Modes:
 - `off`: always full time domain;
 - `linear`: fraction ramps linearly from start fraction to 1;
 - `step`: fraction follows supplied schedule.
+
+This is distinct from Causal R3. The old causal curriculum restricts the sampled time interval. Causal R3 applies a smooth gate to paired points. Do not silently stack them without an explicit design decision.
