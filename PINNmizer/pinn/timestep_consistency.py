@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 
 from PINNmizer.mizer_grid_ops import step
-from PINNmizer.params import MizerTorchParams, _params_dtype_device, scale_t, scale_x
+from PINNmizer.params import MizerTorchParams, _params_dtype_device, scale_t, scale_x, active_grid_mask
 from PINNmizer.pinn.model_eval import evaluate_log_model_on_points
 
 
@@ -33,19 +33,17 @@ def compute_timestep_consistency_loss(
     t_max = torch.as_tensor(params.t_max, dtype=dtype, device=device)
     if not torch.all(t1 <= t_max):
         raise ValueError("All t0 + dt must be <= params.t_max.")
-
+      
     x_grid = torch.log(params.w).to(dtype=dtype, device=device)
+    x_grid_mask = active_grid_mask(params).to(dtype=dtype, device=device)
     x_grid_scaled = scale_x(x_grid, params)
 
     pred0 = evaluate_log_model_on_points(model, x_grid_scaled, scale_t(t0, params), params)
     pred1 = evaluate_log_model_on_points(model, x_grid_scaled, scale_t(t1, params), params)
 
-    N0_pred = pred0["N"]
-    N1_pred = pred1["N"]
-
-    if species_idx is not None:
-        N0_pred = N0_pred[:, species_idx:species_idx + 1, :]
-        N1_pred = N1_pred[:, species_idx:species_idx + 1, :]
+    mask = active_grid_mask(params).to(dtype=dtype, device=device)
+    N0_pred = N0_pred * mask[None, :, :]
+    N1_pred = N1_pred * mask[None, :, :]
 
     n_pairs = t0.numel()
     stepped = []
