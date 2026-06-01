@@ -245,7 +245,6 @@ def compute_recruitment_boundary_loss_from_state(
         "bc_invalid_g_fraction": invalid_g_fraction.detach(),
         "bc_invalid_recruitment_fraction": invalid_rec_fraction.detach(),
         "bc_nonfinite_fraction": nonfinite_fraction.detach(),
-
         "g_left_min": _scalar_tensor_min(g_left),
         "g_left_max": _scalar_tensor_max(g_left),
         "recruitment_flux_min": _scalar_tensor_min(recruitment_flux),
@@ -262,7 +261,7 @@ def compute_recruitment_boundary_loss_from_state(
         "frac_flux_left_clamped": (flux_left.detach() <= eps).to(dtype=log_N_left.dtype).mean(),
     }
 
-def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchParams, n_pp: torch.Tensor, residual_form: str = "log", *, n_init: torch.Tensor | None = None, lambda_pde: float = 1.0, lambda_ic: float = 0.0, lambda_bc: float = 0.0, boundary_loss_form: str = "log", species_idx: int | None = None, eps: float = 1e-30, bc_eps: float,bc_g_min: float = 1e-12, | None = None) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchParams, n_pp: torch.Tensor, residual_form: str = "log", *, n_init: torch.Tensor | None = None, lambda_pde: float = 1.0, lambda_ic: float = 0.0, lambda_bc: float = 0.0, boundary_loss_form: str = "log", species_idx: int | None = None, eps: float = 1e-30, bc_eps: float | None = None, bc_g_min: float = 1e-12,) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     include_ic = lambda_ic != 0.0
     state = compute_pde_state(model=model, batch=batch, params=params, n_pp=n_pp, include_ic=include_ic)
     residual_out = compute_pde_residual_from_state(state)

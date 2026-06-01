@@ -484,6 +484,7 @@ def main() -> None:
                     residual_form=args.residual_form,
                     boundary_loss_form=args.boundary_loss_form,
                     species_idx=0,
+                    bc_g_min=args.bc_g_min,                    
                     compute_grad_norms=(step == 1 or step % diag_grad_every == 0),
                 )
             
