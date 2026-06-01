@@ -12,6 +12,10 @@ The PINN can reduce parts of the objective while producing very small abundance 
 
 Earlier logs and discussion showed cases where predicted `N` approached extremely small values while PDE residual terms could remain partly satisfied. The current training script now includes adaptive loss weighting, causal curriculum, final-bias initialisation from IC, optional timestep consistency, and diagnostics partly in response to this risk.
 
+A recent Causal R3 run also showed collapse: with `--collocation-strategy causal-r3`, `--r3-population-size 300`, `--r3-update-every 1`, `--r3-warmup-steps 0`, `--r3-score-form abs`, `--residual-form log`, `--lambda-pde 1.0`, `--lambda-ic 1.0`, `--lambda-bc 1.0`, and `--lambda-timestep 0.0`, predicted `N` still moved toward near-zero around approximately 300 iterations while the scalar loss decreased.
+
+This means R3/Causal R3 is not, by itself, a fix for the trivial-solution problem. The failure is probably not only poor residual-point coverage. Stronger anchoring, loss scaling, timestep consistency, or residual validation remains necessary before interpreting training success.
+
 ### Plausible causes
 
 - PDE residual alone does not identify a unique biologically correct solution.
@@ -20,7 +24,8 @@ Earlier logs and discussion showed cases where predicted `N` approached extremel
 - Temporal propagation may be weak over long time horizons.
 - The network may satisfy local derivative constraints without learning the intended trajectory.
 - Biological operator or derivative mismatch may create a residual that is easier to satisfy than the true mizer dynamics.
-- Collocation sampling may underrepresent difficult residual regions.
+- Collocation sampling may underrepresent difficult regions.
+- R3/Causal R3 can concentrate sampling on residual artefacts if the residual or active-size masking is wrong.
 
 ### Current mitigations
 
@@ -29,19 +34,45 @@ Earlier logs and discussion showed cases where predicted `N` approached extremel
 - Optional fixed-grid timestep-consistency loss.
 - Wang-style gradient-statistic weighting.
 - Causal time curriculum.
-- Planned R3/Causal R3 collocation to focus on high-residual paired points.
+- R3/Causal R3 collocation to focus on high-residual paired or slabbed collocation regions.
 - Final-layer bias initialisation from IC.
 - Fixed-grid diagnostics and output plots.
 
 ### Next checks
 
+- Treat the Causal R3 collapse run as evidence that residual-focused collocation alone is insufficient.
 - Compare PDE+IC with and without causal curriculum.
 - Compare Wang weights on/off.
 - Compare timestep loss inactive versus active.
-- Compare uniform collocation against R3/Causal R3 after R3 is implemented.
+- Compare uniform collocation against R3/Causal R3 using fixed-grid diagnostics, not only training loss.
 - Run explicit PDE residual validation on mizer-generated trajectories.
 - Run timestep smoke checks before interpreting timestep-active training.
 - Check `N_eval_min`, `N_eval_max`, `log_N_eval_min`, and fixed-grid abundance heatmaps after every run.
+
+### Current collapse-debugging ablations
+
+Run these separately before stacking them:
+
+1. Stronger anchoring:
+   - `--lambda-ic 100`
+   - `--lambda-bc 100`
+   - Reason: collapse suggests PDE/R3 residual coverage is not enough to identify the desired abundance surface.
+2. Disable Wang weighting:
+   - `--disable-wang-weights`
+   - Reason: adaptive weights may suppress anchoring terms or overemphasise easy residual reduction.
+3. Slower optimiser:
+   - `--lr 3e-4`
+   - Reason: collapse around approximately 300 iterations may be an optimisation trajectory rather than only the final objective structure.
+4. Less aggressive R3 updating:
+   - `--r3-update-every 5` or `--r3-update-every 10`
+   - `--r3-warmup-steps 100`
+   - Reason: updating every step from iteration 1 may over-focus the population before the model has a meaningful surface.
+5. Weak timestep anchor:
+   - `--lambda-timestep 1e-4`
+   - `--timestep-loss-form log`
+   - `--timestep-dt 0.01`
+   - `--timestep-n-pairs 4`
+   - Reason: zero-collapse suggests weak temporal propagation; timestep loss gives a fixed-grid mizer-style temporal constraint.
 
 ## 2. Boundary loss can be numerically misleading
 
@@ -81,6 +112,8 @@ Status: active
 The timestep-consistency loss compares model-predicted `N(w,t+dt)` with the fixed-grid `step(...)` projection from `N(w,t)`. Depending on residual form, `dt`, abundance scale, and Wang weights, this term can dominate the total objective or produce unstable gradients.
 
 This loss is implemented in `PINNmizer/pinn/timestep_consistency.py`. It is an optional fixed-grid temporal regulariser, not part of the continuous/off-grid PDE residual.
+
+Recent collapse experiments used `--lambda-timestep 0.0`, so they do not test whether fixed-grid temporal anchoring prevents near-zero collapse.
 
 ### Current risks
 
@@ -207,15 +240,17 @@ Do not assume multi-species training works simply because tensor shapes allow sp
 
 ## 8. R3/Causal R3 can focus training on artefacts if the residual is wrong
 
-Status: planned feature risk
+Status: active feature risk
 
 ### Description
 
-R3 retains high-residual paired collocation points and resamples low-residual points. This can improve coverage of difficult regions, but it also means the method will concentrate training effort wherever the current residual is large.
+R3 retains high-residual collocation regions and resamples low-residual regions. This can improve coverage of difficult regions, but it also means the method will concentrate training effort wherever the current residual is large.
 
 ### Risk
 
 If the residual implementation is wrong, the biological operator is mismatched, or active-size masking is incomplete, R3 will concentrate points on artefactual errors rather than fixing the underlying model. R3 is therefore not a replacement for residual validation.
+
+The recent Causal R3 collapse result confirms that residual-focused sampling alone is not sufficient evidence of a well-posed or biologically meaningful training objective.
 
 ### Required checks
 
@@ -224,33 +259,32 @@ If the residual implementation is wrong, the biological operator is mismatched, 
 - Inspect where retained points concentrate if results look pathological.
 - Keep active `w_max` masking in both sampling and loss/scoring.
 
-## 9. R3 is paired geometry, not retained marginal x/t vectors
+## 9. R3 geometry must preserve scored collocation structure
 
-Status: planned feature risk
+Status: active feature risk
 
 ### Description
 
-Daw-style R3 retains/replaces collocation points as pairs `(x_j, t_j)`. Retaining separate `x_eval` and `t_eval` vectors would create new Cartesian combinations that were never scored.
+Daw-style R3 retains/replaces collocation points or regions based on their residual scores. A superficially simple implementation that retains separate marginal `x_eval` and `t_eval` vectors and then recombines them into a Cartesian product creates new points that were never scored.
 
 ### Risk
 
-A superficially simple implementation that only changes `sample_pde_batch()` to retain `x_eval` and `t_eval` separately is not equivalent to R3.
+Do not describe retained marginal `x` and `t` vectors as exact R3.
 
 ### Required checks
 
-- R3 population should be stored as `[n_pair, 2]` with physical columns `[x, t]`.
-- Paired residual tensors should be `[n_species, n_pair]`.
-- Paired derivative/state/loss paths should be used for R3.
-- Retained points should remain unchanged across an update.
-- Released points should be replaced as full `(x,t)` pairs.
+- Flat R3 population should preserve full `(x,t)` pairs.
+- Slab/time R3 should preserve the intended scored slab/point structure and must document its retention semantics.
+- Retained locations should remain unchanged across an update.
+- Released locations should be replaced according to the strategy's documented sampling unit.
 
 ## 10. Causal R3 and old causal curriculum should not be silently stacked
 
-Status: planned feature risk
+Status: active feature risk
 
 ### Description
 
-The existing causal curriculum truncates the sampled time horizon. Causal R3 uses a smooth gate over paired points. These are not the same mechanism.
+The existing causal curriculum truncates the sampled time horizon. Causal R3 uses a smooth gate over paired or slabbed collocation locations. These are not the same mechanism.
 
 ### Risk
 
@@ -258,27 +292,43 @@ Using both at once makes it unclear whether improvements or failures come from t
 
 ### Required checks
 
-- Default R3/Causal R3 runs should use `--causal-curriculum off`.
+- Default R3/Causal R3 runs should use `--causal-curriculum off` unless deliberately testing stacked behaviour.
 - If stacking is later allowed, document it explicitly and run ablations.
-- Add a CLI guard unless a future ADR deliberately permits stacking.
+- Add or keep a CLI guard unless a future ADR deliberately permits stacking.
 
-## 11. Exact paired R3 may be much slower than Cartesian sampling
+### Important run-command warning
 
-Status: planned feature risk
+When using `--collocation-strategy r3` or `--collocation-strategy causal-r3`, explicitly set:
+
+```bash
+--causal-curriculum off
+```
+
+unless intentionally testing stacked behaviour.
+
+Reason:
+
+- old causal curriculum truncates `t_max_current`;
+- Causal R3 gates/scales collocation locations;
+- stacking both changes the training distribution and makes failure interpretation ambiguous.
+
+## 11. Flat paired R3 performance issue was addressed by slab/time R3
+
+Status: resolved by later implementation; keep as design history
 
 ### Description
 
-The current Cartesian path evaluates nonlocal biology once per sampled time and multiple weights per time. Exact paired R3 may require biology at many unique paired times.
+Flat paired R3 can be slow because biological operators may be recomputed per pair. The project now has slab/time R3 sampling, and the user reports that the observed R3 performance issue has gone.
 
 ### Risk
 
-A large `--r3-population-size` may make training much slower than expected.
+Future assistants should not keep recommending performance fixes for the old flat paired R3 bottleneck unless inspecting the current source shows the slab/time path has regressed or is not being used.
 
 ### Required checks
 
-- Start R3 with small smoke runs.
-- Compare runtime per step against uniform collocation.
-- Do not call a cheaper Cartesian approximation Daw-style R3. Name it explicitly if added later.
+- Inspect the current R3 implementation before giving runtime advice.
+- Distinguish exact flat paired R3 from slab/time R3.
+- Preserve the slab/time optimisation unless explicitly asked to revert it.
 
 ## 12. Historical experiment logging is incomplete
 
@@ -338,24 +388,3 @@ Generated validation outputs have been moved out of repository root and into:
 ```text
 validation/outputs/
 ```
-
-Root-level generated folders such as:
-
-```text
-py_growth_derivative*
-py_known*
-py_mizer*
-py_pred*
-```
-
-should be treated as legacy generated artifacts and should not be expected at repository root.
-
-### Risk
-
-Future sessions may misinterpret missing root-level `py_*` folders as a broken validation setup. That assumption is wrong under the current layout.
-
-### Required habit
-
-- Put generated validation outputs under `validation/outputs/`.
-- Do not reintroduce root-level generated validation-output folders.
-- Do not diagnose missing root-level `py_*` folders as a source-code failure.
