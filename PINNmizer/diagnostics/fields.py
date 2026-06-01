@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import torch
 
+from PINNmizer.mizer_grid_ops import get_encounter, feeding_level, e_repro_and_growth
 from PINNmizer.diagnostics.fixed_grid import make_fixed_pde_batch
 from PINNmizer.diagnostics.plots import _plot_heatmap
 from PINNmizer.pinn.losses import compute_pde_loss
@@ -163,6 +164,39 @@ def save_fixed_grid_fields_and_plots(
         N_left = out["N_left"][:, species_idx].detach().cpu().numpy()
         log_N_left = out["log_N_left"][:, species_idx].detach().cpu().numpy()
     
+        g_left = out["g_left"][:, species_idx].detach().cpu().numpy()
+        N_left = out["N_left"][:, species_idx].detach().cpu().numpy()
+        erepog_left = out["erepog_left"][:, species_idx].detach().cpu().numpy()
+        pos_erepog_left = out["pos_erepog_left"][:, species_idx].detach().cpu().numpy()
+        e_repro_left = out["e_repro_left"][:, species_idx].detach().cpu().numpy()
+        psi_left = out["psi_left"][:, species_idx].detach().cpu().numpy()
+        encounter_left = out["encounter_left"][:, species_idx].detach().cpu().numpy()
+        feeding_left = out["feeding_left"][:, species_idx].detach().cpu().numpy()
+        h_left = out["h_left"][:, species_idx].detach().cpu().numpy()
+        metab_left = out["metab_left"][:, species_idx].detach().cpu().numpy()
+        reconstructed_g_left = pos_erepog_left * (1.0 - psi_left)
+    
+        with torch.no_grad():
+            N_grid = out["N_grid"][:, species_idx, :].detach()
+            egg_idx = params.w_min_idx.to(torch.long) - 1
+            fixed_encounter = []
+            fixed_feeding = []
+            fixed_erepog = []
+        
+            for tt_i in range(N_grid.shape[0]):
+                n_t = out["N_grid"][tt_i].detach()
+                enc_t = get_encounter(n_pp.detach(), n_t, params)
+                feed_t = feeding_level(enc_t, params.intake_max)
+                erepog_t = e_repro_and_growth(feed_t, enc_t, params.alpha, params.metab)
+        
+                fixed_encounter.append(enc_t[species_idx, egg_idx[species_idx]].detach().cpu().item())
+                fixed_feeding.append(feed_t[species_idx, egg_idx[species_idx]].detach().cpu().item())
+                fixed_erepog.append(erepog_t[species_idx, egg_idx[species_idx]].detach().cpu().item())
+        
+            fixed_encounter = np.asarray(fixed_encounter)
+            fixed_feeding = np.asarray(fixed_feeding)
+            fixed_erepog = np.asarray(fixed_erepog)
+    
         mismatch = flux_left - recruitment_flux
         tiny = np.finfo(float).tiny
         pd.DataFrame(
@@ -181,6 +215,24 @@ def save_fixed_grid_fields_and_plots(
                 "flux_left_is_zero_or_tiny": flux_left <= tiny,
                 "g_left_is_zero_or_tiny": g_left <= tiny,
                 "N_left_is_zero_or_tiny": N_left <= tiny,
+                "g_left": g_left,
+                "N_left": N_left,
+                "erepog_left": erepog_left,
+                "pos_erepog_left": pos_erepog_left,
+                "e_repro_left": e_repro_left,
+                "psi_left": psi_left,
+                "encounter_left": encounter_left,
+                "feeding_left": feeding_left,
+                "h_left": h_left,
+                "metab_left": metab_left,
+                "reconstructed_g_left": reconstructed_g_left,
+                "g_left_minus_reconstructed": g_left - reconstructed_g_left,
+                "fixed_encounter_left": fixed_encounter,
+                "fixed_feeding_left": fixed_feeding,
+                "fixed_erepog_left": fixed_erepog,
+                "encounter_left_minus_fixed": encounter_left - fixed_encounter,
+                "feeding_left_minus_fixed": feeding_left - fixed_feeding,
+                "erepog_left_minus_fixed": erepog_left - fixed_erepog,
             }
         ).to_csv(outdir / "boundary_flux_diagnostics.csv", index=False)
 
