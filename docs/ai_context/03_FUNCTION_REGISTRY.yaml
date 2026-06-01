@@ -4,11 +4,11 @@
 modules:
   PINNmizer.params:
     file: PINNmizer/params.py
-    role: Parameter container, shape helpers, dtype/device helpers, coordinate scaling, and optional fixture timestep storage.
+    role: Parameter container, shape helpers, dtype/device helpers, coordinate scaling, active masks, and optional fixture timestep storage.
     functions:
       MizerTorchParams:
         kind: dataclass
-        purpose: Holds grids, FFT reference arrays, continuous biological parameters, interaction matrices, reproduction parameters, mortality parameters, time bounds, and optional fixture timestep.
+        purpose: Holds grids, FFT reference arrays, continuous biological parameters, interaction matrices, reproduction parameters, mortality parameters, time bounds, active-size vectors, and optional fixture timestep.
         status: active
       dt:
         kind: dataclass_field
@@ -26,6 +26,14 @@ modules:
       scale_t:
         purpose: Convert physical time t to scaled t coordinate.
         inputs: [t, params]
+        status: active
+      active_grid_mask:
+        purpose: Return species-by-grid mask for active fish-grid weights below or equal to species `w_max`.
+        returns: '[n_species, n_w]'
+        status: active
+      active_eval_mask:
+        purpose: Return species-by-evaluation mask for active off-grid weights below or equal to species `w_max`.
+        returns: '[n_species, n_eval] or [n_species, n_pair] depending on input length'
         status: active
       validate_params_shapes:
         purpose: Assert expected shapes for core parameters.
@@ -109,12 +117,12 @@ modules:
 
   PINNmizer.pinn.sampling:
     file: PINNmizer/pinn/sampling.py
-    role: PDE collocation batch sampling and scaled/physical coordinate construction.
+    role: Current Cartesian PDE collocation batch sampling and scaled/physical coordinate construction.
     functions:
       sample_pde_batch:
-        purpose: Sample random continuous time and log-weight collocation vectors.
+        purpose: Sample random continuous time and log-weight collocation vectors for the original Cartesian PDE path.
         supports:
-          - optional t_max_current for causal curriculum
+          - optional t_max_current for old causal curriculum
         returns:
           t_eval: '[n_time]'
           t_scaled: '[n_time]'
@@ -122,14 +130,39 @@ modules:
           x_eval_scaled: '[n_eval]'
           w_eval: '[n_eval]'
           x_grid_scaled: '[n_w]'
+        residual_shape_downstream: '[n_time, n_species, n_eval]'
         status: active
+
+  PINNmizer.pinn.r3:
+    file: PINNmizer/pinn/r3.py
+    role: Planned minimal R3 and Causal R3 paired-collocation population, scoring, retain/resample, and causal-gate utilities.
+    status: planned_implementation_target
+    functions:
+      R3Population:
+        kind: dataclass
+        purpose: Store persistent paired collocation points with physical columns [x, t] and optional random generator.
+        shape:
+          points: '[n_pair, 2]'
+        status: planned
+      CausalR3:
+        kind: dataclass
+        purpose: Store causal gate state and update gamma from detached PDE loss.
+        formula: 'G(t; alpha, gamma) = (1 - tanh(alpha * (t_scaled - gamma))) / 2'
+        status: planned
+      make_r3_population:
+        purpose: Initialise paired R3 collocation population over physical x/t domain, optionally bounded by species w_max.
+        returns: R3Population
+        status: planned
+      update_r3_population_:
+        purpose: Score paired residuals, retain points above mean score, resample released points, mutate population in place, and return minimal diagnostics.
+        status: planned
 
   PINNmizer.pinn.model_eval:
     file: PINNmizer/pinn/model_eval.py
     role: Model input construction and grid/eval-point model calls.
     functions:
       _make_model_inputs:
-        purpose: Build time-major model inputs with columns [x_scaled, t_scaled].
+        purpose: Build time-major Cartesian model inputs with columns [x_scaled, t_scaled].
         returns: '[n_time * n_x, 2]'
         status: active_internal
       evaluate_log_model_on_points:
@@ -144,25 +177,36 @@ modules:
     role: Autograd derivatives of model output with respect to scaled coordinates and conversion to physical derivatives.
     functions:
       evaluate_log_model_with_derivatives_at_eval:
-        purpose: Evaluate model and compute dlogN/dt, dlogN/dw, dN/dt, dN/dw at collocation points.
+        purpose: Evaluate model and compute dlogN/dt, dlogN/dw, dN/dt, dN/dw at Cartesian collocation points.
         derivative_source: autograd_through_model
         returns_shape: '[n_time, n_species, n_eval]'
         status: active
+      evaluate_log_model_with_derivatives_at_pairs:
+        purpose: Planned paired R3 derivative evaluator for inputs `(x_pair_scaled[j], t_pair_scaled[j])` without Cartesian expansion.
+        derivative_source: autograd_through_model
+        returns_shape: '[n_species, n_pair]'
+        status: planned_for_r3
 
   PINNmizer.pinn.pde_state:
     file: PINNmizer/pinn/pde_state.py
     role: Cached model, biological, mortality, recruitment, and optional IC state for PDE losses.
     functions:
       compute_pde_state:
-        purpose: Evaluate model, biological terms, mortality, and recruitment once per batch.
+        purpose: Evaluate Cartesian model outputs, biological terms, mortality, and recruitment once per sampled time batch.
+        residual_shape_downstream: '[n_time, n_species, n_eval]'
         status: active
+      compute_pde_state_paired:
+        purpose: Planned paired R3 PDE state; evaluates model/grid biology for each paired time and residual biology at the paired weight.
+        residual_shape_downstream: '[n_species, n_pair]'
+        grid_shape: '[n_pair, n_species, n_w]'
+        status: planned_for_r3
 
   PINNmizer.pinn.residual:
     file: PINNmizer/pinn/residual.py
     role: Continuous/off-grid PDE residual assembly.
     functions:
       compute_pde_residual_from_state:
-        purpose: Assemble log and physical/check residuals from cached state.
+        purpose: Assemble log and physical/check residuals from cached state; should remain reusable for Cartesian and paired state if tensor shapes are compatible.
         status: active
       compute_pde_residual:
         purpose: Convenience wrapper for PDE residual only.
@@ -173,7 +217,7 @@ modules:
     role: Continuous/off-grid PDE loss plus initial-condition and recruitment-boundary losses.
     functions:
       compute_initial_condition_loss_from_state:
-        purpose: Compute log initial-condition loss using cached t_min model output.
+        purpose: Compute log initial-condition loss using cached t_min model output and active grid mask.
         status: active
       compute_recruitment_boundary_loss_from_state:
         purpose: Compute recruitment boundary flux loss at species-specific egg index.
@@ -186,8 +230,13 @@ modules:
           - boundary_residual_abs_p95
         status: active
       compute_pde_loss:
-        purpose: Assemble weighted PDE, IC, and BC loss components and return diagnostics.
+        purpose: Assemble PDE, IC, and BC loss components and return diagnostics for Cartesian collocation batches.
+        residual_shape: '[n_time, n_species, n_eval]'
         status: active
+      compute_pde_loss_paired:
+        purpose: Planned paired R3 PDE/IC/BC loss function using residual shape `[n_species, n_pair]`, active_eval_mask on `w_pair`, and optional causal PDE sample weights.
+        residual_shape: '[n_species, n_pair]'
+        status: planned_for_r3
 
   PINNmizer.pinn.timestep_consistency:
     file: PINNmizer/pinn/timestep_consistency.py
@@ -253,9 +302,31 @@ modules:
             - timestep_log_abs_max
             - timestep_relative_abs_mean
             - timestep_relative_abs_max
+        r3_collocation:
+          status: planned
+          intended_parameters:
+            - collocation_strategy
+            - r3_population
+            - r3_update_every
+            - r3_warmup_steps
+            - r3_score_form
+            - causal_r3
+            - causal_r3_weight_pde_loss
+            - causal_r3_score
+          diagnostics:
+            - collocation_strategy
+            - r3_population_size
+            - r3_retained_fraction
+            - r3_resampled
+            - r3_score_mean
+            - r3_score_max
+            - causal_r3_gamma
+            - causal_r3_gamma_update
+            - causal_r3_gate_mean
         known_risk:
           - valid timestep-pair filtering can make t0 empty before compute_timestep_consistency_loss() if all sampled t0 + dt exceed t_max.
-        status: active
+          - paired R3 can be much more expensive than Cartesian sampling because nonlocal biology may be evaluated for many unique pair times.
+        status: active_with_planned_r3_branch
 
   PINNmizer.training.weighting:
     file: PINNmizer/training/weighting.py
@@ -288,7 +359,7 @@ modules:
         purpose: Set final-layer bias to mean initial log abundance per species.
         status: active
       parse_args:
-        purpose: Expose training CLI/config including timestep-consistency options.
+        purpose: Expose training CLI/config including timestep-consistency options and planned R3 collocation options.
         timestep_cli_args:
           - --initial-w-timestep
           - --lambda-timestep
@@ -304,7 +375,21 @@ modules:
           detach_step_target: true
           timestep_dt: null
           timestep_n_pairs: 1
-        status: active
+        planned_r3_cli_args:
+          - --collocation-strategy {uniform,r3,causal-r3}
+          - --r3-population-size
+          - --r3-update-every
+          - --r3-warmup-steps
+          - --r3-score-form {abs,squared}
+          - --r3-seed
+          - --causal-r3-alpha
+          - --causal-r3-gamma-init
+          - --causal-r3-gamma-max
+          - --causal-r3-weight-pde-loss
+          - --no-causal-r3-score
+        planned_r3_guard:
+          - require --causal-curriculum off when collocation_strategy is r3 or causal-r3 unless a future ADR explicitly allows stacking
+        status: active_with_planned_r3_cli
       main:
         purpose: Full command-line training run.
         status: active
@@ -339,11 +424,13 @@ modules:
     status: active_optional_plotting
 
 cross_cutting_invariants:
-  - Preserve PyTorch-only differentiable loss path.
   - Preserve dtype/device consistency.
   - Preserve model input column order [x_scaled, t_scaled].
   - Preserve model output interpretation as log_N unless an explicit ADR changes it.
   - Preserve manual/analytical dg_dw path unless an explicit ADR changes it.
   - Treat the continuous/off-grid PDE residual path and fixed-grid mizer/TMB path as distinct.
   - Treat timestep consistency as a fixed-grid temporal regulariser distinct from the continuous PDE residual.
+  - Treat R3 as paired collocation geometry, not as Cartesian x/t vector retention.
+  - Preserve active-size masking with w_max in grid/eval losses and R3 scoring.
+  - Do not silently stack Causal R3 with the old causal curriculum.
   - Generated validation outputs belong under validation/outputs/, not root-level py_* folders.

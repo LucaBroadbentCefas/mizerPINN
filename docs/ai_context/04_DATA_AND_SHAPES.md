@@ -4,8 +4,9 @@
 
 | Symbol | Meaning |
 |---|---|
-| `n_time` | Number of sampled or diagnostic time values. |
-| `n_eval` | Number of arbitrary off-grid PDE evaluation weights. |
+| `n_time` | Number of sampled or diagnostic time values in Cartesian batches. |
+| `n_eval` | Number of arbitrary off-grid PDE evaluation weights in Cartesian batches. |
+| `n_pair` | Number of paired R3/Causal R3 collocation points. |
 | `n_species` | Number of fish species. Current training script expects one species. |
 | `n_w` | Number of fish-grid size classes. |
 | `k_full` | Number of full grid points, including resource and fish grid points. |
@@ -20,6 +21,7 @@
 | `params.dw_full` | `[k_full]` | Full-grid integration widths. |
 | `params.dw` | `[n_w]` | Fish-grid integration widths. |
 | `params.w_min_idx` | `[n_species]` | R/TMB exported 1-based species egg/min index. |
+| `params.w_max` | `[n_species]` or scalar | Species active maximum body mass for masking/sampling. |
 | `_x_grid(params)` | `[n_w]` | `log(params.w)`. |
 
 ## Model input convention
@@ -30,7 +32,7 @@ The model takes scaled coordinates:
 input columns = [x_scaled, t_scaled]
 ```
 
-For vectors:
+For Cartesian vectors:
 
 ```text
 x_scaled: [n_x]
@@ -59,11 +61,27 @@ reshape:    [n_time, n_x, n_species]
 permute:    [n_time, n_species, n_x]
 ```
 
+For planned paired R3 inputs, no Cartesian expansion is used:
+
+```text
+x_pair_scaled: [n_pair]
+t_pair_scaled: [n_pair]
+inputs:        [n_pair, 2]
+row j:         [x_pair_scaled[j], t_pair_scaled[j]]
+```
+
+Paired model outputs are transposed to:
+
+```text
+log_N_eval: [n_species, n_pair]
+N_eval:     [n_species, n_pair]
+```
+
 ## Model output convention
 
 The active model output is interpreted as `log_N`.
 
-For generic grid evaluation:
+For generic Cartesian grid evaluation:
 
 | Object | Shape |
 |---|---:|
@@ -71,7 +89,7 @@ For generic grid evaluation:
 | `log_N` | `[n_time, n_species, n_x]` |
 | `N = exp(log_N)` | `[n_time, n_species, n_x]` |
 
-For PDE collocation evaluation:
+For Cartesian PDE collocation evaluation:
 
 | Object | Shape |
 |---|---:|
@@ -81,6 +99,17 @@ For PDE collocation evaluation:
 | `dlogN_dw` | `[n_time, n_species, n_eval]` |
 | `dN_dt` | `[n_time, n_species, n_eval]` |
 | `dN_dw` | `[n_time, n_species, n_eval]` |
+
+For planned paired R3 PDE collocation evaluation:
+
+| Object | Shape |
+|---|---:|
+| `log_N_eval` | `[n_species, n_pair]` |
+| `N_eval` | `[n_species, n_pair]` |
+| `dlogN_dt` | `[n_species, n_pair]` |
+| `dlogN_dw` | `[n_species, n_pair]` |
+| `dN_dt` | `[n_species, n_pair]` |
+| `dN_dw` | `[n_species, n_pair]` |
 
 ## Coordinate and derivative scaling
 
@@ -111,7 +140,11 @@ dN_dt = N * dlogN_dt
 dN_dw = N * dlogN_dw
 ```
 
+The derivative conversion is identical for Cartesian and paired R3 paths. Only tensor geometry differs.
+
 ## Batch dictionary from `sample_pde_batch()`
+
+This is the current uniform Cartesian PDE batch.
 
 | Key | Shape | Meaning |
 |---|---:|---|
@@ -124,10 +157,90 @@ dN_dw = N * dlogN_dw
 | `x_grid_scaled` | `[n_w]` | Scaled fixed fish-grid log weights. |
 | `w_grid` | `[n_w]` | Fixed fish physical weights. |
 
-The current PDE state evaluates the model both at:
+The current Cartesian PDE state evaluates the model both at:
 
 1. arbitrary `w_eval` collocation points for residuals;
 2. fixed `params.w` grid points for nonlocal biological computations.
+
+The Cartesian residual shape is:
+
+```text
+[n_time, n_species, n_eval]
+```
+
+## Planned paired R3 batch dictionary
+
+R3/Causal R3 should use paired collocation points, not separate retained `x_eval` and `t_eval` vectors.
+
+`R3Population.points`:
+
+| Column | Shape | Meaning |
+|---|---:|---|
+| `points[:, 0]` | `[n_pair]` | Physical log body mass `x = log(w)`. |
+| `points[:, 1]` | `[n_pair]` | Physical time `t`. |
+
+Paired batch:
+
+| Key | Shape | Meaning |
+|---|---:|---|
+| `x_pair` | `[n_pair]` | Physical paired log-weight values. |
+| `t_pair` | `[n_pair]` | Physical paired time values. |
+| `w_pair` | `[n_pair]` | Physical weights, `exp(x_pair)`. |
+| `x_pair_scaled` | `[n_pair]` | Scaled paired log-weight values. |
+| `t_pair_scaled` | `[n_pair]` | Scaled paired time values. |
+| `x_grid` | `[n_w]` | Fixed fish-grid log weights. |
+| `x_grid_scaled` | `[n_w]` | Scaled fixed fish-grid log weights. |
+| `w_grid` | `[n_w]` | Fixed fish physical weights. |
+
+Paired residual shape:
+
+```text
+[n_species, n_pair]
+```
+
+Paired fixed-grid model state for nonlocal biology:
+
+```text
+N_grid:     [n_pair, n_species, n_w]
+log_N_grid: [n_pair, n_species, n_w]
+```
+
+Paired continuous biological outputs at the residual point:
+
+```text
+growth_eval terms: [n_species, n_pair]
+mortality terms:   [n_species, n_pair]
+```
+
+Paired fixed-grid biological outputs for recruitment/nonlocal terms:
+
+```text
+growth_grid terms: [n_pair, n_species, n_w]
+recruitment terms: [n_pair, n_species]
+```
+
+## Active-size masks
+
+Grid mask:
+
+```text
+active_grid_mask(params): [n_species, n_w]
+```
+
+Evaluation mask:
+
+```text
+active_eval_mask(w_eval, params): [n_species, n_eval]
+active_eval_mask(w_pair, params): [n_species, n_pair]
+```
+
+The active mask is based on:
+
+```text
+w <= w_max_i
+```
+
+Sampling inside `w_max` reduces wasted points, but loss masking remains the required safety condition. Do not rely only on sampling bounds.
 
 ## `MizerTorchParams` shapes
 
@@ -206,19 +319,35 @@ For any `w_eval: [n_eval]`, continuous biological functions return species-by-ev
 | `pred_mort_eval` | `[n_species, n_eval]` |
 | `mu_eval` | `[n_species, n_eval]` |
 
-When stacked over time by `_stack_dicts()`, these become:
+When stacked over Cartesian time by `_stack_dicts()`, these become:
 
 ```text
 [n_time, n_species, n_eval]
 ```
 
+When concatenated over paired R3 points, these become:
+
+```text
+[n_species, n_pair]
+```
+
 ## PDE residual outputs
+
+Cartesian outputs:
 
 | Quantity | Shape |
 |---|---:|
 | `residual_log` | `[n_time, n_species, n_eval]` |
 | `residual` | `[n_time, n_species, n_eval]` |
 | `residual_physical_check` | `[n_time, n_species, n_eval]` |
+
+Paired R3 outputs:
+
+| Quantity | Shape |
+|---|---:|
+| `residual_log` | `[n_species, n_pair]` |
+| `residual` | `[n_species, n_pair]` |
+| `residual_physical_check` | `[n_species, n_pair]` |
 
 Current definitions:
 
@@ -234,6 +363,8 @@ residual_physical_check = dN_dt + g_eval * dN_dw + (mu_eval + dg_dw) * N_eval
 
 The recruitment boundary extracts species-specific left/egg positions from fixed-grid arrays.
 
+Cartesian path:
+
 | Quantity | Shape |
 |---|---:|
 | `N_left` | `[n_time, n_species]` |
@@ -242,9 +373,47 @@ The recruitment boundary extracts species-specific left/egg positions from fixed
 | `recruitment_flux` | `[n_time, n_species]` |
 | `boundary_residual` | `[n_time, n_species]` or species-sliced equivalent |
 
+Paired path:
+
+| Quantity | Shape |
+|---|---:|
+| `N_left` | `[n_pair, n_species]` |
+| `g_left` | `[n_pair, n_species]` |
+| `flux_left = g_left * N_left` | `[n_pair, n_species]` |
+| `recruitment_flux` | `[n_pair, n_species]` |
+| `boundary_residual` | `[n_pair, n_species]` or species-sliced equivalent |
+
+## R3 score shapes
+
+For paired residuals:
+
+```text
+residual: [n_species, n_pair]
+mask:     [n_species, n_pair]
+score:    [n_pair]
+```
+
+Default absolute score:
+
+```text
+score_j = sum_i mask_ij * abs(residual_ij) / max(sum_i mask_ij, 1)
+```
+
+Squared score:
+
+```text
+score_j = sum_i mask_ij * residual_ij^2 / max(sum_i mask_ij, 1)
+```
+
+Retain rule:
+
+```text
+retain_j = score_j > mean(score)
+```
+
 ## Current single-species training assumption
 
-`validation_steps/train_pde_only_single_species.py` raises an error unless:
+`PINNmizer/training/train_pde_only_single_species.py` raises an error unless:
 
 ```text
 n_species == 1

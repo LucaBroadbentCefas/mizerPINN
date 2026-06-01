@@ -15,6 +15,7 @@ Use this hierarchy. Do not skip directly to training interpretation if lower-lev
 4. Manual derivative validation
 5. PDE residual validation on known/mizer-generated trajectories
 5b. Fixed-grid timestep-consistency validation
+5c. R3/Causal R3 paired-collocation validation, when implemented
 6. Training-loss and optimisation diagnostics
 7. Biological plausibility diagnostics on trained output
 ```
@@ -28,9 +29,13 @@ Checks:
 - `validate_params_shapes(params)` passes.
 - `n_init` has shape `[n_species, n_w]` or is converted accordingly.
 - `n_pp` has shape `[k_full]`.
-- model output has shape `[n_time * n_x, n_species]`.
-- reshaped model output has shape `[n_time, n_species, n_x]`.
-- PDE residual has shape `[n_time, n_species, n_eval]`.
+- Cartesian model output has shape `[n_time * n_x, n_species]`.
+- Cartesian reshaped model output has shape `[n_time, n_species, n_x]`.
+- Cartesian PDE residual has shape `[n_time, n_species, n_eval]`.
+- Paired R3 model input has shape `[n_pair, 2]`, with columns `[x_pair_scaled, t_pair_scaled]`.
+- Paired R3 PDE residual has shape `[n_species, n_pair]`.
+- Paired R3 grid state has shape `[n_pair, n_species, n_w]` where applicable.
+- R3 score has shape `[n_pair]`.
 - timestep tensors have expected shapes when timestep consistency is active:
   - `N0_pred`: `[n_pairs, n_species_or_1, n_w]`;
   - `N1_pred`: `[n_pairs, n_species_or_1, n_w]`;
@@ -43,6 +48,7 @@ Failure interpretation:
 
 - Shape failures should be fixed before any numerical debugging.
 - Silent broadcasting is a major risk; prefer explicit asserts.
+- A paired R3 shape failure is not a sampling issue only; it may indicate that Cartesian assumptions still exist in derivatives, PDE state, masking, or loss code.
 
 ## Stage 2: fixed-grid mizer/TMB operator validation
 
@@ -171,6 +177,7 @@ Failure interpretation:
 
 - Large residual on a known mizer trajectory can mean PDE mismatch, derivative scaling error, discretisation mismatch, biological operator mismatch, or time-stepping mismatch.
 - Do not treat this as a neural-network problem until the residual implementation itself passes.
+- R3 should not be used to work around a failed residual validation; it will simply concentrate points where the possibly-wrong residual is large.
 
 ## Stage 5b: fixed-grid timestep-consistency validation
 
@@ -215,9 +222,48 @@ Acceptance criterion:
 
 If timestep loss is active in training, the run must report and inspect `loss_timestep`, `w_timestep`, `weighted_loss_timestep`, `grad_timestep_mean_for_weighting`, `target_w_timestep`, and timestep residual summaries. A falling total loss is not interpretable unless these are inspected.
 
+## Stage 5c: R3/Causal R3 paired-collocation validation
+
+Goal: validate that the R3 implementation retains and resamples true paired collocation points and preserves the PDE residual graph.
+
+Relevant intended code:
+
+- `PINNmizer/pinn/r3.py`
+- `PINNmizer/pinn/derivatives.py`
+- `PINNmizer/pinn/pde_state.py`
+- `PINNmizer/pinn/losses.py`
+- `PINNmizer/training/loop.py`
+
+Minimum checks:
+
+- R3 population has shape `[n_pair, 2]` with physical columns `[x, t]`.
+- `as_batch()` or equivalent returns `x_pair`, `t_pair`, `w_pair`, `x_pair_scaled`, and `t_pair_scaled` as `[n_pair]` vectors.
+- paired derivative function returns `[n_species, n_pair]` tensors.
+- paired PDE state returns `N_grid` as `[n_pair, n_species, n_w]`.
+- paired residual and active mask both have shape `[n_species, n_pair]`.
+- R3 score has shape `[n_pair]`.
+- retain/resample mutates the persistent population across training steps.
+- retained points are unchanged after an R3 update.
+- released points are replaced inside the active physical domain.
+- Causal R3 gate values are finite and shaped `[n_pair]`.
+- Causal R3 gamma update uses detached PDE loss and does not add trainable model parameters.
+- backward pass from paired PDE loss reaches model parameters.
+
+Smoke commands after implementation:
+
+```bash
+python -m scripts.train_pde_only_single_species --n-steps 3 --collocation-strategy uniform --causal-curriculum off
+python -m scripts.train_pde_only_single_species --n-steps 3 --collocation-strategy r3 --r3-population-size 20 --causal-curriculum off
+python -m scripts.train_pde_only_single_species --n-steps 3 --collocation-strategy causal-r3 --r3-population-size 20 --causal-r3-weight-pde-loss --causal-curriculum off
+```
+
+Acceptance criterion:
+
+R3/Causal R3 should not be treated as implemented correctly until finite loss, finite nonzero gradients, persistent population mutation, active-mask application, and minimal R3 diagnostics are confirmed.
+
 ## Stage 6: training diagnostics
 
-Goal: determine whether optimisation is balancing PDE, IC, BC, and timestep constraints and whether the output is physically meaningful.
+Goal: determine whether optimisation is balancing PDE, IC, BC, timestep, and any R3/Causal R3 collocation effects, and whether the output is physically meaningful.
 
 Current diagnostics exported by the training workflow include:
 
@@ -235,6 +281,18 @@ Current diagnostics exported by the training workflow include:
 - predicted `N` range;
 - fixed-grid field plots.
 
+Planned R3 diagnostics include:
+
+- `collocation_strategy`;
+- `r3_population_size`;
+- `r3_retained_fraction`;
+- `r3_resampled`;
+- `r3_score_mean`;
+- `r3_score_max`;
+- `causal_r3_gamma`;
+- `causal_r3_gamma_update`;
+- `causal_r3_gate_mean`.
+
 Minimum comparison matrix:
 
 | Run | Purpose |
@@ -244,6 +302,9 @@ Minimum comparison matrix:
 | PDE + IC + BC | Tests whether recruitment boundary stabilises or destabilises. |
 | PDE + IC + timestep | Tests whether fixed-grid one-step consistency improves temporal propagation. |
 | PDE + IC + BC + timestep | Tests whether all current constraints can be balanced together. |
+| Uniform collocation | Baseline Cartesian sampling. |
+| R3 collocation | Tests retain/resample focus on high residual paired points. |
+| Causal R3 collocation | Tests causal residual focus without truncating the time domain. |
 | Wang weights on | Tests adaptive balancing, including timestep if active. |
 | Wang weights off | Tests baseline fixed weighting. |
 | Causal curriculum on | Tests time-marching/curriculum benefit. |
@@ -257,9 +318,16 @@ Timestep-active run checks:
 - inspect `weighted_loss_timestep`;
 - inspect `grad_timestep_mean_for_weighting`;
 - inspect `target_w_timestep`;
-- inspect physical/log/relative timestep residual summaries;
-- verify that timestep pairs remain valid after filtering;
-- compare detach versus no-detach target mode.
+- inspect physical/log/relative timestep residual summaries.
+
+R3-active run checks:
+
+- inspect R3 retained fraction and resampled count;
+- inspect R3 score mean/max;
+- confirm population size is stable;
+- compare against uniform collocation using fixed-grid diagnostics, not only training loss;
+- for Causal R3, inspect gamma and gate mean;
+- do not stack old causal curriculum with Causal R3 unless deliberately testing that interaction.
 
 ## Stage 7: biological plausibility diagnostics
 
@@ -275,6 +343,7 @@ Inspect:
 - residual spatial/time localisation;
 - boundary flux versus recruitment flux;
 - timestep residual localisation if timestep loss is active;
+- whether R3 concentrates residuals in biologically meaningful regions or artefactual regions;
 - whether abundance collapses to near-zero;
 - whether abundance explodes in small or large weights;
 - whether dynamics are time-dependent enough to match expected behaviour.
@@ -289,11 +358,14 @@ A change should not be treated as successful merely because it runs. Minimum acc
 4. Fixed-grid diagnostics saved successfully.
 5. Relevant operator or derivative checks pass if the change touches biology.
 6. Timestep smoke checks pass if the change touches `dt`, `step(...)`, timestep loss, or timestep training integration.
-7. Training comparison against a baseline if the change touches optimisation.
-8. Documentation update in `01_CURRENT_STATE.md` and, if needed, an ADR.
+7. R3 paired-shape and retain/resample smoke checks pass if the change touches R3/Causal R3.
+8. Training comparison against a baseline if the change touches optimisation or collocation strategy.
+9. Documentation update in `01_CURRENT_STATE.md`, `02_ARCHITECTURE.md`, `03_FUNCTION_REGISTRY.yaml`, `04_DATA_AND_SHAPES.md`, `05_EQUATIONS.md`, and, if needed, an ADR.
 
 ## Current known weak points in validation system
 
 The project needs an explicit, reusable script for PDE residual validation on mizer-generated trajectories. That should become a priority before relying heavily on training results.
 
 The timestep-consistency path also needs explicit smoke coverage for `params.dt`, `--timestep-dt`, valid-pair filtering, residual-form scaling, and detach/no-detach gradient paths before interpreting timestep-active training runs.
+
+R3/Causal R3 also needs explicit smoke coverage after implementation because it changes tensor geometry from Cartesian residuals to paired residuals.

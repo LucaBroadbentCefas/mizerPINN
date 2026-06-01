@@ -1,10 +1,10 @@
 {
   "project": "PINNmizer",
   "repository": "LucaBroadbentCefas/mizerPINN",
-  "last_updated": "2026-05-20",
+  "last_updated": "2026-05-29",
   "source_ref": {
     "branch": "main",
-    "commit": "aa1db27be2160a0c6a04d170c7b95e698aa08d77"
+    "commit": "inspect_current_main_before_code_changes"
   },
   "repository_status": {
     "canonical_repository": "LucaBroadbentCefas/mizerPINN",
@@ -82,6 +82,13 @@
     "PINNmizer/diagnostics/fields.py",
     "scripts/train_pde_only_single_species.py"
   ],
+  "planned_source_files": [
+    {
+      "path": "PINNmizer/pinn/r3.py",
+      "purpose": "Minimal R3 and Causal R3 paired-collocation population, scoring, retain/resample, and causal-gate utilities.",
+      "status": "planned_not_assumed_implemented"
+    }
+  ],
   "current_training_entrypoint": "python scripts/train_pde_only_single_species.py",
   "current_training_scope": "single_species_only",
   "model_conventions": {
@@ -96,7 +103,51 @@
     "physical_residual": "dN_dt + g_eval * dN_dw + (mu_eval + dg_dw) * N_eval",
     "coordinate": "x = log(w)",
     "derivative_source_for_model": "autograd",
-    "derivative_source_for_dg_dw": "manual_analytical_biology_path"
+    "derivative_source_for_dg_dw": "manual_analytical_biology_path",
+    "active_size_mask": "w <= w_max_i through active_grid_mask and active_eval_mask"
+  },
+  "cartesian_collocation_conventions": {
+    "implementation": "PINNmizer/pinn/sampling.py::sample_pde_batch",
+    "batch_vectors": {
+      "t_eval": "[n_time]",
+      "x_eval": "[n_eval]",
+      "w_eval": "[n_eval]"
+    },
+    "residual_shape": "[n_time, n_species, n_eval]",
+    "status": "active_default_path"
+  },
+  "r3_collocation_conventions": {
+    "status": "planned_implementation_target_not_assumed_merged",
+    "population": "R3Population.points with shape [n_pair, 2] and physical columns [x, t]",
+    "paired_batch_keys": [
+      "x_pair",
+      "t_pair",
+      "w_pair",
+      "x_pair_scaled",
+      "t_pair_scaled",
+      "x_grid_scaled",
+      "w_grid"
+    ],
+    "paired_residual_shape": "[n_species, n_pair]",
+    "paired_grid_state_shape": "[n_pair, n_species, n_w]",
+    "default_score": "sum_i M_ij |R_ij| / max(sum_i M_ij, 1)",
+    "squared_score": "sum_i M_ij R_ij^2 / max(sum_i M_ij, 1)",
+    "retain_rule": "retain point j if score_j > mean(score)",
+    "causal_gate": "G(t; alpha, gamma) = (1 - tanh(alpha * (t_scaled - gamma))) / 2",
+    "recommended_guard": "require --causal-curriculum off when --collocation-strategy is r3 or causal-r3 unless future ADR allows stacking",
+    "planned_cli_args": [
+      "--collocation-strategy {uniform,r3,causal-r3}",
+      "--r3-population-size",
+      "--r3-update-every",
+      "--r3-warmup-steps",
+      "--r3-score-form {abs,squared}",
+      "--r3-seed",
+      "--causal-r3-alpha",
+      "--causal-r3-gamma-init",
+      "--causal-r3-gamma-max",
+      "--causal-r3-weight-pde-loss",
+      "--no-causal-r3-score"
+    ]
   },
   "timestep_consistency_conventions": {
     "implementation": "PINNmizer/pinn/timestep_consistency.py",
@@ -122,7 +173,9 @@
     "timestep_consistency_loss_implemented": true,
     "timestep_consistency_loss_default_active": false,
     "timestep_loss_wang_weighting_supported": true,
-    "params_dt_loaded_from_fixture": true
+    "params_dt_loaded_from_fixture": true,
+    "r3_collocation_planned": true,
+    "r3_collocation_default_active": false
   },
   "generated_output_layout": {
     "training_outputs": "runs/",
@@ -144,6 +197,8 @@
     "continuous/off-grid PDE biology path",
     "fixed-grid mizer/TMB validation path",
     "timestep consistency is a fixed-grid temporal regulariser distinct from the continuous PDE residual",
+    "R3 must retain/resample paired (x,t) points rather than marginal x/t vectors",
+    "Causal R3 should not be silently stacked with the old causal curriculum",
     "biological equations"
   ],
   "known_active_issues": [
@@ -152,6 +207,9 @@
     "timestep loss scale, dt selection, and valid-pair filtering can dominate or destabilise training",
     "need formal PDE residual validation on mizer-generated trajectories",
     "continuous kernel support convention may not fully match mizer",
+    "R3/Causal R3 can focus training on residual artefacts if the residual implementation is wrong",
+    "R3 is paired geometry, not retained marginal x/t vectors",
+    "exact paired R3 may be much slower than Cartesian sampling",
     "recent package-structure refactor means imports and docs must be checked against current files",
     "training script currently single-species only"
   ]
