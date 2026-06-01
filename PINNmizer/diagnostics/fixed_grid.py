@@ -122,6 +122,7 @@ def compute_fixed_diagnostics(
     eps: float = 1e-30,
     loss_weights: dict[str, float] | None = None,
     bc_eps: float | None = None,
+    bc_g_min: float = 1e-12,    
 ) -> dict[str, float]:
     """
     Deterministic diagnostics on a fixed grid.
@@ -146,7 +147,8 @@ def compute_fixed_diagnostics(
         species_idx=species_idx,
         eps=eps,
         bc_eps=bc_eps,
-    )
+        bc_g_min=bc_g_min,
+        )
 
     advective = out["g_eval"] * out["dlogN_dw"]
 
@@ -208,10 +210,10 @@ def compute_fixed_diagnostics(
         flux_left = out["flux_left"]
         recruitment_flux = out["recruitment_flux"]
         flux_mismatch = flux_left - recruitment_flux
-        relative_mismatch = flux_mismatch / torch.clamp(
-            torch.abs(recruitment_flux),
-            min=eps,
-        )
+        target_log_N = out["bc_target_log_N"]
+        target_N = out["bc_target_N"]
+        density_mismatch = out["N_left"] - target_N
+        log_density_mismatch = out["log_N_left"] - target_log_N
 
         for key in [
             "bc_eps",
@@ -223,6 +225,18 @@ def compute_fixed_diagnostics(
             "frac_recruitment_flux_clamped",
             "boundary_residual_abs_p95",
             "boundary_residual_abs_max",
+            "bc_g_min",
+            "bc_valid_count",
+            "bc_total_count",
+            "bc_valid_fraction",
+            "bc_invalid_fraction",
+            "bc_invalid_g_fraction",
+            "bc_invalid_recruitment_fraction",
+            "bc_nonfinite_fraction",
+            "bc_target_log_N_min",
+            "bc_target_log_N_max",
+            "bc_target_N_min",
+            "bc_target_N_max",
         ]:
             if key in out:
                 row[key] = _as_float(out[key])
@@ -234,7 +248,11 @@ def compute_fixed_diagnostics(
                 "flux_mismatch_rms": _rms(flux_mismatch),
                 "flux_mismatch_abs_mean": _abs_mean(flux_mismatch),
                 "flux_mismatch_abs_p95": _abs_p95(flux_mismatch),
-                "flux_mismatch_rel_abs_mean": _abs_mean(relative_mismatch),
+
+                "bc_density_mismatch_rms": _rms(density_mismatch),
+                "bc_density_mismatch_abs_mean": _abs_mean(density_mismatch),
+                "bc_log_density_mismatch_rms": _rms(log_density_mismatch),
+                "bc_log_density_mismatch_abs_mean": _abs_mean(log_density_mismatch),
                 "boundary_residual_rms": _rms(out["boundary_residual"]),
             }
         )

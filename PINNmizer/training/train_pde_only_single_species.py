@@ -223,6 +223,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-causal-r3-score", dest="causal_r3_score", action="store_false")
     parser.set_defaults(causal_r3_score=True)
 
+    parser.add_argument(
+        "--bc-g-min",
+        type=float,
+        default=1e-12,
+        help=(
+            "Minimum valid growth at the recruitment boundary. "
+            "BC samples with g(w_min,t) <= this value are excluded rather than clamped."
+        ),
+    )
+
     return parser.parse_args()
 
 
@@ -387,6 +397,7 @@ def main() -> None:
         "r3_n_eval_per_time": (
             r3_population.n_eval_per_time if r3_population is not None else None
         ),
+        "bc_g_min": args.bc_g_min,        
         "note": (
             "Composite PINN loss with PDE, IC, and recruitment boundary terms. "
             "IC/BC weights are adapted using Wang-style gradient statistics."
@@ -437,6 +448,7 @@ def main() -> None:
                 boundary_loss_form=args.boundary_loss_form,
                 eps=args.loss_eps,
                 bc_eps=args.bc_eps,
+                bc_g_min=args.bc_g_min,                
                 weight_state=weight_state,
                 hard_set_first_weight_update=args.hard_set_first_weight_update,
                 causal_fraction=current_causal_fraction,
@@ -547,8 +559,10 @@ def main() -> None:
                     f"pde_ungated={row['loss_pde_ungated']:.3e} "
                     f"pde_gated={row['loss_pde_gated']:.3e} "
                     f"pde_gate_mean={row['pde_gate_mean']:.3e} "
-                    f"bc_clamp_flux={row['frac_flux_left_clamped']:.3e} "
-                    f"bc_clamp_rec={row['frac_recruitment_flux_clamped']:.3e} "
+                    f"bc_valid={row['bc_valid_fraction']:.3e} "
+                    f"bc_bad_g={row['bc_invalid_g_fraction']:.3e} "
+                    f"bc_bad_rec={row['bc_invalid_recruitment_fraction']:.3e} "
+                    f"bc_nonfinite={row['bc_nonfinite_fraction']:.3e} "
                 )
 
                 save_history(history, run_dir)
@@ -610,6 +624,7 @@ def main() -> None:
             species_idx=0,
             n_time=args.diag_final_n_time,
             n_eval=args.diag_final_n_eval,
+            bc_g_min=args.bc_g_min,
         )
 
     except Exception:

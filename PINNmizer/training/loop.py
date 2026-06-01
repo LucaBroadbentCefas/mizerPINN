@@ -52,6 +52,7 @@ def train_one_step(
     boundary_loss_form: str,
     eps: float,
     bc_eps: float | None,
+    bc_g_min: float,
     weight_state: dict[str, bool],
     hard_set_first_weight_update: bool,
     step: int,
@@ -106,6 +107,7 @@ def train_one_step(
             species_idx=0,
             eps=eps,
             bc_eps=bc_eps,
+            bc_g_min=bc_g_min,
         )
 
     elif collocation_strategy in {"r3", "causal-r3"}:
@@ -139,6 +141,7 @@ def train_one_step(
             species_idx=0,
             eps=eps,
             bc_eps=bc_eps,
+            bc_g_min=bc_g_min,
             pde_weights=pde_weights,
         )
 
@@ -364,6 +367,20 @@ def train_one_step(
         "loss_unweighted": float(loss_unweighted.detach().cpu()),
         "boundary_loss_form": boundary_loss_form,
         "bc_eps": float(bc_eps if bc_eps is not None else eps),
+        "bc_g_min": float(bc_g_min),
+        "bc_valid_count": float(out.get("bc_valid_count", torch.tensor(float("nan"))).detach().cpu()),
+        "bc_total_count": float(out.get("bc_total_count", torch.tensor(float("nan"))).detach().cpu()),
+        "bc_valid_fraction": float(out.get("bc_valid_fraction", torch.tensor(float("nan"))).detach().cpu()),
+        "bc_invalid_fraction": float(out.get("bc_invalid_fraction", torch.tensor(float("nan"))).detach().cpu()),
+        "bc_invalid_g_fraction": float(out.get("bc_invalid_g_fraction", torch.tensor(float("nan"))).detach().cpu()),
+        "bc_invalid_recruitment_fraction": float(out.get("bc_invalid_recruitment_fraction", torch.tensor(float("nan"))).detach().cpu()),
+        "bc_nonfinite_fraction": float(out.get("bc_nonfinite_fraction", torch.tensor(float("nan"))).detach().cpu()),
+        "bc_target_log_N_min": float(out.get("bc_target_log_N_min", torch.tensor(float("nan"))).detach().cpu()),
+        "bc_target_log_N_max": float(out.get("bc_target_log_N_max", torch.tensor(float("nan"))).detach().cpu()),
+        "bc_target_N_min": float(out.get("bc_target_N_min", torch.tensor(float("nan"))).detach().cpu()),
+        "bc_target_N_max": float(out.get("bc_target_N_max", torch.tensor(float("nan"))).detach().cpu()),
+
+        # Backward-compatible diagnostic aliases.
         "frac_flux_left_clamped": float(out.get("frac_flux_left_clamped", torch.tensor(float("nan"))).detach().cpu()),
         "frac_recruitment_flux_clamped": float(out.get("frac_recruitment_flux_clamped", torch.tensor(float("nan"))).detach().cpu()),
         "flux_left_min": float(out.get("flux_left_min", torch.tensor(float("nan"))).detach().cpu()),

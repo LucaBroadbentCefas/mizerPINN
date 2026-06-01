@@ -25,6 +25,7 @@ def save_fixed_grid_fields_and_plots(
     species_idx: int = 0,
     n_time: int = 61,
     n_eval: int = 160,
+    bc_g_min: float = 1e-12,
     fixed_batch: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """
@@ -53,6 +54,7 @@ def save_fixed_grid_fields_and_plots(
         lambda_bc=1.0,
         boundary_loss_form=boundary_loss_form,
         species_idx=species_idx,
+        bc_g_min=bc_g_min,
     )
 
     t = fixed_batch["t_eval"].detach().cpu().numpy()
@@ -175,7 +177,9 @@ def save_fixed_grid_fields_and_plots(
         h_left = out["h_left"][:, species_idx].detach().cpu().numpy()
         metab_left = out["metab_left"][:, species_idx].detach().cpu().numpy()
         reconstructed_g_left = pos_erepog_left * (1.0 - psi_left)
-    
+        bc_target_log_N = out["bc_target_log_N"][:, species_idx].detach().cpu().numpy()
+        bc_target_N = out["bc_target_N"][:, species_idx].detach().cpu().numpy()
+        bc_valid_mask = out["bc_valid_mask"][:, species_idx].detach().cpu().numpy().astype(bool)
         with torch.no_grad():
             N_grid = out["N_grid"][:, species_idx, :].detach()
             egg_idx = params.w_min_idx.to(torch.long) - 1
@@ -233,6 +237,12 @@ def save_fixed_grid_fields_and_plots(
                 "encounter_left_minus_fixed": encounter_left - fixed_encounter,
                 "feeding_left_minus_fixed": feeding_left - fixed_feeding,
                 "erepog_left_minus_fixed": erepog_left - fixed_erepog,
+                "bc_target_N": bc_target_N,
+                "bc_target_log_N": bc_target_log_N,
+                "bc_target_log10_N": bc_target_log_N / math.log(10.0),
+                "bc_valid": bc_valid_mask,
+                "bc_density_mismatch": N_left - bc_target_N,
+                "bc_log_density_mismatch": log_N_left - bc_target_log_N,
             }
         ).to_csv(outdir / "boundary_flux_diagnostics.csv", index=False)
 
@@ -280,6 +290,17 @@ def save_fixed_grid_fields_and_plots(
         plt.legend()
         plt.tight_layout()
         plt.savefig(outdir / "boundary_flux_components_log10.png", dpi=200)
+        plt.close()
+
+        plt.figure()
+        plt.plot(t, log_N_left / math.log(10.0), label="log10(N_theta at w_min)")
+        plt.plot(t, bc_target_log_N / math.log(10.0), label="log10(R / g)")
+        plt.xlabel("time")
+        plt.ylabel("log10 density")
+        plt.title("Recruitment boundary density target")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(outdir / "boundary_density_target_log10.png", dpi=200)
         plt.close()
 
 __all__=["save_fixed_grid_fields_and_plots"]
