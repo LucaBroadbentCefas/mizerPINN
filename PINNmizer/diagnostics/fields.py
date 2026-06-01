@@ -159,14 +159,28 @@ def save_fixed_grid_fields_and_plots(
     if "flux_left" in out and "recruitment_flux" in out:
         flux_left = out["flux_left"][:, species_idx].detach().cpu().numpy()
         recruitment_flux = out["recruitment_flux"][:, species_idx].detach().cpu().numpy()
+        g_left = out["g_left"][:, species_idx].detach().cpu().numpy()
+        N_left = out["N_left"][:, species_idx].detach().cpu().numpy()
+        log_N_left = out["log_N_left"][:, species_idx].detach().cpu().numpy()
+    
         mismatch = flux_left - recruitment_flux
-
+        tiny = np.finfo(float).tiny
         pd.DataFrame(
             {
                 "t_eval": t,
                 "flux_left": flux_left,
                 "recruitment_flux": recruitment_flux,
                 "flux_mismatch": mismatch,
+                "g_left": g_left,
+                "N_left": N_left,
+                "log_N_left": log_N_left,
+                "log10_flux_left": np.log10(np.maximum(flux_left, tiny)),
+                "log10_recruitment_flux": np.log10(np.maximum(recruitment_flux, tiny)),
+                "log10_g_left": np.log10(np.maximum(g_left, tiny)),
+                "log10_N_left": log_N_left / math.log(10.0),
+                "flux_left_is_zero_or_tiny": flux_left <= tiny,
+                "g_left_is_zero_or_tiny": g_left <= tiny,
+                "N_left_is_zero_or_tiny": N_left <= tiny,
             }
         ).to_csv(outdir / "boundary_flux_diagnostics.csv", index=False)
 
@@ -189,6 +203,31 @@ def save_fixed_grid_fields_and_plots(
         plt.title("Recruitment boundary flux mismatch")
         plt.tight_layout()
         plt.savefig(outdir / "boundary_flux_mismatch_timeseries.png", dpi=200)
+        plt.close()
+
+        plt.figure()
+        plt.plot(t, g_left, label="g_left")
+        plt.plot(t, N_left, label="N_left")
+        plt.plot(t, flux_left, label="g_left * N_left")
+        plt.xlabel("time")
+        plt.ylabel("raw value")
+        plt.title("Recruitment boundary components")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(outdir / "boundary_flux_components.png", dpi=200)
+        plt.close()
+        
+        plt.figure()
+        plt.plot(t, np.log10(np.maximum(flux_left, tiny)), label="log10(g_left * N_left)")
+        plt.plot(t, np.log10(np.maximum(recruitment_flux, tiny)), label="log10(recruitment_flux)")
+        plt.plot(t, np.log10(np.maximum(g_left, tiny)), label="log10(g_left)")
+        plt.plot(t, log_N_left / math.log(10.0), label="log10(N_left)")
+        plt.xlabel("time")
+        plt.ylabel("log10 value")
+        plt.title("Recruitment boundary components on log scale")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(outdir / "boundary_flux_components_log10.png", dpi=200)
         plt.close()
 
 __all__=["save_fixed_grid_fields_and_plots"]

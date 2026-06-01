@@ -91,9 +91,23 @@ def compute_initial_condition_loss_from_state(state: dict[str, object], params: 
 
 def compute_recruitment_boundary_loss_from_state(state: dict[str, object], params: MizerTorchParams, *, species_idx: int | None = None, loss_form: str = "log", eps: float = 1e-30) -> dict[str, torch.Tensor]:
     N_grid, growth_grid, recruitment = state["N_grid"], state["growth_grid"], state["recruitment"]
+    log_N_grid = state.get("log_N_grid", None)
     egg_idx = params.w_min_idx.to(torch.long) - 1
     N_left = _species_grid_values_at_indices(N_grid, egg_idx)
     g_left = _species_grid_values_at_indices(growth_grid["e_growth_eval"], egg_idx)
+    
+    erepog_left = _species_grid_values_at_indices(growth_grid["erepog_eval"], egg_idx)
+    pos_erepog_left = _species_grid_values_at_indices(growth_grid["pos_erepog"], egg_idx)
+    e_repro_left = _species_grid_values_at_indices(growth_grid["e_repro_eval"], egg_idx)
+    psi_left = _species_grid_values_at_indices(growth_grid["psi_eval"], egg_idx)
+    encounter_left = _species_grid_values_at_indices(growth_grid["encounter_eval"], egg_idx)
+    feeding_left = _species_grid_values_at_indices(growth_grid["feeding_eval"], egg_idx)
+    metab_left = _species_grid_values_at_indices(growth_grid["metab_eval"], egg_idx)
+    h_left = _species_grid_values_at_indices(growth_grid["h_eval"], egg_idx)
+    
+    log_N_left = None
+    if log_N_grid is not None:
+        log_N_left = _species_grid_values_at_indices(log_N_grid, egg_idx)
     flux_left = g_left * N_left
     recruitment_flux = recruitment["rdd_flux"]
     if species_idx is not None:
@@ -101,6 +115,18 @@ def compute_recruitment_boundary_loss_from_state(state: dict[str, object], param
         recruitment_flux = recruitment_flux[:, species_idx: species_idx + 1]
         g_left = g_left[:, species_idx: species_idx + 1]
         N_left = N_left[:, species_idx: species_idx + 1]
+        
+        erepog_left = _species_grid_values_at_indices(growth_grid["erepog_eval"], egg_idx)
+        pos_erepog_left = _species_grid_values_at_indices(growth_grid["pos_erepog"], egg_idx)
+        e_repro_left = _species_grid_values_at_indices(growth_grid["e_repro_eval"], egg_idx)
+        psi_left = _species_grid_values_at_indices(growth_grid["psi_eval"], egg_idx)
+        encounter_left = _species_grid_values_at_indices(growth_grid["encounter_eval"], egg_idx)
+        feeding_left = _species_grid_values_at_indices(growth_grid["feeding_eval"], egg_idx)
+        metab_left = _species_grid_values_at_indices(growth_grid["metab_eval"], egg_idx)
+        h_left = _species_grid_values_at_indices(growth_grid["h_eval"], egg_idx)
+        
+        if log_N_left is not None:
+            log_N_left = log_N_left[:, species_idx: species_idx + 1]
     if loss_form == "physical": boundary_residual = flux_left - recruitment_flux
     elif loss_form == "log":
         eps_t = torch.as_tensor(eps, dtype=flux_left.dtype, device=flux_left.device)
@@ -109,7 +135,65 @@ def compute_recruitment_boundary_loss_from_state(state: dict[str, object], param
     else: raise ValueError("loss_form must be 'physical', 'log', or 'relative'.")
     loss_bc = (boundary_residual ** 2).mean()
     eps_t = torch.as_tensor(eps, dtype=flux_left.dtype, device=flux_left.device)
-    return {"loss_bc": loss_bc, "boundary_residual": boundary_residual, "flux_left": flux_left, "recruitment_flux": recruitment_flux, "g_left": g_left, "N_left": N_left, "bc_eps": eps_t, "flux_left_min": _scalar_tensor_min(flux_left), "flux_left_max": _scalar_tensor_max(flux_left), "recruitment_flux_min": _scalar_tensor_min(recruitment_flux), "recruitment_flux_max": _scalar_tensor_max(recruitment_flux), "frac_flux_left_clamped": _fraction_leq(flux_left, eps_t), "frac_recruitment_flux_clamped": _fraction_leq(recruitment_flux, eps_t), "boundary_residual_abs_p95": _abs_quantile(boundary_residual, 0.95), "boundary_residual_abs_max": torch.max(torch.abs(boundary_residual.detach()))}
+    return {
+        "loss_bc": loss_bc,
+        "boundary_residual": boundary_residual,
+        "flux_left": flux_left,
+        "recruitment_flux": recruitment_flux,
+        "g_left": g_left,
+        "N_left": N_left,
+        "log_N_left": (
+            log_N_left
+            if log_N_left is not None
+            else torch.log(torch.clamp(N_left, min=eps_t))
+        ),
+        "bc_eps": eps_t,
+        "flux_left_min": _scalar_tensor_min(flux_left),
+        "flux_left_max": _scalar_tensor_max(flux_left),
+        "g_left_min": _scalar_tensor_min(g_left),
+        "g_left_max": _scalar_tensor_max(g_left),
+        "N_left_min": _scalar_tensor_min(N_left),
+        "N_left_max": _scalar_tensor_max(N_left),
+        "log_N_left_min": _scalar_tensor_min(
+            log_N_left if log_N_left is not None else torch.log(torch.clamp(N_left, min=eps_t))
+        ),
+        "log_N_left_max": _scalar_tensor_max(
+            log_N_left if log_N_left is not None else torch.log(torch.clamp(N_left, min=eps_t))
+        ),
+        "recruitment_flux_min": _scalar_tensor_min(recruitment_flux),
+        "recruitment_flux_max": _scalar_tensor_max(recruitment_flux),
+        "frac_flux_left_clamped": _fraction_leq(flux_left, eps_t),
+        "frac_g_left_clamped": _fraction_leq(g_left, eps_t),
+        "frac_N_left_clamped": _fraction_leq(N_left, eps_t),
+        "frac_recruitment_flux_clamped": _fraction_leq(recruitment_flux, eps_t),
+        "boundary_residual_abs_p95": _abs_quantile(boundary_residual, 0.95),
+        "boundary_residual_abs_max": torch.max(torch.abs(boundary_residual.detach())),
+        "erepog_left": erepog_left,
+        "pos_erepog_left": pos_erepog_left,
+        "e_repro_left": e_repro_left,
+        "psi_left": psi_left,
+        "encounter_left": encounter_left,
+        "feeding_left": feeding_left,
+        "metab_left": metab_left,
+        "h_left": h_left,
+        
+        "erepog_left_min": _scalar_tensor_min(erepog_left),
+        "erepog_left_max": _scalar_tensor_max(erepog_left),
+        "pos_erepog_left_min": _scalar_tensor_min(pos_erepog_left),
+        "pos_erepog_left_max": _scalar_tensor_max(pos_erepog_left),
+        "e_repro_left_min": _scalar_tensor_min(e_repro_left),
+        "e_repro_left_max": _scalar_tensor_max(e_repro_left),
+        "psi_left_min": _scalar_tensor_min(psi_left),
+        "psi_left_max": _scalar_tensor_max(psi_left),
+        "encounter_left_min": _scalar_tensor_min(encounter_left),
+        "encounter_left_max": _scalar_tensor_max(encounter_left),
+        "feeding_left_min": _scalar_tensor_min(feeding_left),
+        "feeding_left_max": _scalar_tensor_max(feeding_left),
+        "metab_left_min": _scalar_tensor_min(metab_left),
+        "metab_left_max": _scalar_tensor_max(metab_left),
+        "h_left_min": _scalar_tensor_min(h_left),
+        "h_left_max": _scalar_tensor_max(h_left),
+    }
 
 
 def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchParams, n_pp: torch.Tensor, residual_form: str = "log", *, n_init: torch.Tensor | None = None, lambda_pde: float = 1.0, lambda_ic: float = 0.0, lambda_bc: float = 0.0, boundary_loss_form: str = "log", species_idx: int | None = None, eps: float = 1e-30, bc_eps: float | None = None) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -293,22 +377,32 @@ def compute_pde_loss_r3_slabbed(
             f"residual shape {tuple(residual.shape)}."
         )
 
+    denom = mask.sum()
+    if not bool((denom > 0).detach().cpu()):
+        raise ValueError("Slabbed R3 PDE loss has zero active entries.")
+    
+    loss_pde_ungated = ((residual ** 2) * mask).sum() / denom
+    
     if pde_weights is None:
-        weighted_mask = mask
+        loss_pde = loss_pde_ungated
+        pde_gate_mean = torch.ones((), dtype=residual.dtype, device=residual.device)
+        pde_gate_min = torch.ones((), dtype=residual.dtype, device=residual.device)
+        pde_gate_max = torch.ones((), dtype=residual.dtype, device=residual.device)
     else:
         pde_weights = pde_weights.to(dtype=residual.dtype, device=residual.device)
+    
         if pde_weights.ndim != 1 or pde_weights.numel() != residual.shape[0]:
             raise ValueError(
                 "pde_weights must be [K] for slabbed R3. "
                 f"Got {tuple(pde_weights.shape)}, expected ({residual.shape[0]},)."
             )
+    
         weighted_mask = mask * pde_weights[:, None, None]
-
-    denom = mask.sum()
-    if not bool((denom > 0).detach().cpu()):
-        raise ValueError("Slabbed R3 PDE loss has zero active entries.")
-
-    loss_pde = ((residual ** 2) * weighted_mask).sum() / denom
+        loss_pde = ((residual ** 2) * weighted_mask).sum() / denom
+    
+        pde_gate_mean = pde_weights.detach().mean()
+        pde_gate_min = pde_weights.detach().min()
+        pde_gate_max = pde_weights.detach().max()
 
     dtype, device = _params_dtype_device(params)
     zero = torch.zeros((), dtype=dtype, device=device)
@@ -357,6 +451,11 @@ def compute_pde_loss_r3_slabbed(
         "r3_n_eval_per_time": torch.as_tensor(float(m), dtype=dtype, device=device),
         "r3_population_size": torch.as_tensor(float(k * m), dtype=dtype, device=device),
         "r3_biology_time_loops": torch.as_tensor(float(k), dtype=dtype, device=device),
+        "loss_pde_ungated": loss_pde_ungated,
+        "loss_pde_gated": loss_pde,
+        "pde_gate_mean": pde_gate_mean,
+        "pde_gate_min": pde_gate_min,
+        "pde_gate_max": pde_gate_max,
     }
 
     return loss, out

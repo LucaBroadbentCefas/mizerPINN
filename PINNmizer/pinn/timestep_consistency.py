@@ -78,9 +78,13 @@ def compute_timestep_consistency_loss(
         if "rdd" in ops_i:
             ops_rdd.append(ops_i["rdd"])
 
-    N1_step = torch.stack(stepped, dim=0)
+    N1_step_full = torch.stack(stepped, dim=0)
     n_pp_step = torch.stack(n_pp_step_list, dim=0)
-
+    
+    N0_pred = N0_active
+    N1_pred = N1_active
+    N1_step = N1_step_full[:, :, active]
+    
     residual_physical = N1_pred - N1_step
     residual_log = torch.log(torch.clamp(N1_pred, min=eps)) - torch.log(torch.clamp(N1_step, min=eps))
     residual_relative = residual_physical / torch.clamp(torch.abs(N1_step), min=relative_eps)

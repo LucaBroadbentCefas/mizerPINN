@@ -112,6 +112,11 @@ def train_one_step(
         if r3_population is None:
             raise ValueError("R3 collocation requires r3_population.")
 
+        r3_population.resample_time_points_(
+            params=params,
+            t_max_current=t_max_current,
+        )
+
         batch = r3_population.as_batch(params=params)
 
         pde_weights = None
@@ -174,11 +179,20 @@ def train_one_step(
           )
     out["loss_timestep"] = loss_timestep
 
+    loss_pde_for_weighting = out.get("loss_pde_ungated", out["loss_pde"])
+    
     raw_losses = {
         "pde": out["loss_pde"],
         "ic": out["loss_ic"],
         "bc": out["loss_bc"],
         "timestep": out["loss_timestep"],
+    }
+    
+    losses_for_weighting = {
+        "pde": lambda_pde * loss_pde_for_weighting,
+        "ic": lambda_ic * out["loss_ic"],
+        "bc": lambda_bc * out["loss_bc"],
+        "timestep": lambda_timestep * out["loss_timestep"],
     }
 
     weight_stats = {
@@ -201,7 +215,7 @@ def train_one_step(
     
         weight_stats = update_wang_gradient_weights_(
             model=model,
-            losses=raw_losses,
+            losses=losses_for_weighting,
             weights=loss_weights,
             alpha=weight_alpha,
             min_weight=weight_min,
@@ -317,10 +331,28 @@ def train_one_step(
         "w_ic": float(loss_weights["ic"]),
         "w_bc": float(loss_weights["bc"]),
         "w_timestep": float(loss_weights["timestep"]),
-        "weighted_loss_pde": float((loss_weights["pde"] * out["loss_pde"]).detach().cpu()),
-        "weighted_loss_ic": float((loss_weights["ic"] * out["loss_ic"]).detach().cpu()),
-        "weighted_loss_bc": float((loss_weights["bc"] * out["loss_bc"]).detach().cpu()),
-        "weighted_loss_timestep": float((loss_weights["timestep"] * out["loss_timestep"]).detach().cpu()),
+        "wang_scaled_loss_pde": float((loss_weights["pde"] * out["loss_pde"]).detach().cpu()),
+        "wang_scaled_loss_ic": float((loss_weights["ic"] * out["loss_ic"]).detach().cpu()),
+        "wang_scaled_loss_bc": float((loss_weights["bc"] * out["loss_bc"]).detach().cpu()),
+        "wang_scaled_loss_timestep": float((loss_weights["timestep"] * out["loss_timestep"]).detach().cpu()),
+        "loss_pde_for_weighting": float(loss_pde_for_weighting.detach().cpu()),
+        "loss_pde_ungated": float(out.get("loss_pde_ungated", out["loss_pde"]).detach().cpu()),
+        "loss_pde_gated": float(out.get("loss_pde_gated", out["loss_pde"]).detach().cpu()),
+        "pde_gate_mean": float(out.get("pde_gate_mean", torch.ones((), dtype=out["loss_pde"].dtype, device=out["loss_pde"].device)).detach().cpu()),
+        "pde_gate_min": float(out.get("pde_gate_min", torch.ones((), dtype=out["loss_pde"].dtype, device=out["loss_pde"].device)).detach().cpu()),
+        "pde_gate_max": float(out.get("pde_gate_max", torch.ones((), dtype=out["loss_pde"].dtype, device=out["loss_pde"].device)).detach().cpu()),
+        "wang_uses_lambda_scaled_losses": True,
+        "wang_pde_anchor": "loss_pde_ungated_if_available",
+        "objective_loss_pde": float((lambda_pde * loss_weights["pde"] * out["loss_pde"]).detach().cpu()),
+        "objective_loss_ic": float((lambda_ic * loss_weights["ic"] * out["loss_ic"]).detach().cpu()),
+        "objective_loss_bc": float((lambda_bc * loss_weights["bc"] * out["loss_bc"]).detach().cpu()),
+        "objective_loss_timestep": float((lambda_timestep * loss_weights["timestep"] * out["loss_timestep"]).detach().cpu()),
+        
+        # Backward-compatible aliases for old plotting/history code.
+        "weighted_loss_pde": float((lambda_pde * loss_weights["pde"] * out["loss_pde"]).detach().cpu()),
+        "weighted_loss_ic": float((lambda_ic * loss_weights["ic"] * out["loss_ic"]).detach().cpu()),
+        "weighted_loss_bc": float((lambda_bc * loss_weights["bc"] * out["loss_bc"]).detach().cpu()),
+        "weighted_loss_timestep": float((lambda_timestep * loss_weights["timestep"] * out["loss_timestep"]).detach().cpu()),
         "grad_pde_max_for_weighting": weight_stats["grad_pde_max"],
         "grad_ic_mean_for_weighting": weight_stats["grad_ic_mean"],
         "grad_bc_mean_for_weighting": weight_stats["grad_bc_mean"],

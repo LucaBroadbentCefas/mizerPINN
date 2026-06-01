@@ -48,7 +48,13 @@ def save_training_diagnostic_plots(run_dir: str | Path) -> None:
 
         _plot_lines(
             df=loss_df,
-            columns=["loss", "loss_pde", "loss_ic", "loss_bc"],
+            columns=[
+                "loss",
+                "weighted_loss_pde",
+                "weighted_loss_ic",
+                "weighted_loss_bc",
+                "weighted_loss_timestep",
+            ],
             path=plot_dir / "training_losses.png",
             title="Training losses",
             ylabel="loss",

@@ -64,6 +64,53 @@ class R3Population:
             "x_grid_scaled": scale_x(x_grid, params),
             "w_grid": params.w.to(dtype=dtype, device=device),
         }
+        
+    def resample_time_points_(
+        self,
+        *,
+        params: MizerTorchParams,
+        t_max_current: float | torch.Tensor | None = None,
+    ) -> None:
+        self.t_points = _sample_stratified_time_points(
+            params=params,
+            n_time=self.n_time,
+            generator=self.generator,
+            t_max_current=t_max_current,
+        )        
+
+def _sample_stratified_time_points(
+    *,
+    params: MizerTorchParams,
+    n_time: int,
+    generator: torch.Generator | None = None,
+    t_max_current: float | torch.Tensor | None = None,
+) -> torch.Tensor:
+    dtype, device = _params_dtype_device(params)
+
+    t_min, t_max = _t_limits(params)
+    t_min = torch.as_tensor(t_min, dtype=dtype, device=device)
+    t_max = torch.as_tensor(t_max, dtype=dtype, device=device)
+
+    if t_max_current is None:
+        t_upper = t_max
+    else:
+        t_upper = torch.as_tensor(t_max_current, dtype=dtype, device=device)
+        t_upper = torch.maximum(t_upper, t_min)
+        t_upper = torch.minimum(t_upper, t_max)
+
+    if not bool((t_upper > t_min).detach().cpu()):
+        raise ValueError(
+            "R3 time resampling requires t_max_current > t_min. "
+            f"Got t_min={float(t_min.detach().cpu())}, "
+            f"t_upper={float(t_upper.detach().cpu())}."
+        )
+
+    t_unit = (
+        torch.arange(n_time, dtype=dtype, device=device)
+        + torch.rand(n_time, dtype=dtype, device=device, generator=generator)
+    ) / n_time
+
+    return t_min + (t_upper - t_min) * t_unit
 
 def make_r3_population(
     *,
@@ -91,12 +138,12 @@ def make_r3_population(
     # Stratified time slabs: fixed after initialisation.
     # This gives better time-domain coverage than fully independent random times,
     # while still sampling uniformly over the physical time interval.
-    t_unit = (
-        torch.arange(n_time, dtype=dtype, device=device)
-        + torch.rand(n_time, dtype=dtype, device=device, generator=generator)
-    ) / n_time
-
-    t_points = t_min + (t_max - t_min) * t_unit
+    t_points = _sample_stratified_time_points(
+        params=params,
+        n_time=n_time,
+        generator=generator,
+        t_max_current=None,
+    )
 
     x_points = x_min + (x_max - x_min) * torch.rand(
         n_time,
