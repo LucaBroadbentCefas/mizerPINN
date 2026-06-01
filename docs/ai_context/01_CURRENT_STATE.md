@@ -2,7 +2,7 @@
 
 ## Last updated
 
-2026-05-29
+2026-06-01
 
 ## Repository
 
@@ -47,11 +47,30 @@ The active scientific problem remains whether the PINN is learning a physically 
 - Generated validation outputs belong under `validation/outputs/`.
 - Root-level generated folders such as `py_growth_derivative*`, `py_known*`, `py_mizer*`, and `py_pred*` are legacy artifacts and should not be expected or reintroduced at repository root.
 
-### Accepted design / implementation target: R3 and Causal R3 collocation
+### R3 and Causal R3 collocation status
 
-R3/Causal R3 is now a recorded implementation target for the PINN collocation workflow. Future assistants must still inspect source files before assuming it has been merged.
+R3/Causal R3 is now implemented experimentally. Future assistants must still inspect the current source before assuming exact function names, CLI defaults, or slab/time tensor shapes.
 
-The intended R3 addition is not just a new sampler. It changes the residual tensor geometry from Cartesian batches to paired collocation batches.
+The original uniform Cartesian path remains the default validation/training baseline and must remain available.
+
+Known implemented elements include:
+
+```text
+PINNmizer/pinn/r3.py
+PINNmizer/pinn/derivatives.py          paired derivative support
+PINNmizer/pinn/pde_state.py            paired/slab-aware PDE-state support
+PINNmizer/pinn/losses.py               paired/slab-aware PDE loss support
+PINNmizer/training/loop.py             collocation_strategy branch
+PINNmizer/training/train_pde_only_single_species.py CLI args and state setup
+```
+
+The project has moved beyond flat paired R3. A slab/time R3 sampling path has been implemented and the earlier flat-paired performance issue is reported as resolved. Do not keep recommending fixes for the old flat-paired bottleneck unless current source inspection shows the slab/time path has regressed or is not being used.
+
+Important distinction:
+
+- Flat paired R3 preserves individual `(x,t)` point identity.
+- Slab/time R3 preserves a grouped collocation structure designed to reuse expensive biological calculations across time slabs.
+- Retaining separate marginal `x` and `t` vectors and recombining them as a new Cartesian product is not exact R3 unless explicitly documented as an approximation.
 
 Current Cartesian path:
 
@@ -62,7 +81,7 @@ w_eval: [n_eval]
 residual: [n_time, n_species, n_eval]
 ```
 
-R3 paired path target:
+Historical flat paired target:
 
 ```text
 R3Population.points: [n_pair, 2] with columns [x, t]
@@ -72,18 +91,7 @@ w_pair: [n_pair]
 residual: [n_species, n_pair]
 ```
 
-The intended R3 source layout is:
-
-```text
-PINNmizer/pinn/r3.py
-PINNmizer/pinn/derivatives.py          add evaluate_log_model_with_derivatives_at_pairs
-PINNmizer/pinn/pde_state.py            add compute_pde_state_paired
-PINNmizer/pinn/losses.py               add compute_pde_loss_paired
-PINNmizer/training/loop.py             add collocation_strategy branch
-PINNmizer/training/train_pde_only_single_species.py add CLI args and state setup
-```
-
-The original uniform Cartesian path must remain available and unchanged as the default validation/training baseline.
+Slab/time R3 is the current performance-oriented direction. Future documentation should be updated with exact slab/time tensor shapes after source inspection.
 
 ## Current training entry point
 
@@ -147,9 +155,9 @@ Important implications:
 - `params.dt` should represent the mizer timestep used by the fixture/export; `--timestep-dt` is an explicit experimental override.
 - The original causal curriculum truncates the sampled time horizon. It should not be silently stacked with Causal R3 unless a later explicit design decision allows it.
 
-## Planned R3/Causal R3 CLI additions
+## R3/Causal R3 CLI additions
 
-When R3 is implemented, the intended CLI additions are:
+The R3/Causal R3 CLI family includes or has included:
 
 ```text
 --collocation-strategy {uniform,r3,causal-r3}
@@ -165,6 +173,8 @@ When R3 is implemented, the intended CLI additions are:
 --no-causal-r3-score
 ```
 
+After slab/time R3 implementation, future assistants must inspect the current parser before assuming the exact final CLI surface.
+
 Recommended guard:
 
 ```text
@@ -172,7 +182,7 @@ if collocation_strategy != "uniform" and causal_curriculum != "off":
     raise ValueError
 ```
 
-Reason: the old causal curriculum restricts the sampled time interval; Causal R3 applies a smooth gate over paired points. Stacking both changes the meaning of both methods.
+Reason: the old causal curriculum restricts the sampled time interval; Causal R3 applies a smooth gate over R3 collocation locations. Stacking both changes the meaning of both methods.
 
 ## Current timestep diagnostics in training rows
 
@@ -191,9 +201,9 @@ When timestep loss is active or configured, training rows may include:
 - `timestep_relative_abs_mean`
 - `timestep_relative_abs_max`
 
-## Planned R3 diagnostics in training rows
+## Current R3 diagnostics in training rows
 
-When R3/Causal R3 is implemented, keep initial diagnostics minimal:
+When R3/Causal R3 is active, training rows may include:
 
 - `collocation_strategy`
 - `r3_population_size`
@@ -223,6 +233,8 @@ Do not save large retained-point snapshots unless debugging requires it. If snap
 
 Previous training runs and discussion indicated that the PINN can push `N` toward near-zero values while reducing parts of the objective. This remains a central modelling/training risk.
 
+A recent Causal R3 run with `--collocation-strategy causal-r3`, `--r3-population-size 300`, `--r3-update-every 1`, `--r3-warmup-steps 0`, `--r3-score-form abs`, `--residual-form log`, `--lambda-pde 1.0`, `--lambda-ic 1.0`, `--lambda-bc 1.0`, and `--lambda-timestep 0.0` still collapsed predicted `N` toward near-zero around approximately 300 iterations while the scalar loss decreased.
+
 Potential contributors:
 
 - loss-term imbalance;
@@ -233,7 +245,8 @@ Potential contributors:
 - log-space clamping choices;
 - mismatch between continuous PDE residual and discretised mizer trajectory generation;
 - insufficient data/trajectory anchoring away from IC/BC;
-- collocation points under-sampling difficult regions.
+- collocation points under-sampling difficult regions;
+- R3/Causal R3 concentrating on residual artefacts rather than fixing the underlying objective.
 
 ### 2. Boundary loss sensitivity
 
@@ -243,11 +256,11 @@ The recruitment-boundary loss uses clamping floors for log-form residuals and ex
 
 The timestep term can dominate or destabilise training depending on residual form, `dt`, abundance scale, and Wang weighting. Future debugging must inspect `loss_timestep`, `w_timestep`, `weighted_loss_timestep`, `grad_timestep_mean_for_weighting`, and whether valid timestep pairs remain after filtering.
 
-### 4. R3/Causal R3 cost and interpretation risk
+Recent collapse experiments used `--lambda-timestep 0.0`, so they do not test whether fixed-grid temporal anchoring prevents collapse.
 
-Exact paired R3 is more expensive than Cartesian sampling because nonlocal biology may be evaluated at up to `n_pair` unique times. A Cartesian approximation should not be called Daw-style R3. If a cheaper approximation is added, name it explicitly, for example `cartesian-r3-approx`.
+### 4. R3/Causal R3 interpretation risk
 
-R3 will concentrate points where the current residual is high. If the residual implementation is wrong, R3 will concentrate training on artefacts. Therefore, R3 is not a substitute for PDE residual validation.
+The earlier flat-paired R3 runtime issue has been addressed by slab/time R3 sampling. However, R3 still concentrates collocation effort where the current residual is high. If the residual implementation is wrong, R3 will concentrate training on artefacts. Therefore, R3 is not a substitute for PDE residual validation.
 
 ### 5. Validation against mizer trajectories still matters
 
@@ -264,23 +277,20 @@ Because code was moved between package, script, diagnostics, and validation area
 ## Current next sensible tasks
 
 1. Confirm the current training defaults are intentional, especially `lambda_bc = 0.0` and `lambda_timestep = 0.0` while both loss mechanisms exist.
-2. Run controlled comparisons:
-   - PDE + IC only;
-   - PDE + IC + BC;
-   - PDE + IC + timestep;
-   - PDE + IC + BC + timestep;
+2. Run controlled collapse ablations:
+   - stronger IC/BC anchoring;
    - Wang weights on/off;
-   - causal curriculum on/off.
-3. Implement R3/Causal R3 as a small source change, preserving the original uniform Cartesian path.
-4. Add paired derivative/state/loss functions only where needed; do not rewrite the whole PDE stack.
-5. Keep R3/Causal R3 initially minimal: one sampler/state module, paired derivatives, paired PDE state, paired loss, and a training-loop branch.
-6. Run timestep smoke checks before interpreting timestep-active training.
-7. Add explicit validation that evaluates the PDE residual on mizer-generated trajectories without training.
-8. Keep package imports clean:
+   - lower learning rate;
+   - R3 update frequency/warmup changes;
+   - timestep inactive versus weak log timestep anchor.
+3. Verify slab/time R3 tensor shapes and update `04_DATA_AND_SHAPES.md` if needed.
+4. Run timestep smoke checks before interpreting timestep-active training.
+5. Add explicit validation that evaluates the PDE residual on mizer-generated trajectories without training.
+6. Keep package imports clean:
    - `PINNmizer/*` should not import from `scripts/*`;
    - `PINNmizer/*` should not import from `validation/*`;
    - diagnostics used by training should live under `PINNmizer/diagnostics/`.
-9. Keep context files updated at the end of each major debugging or implementation session.
+7. Keep context files updated at the end of each major debugging or implementation session.
 
 ## Do not revisit without new evidence
 
@@ -288,7 +298,8 @@ Because code was moved between package, script, diagnostics, and validation area
 - Do not infer that falling PDE loss means correct dynamics.
 - Do not assume the fixed-grid FFT path and continuous off-grid path are interchangeable without validation.
 - Do not treat timestep consistency as part of the continuous PDE residual.
-- Do not treat R3 as merely a different loader; it requires paired tensor geometry.
+- Do not treat R3 as merely a different loader; it requires preserved scored collocation geometry.
+- Do not keep recommending old flat-paired R3 performance fixes after slab/time R3 has resolved the bottleneck, unless source inspection shows a regression.
 - Do not silently stack Causal R3 with the old causal curriculum.
 - Do not expect root-level `py_*` validation-output folders to exist.
 - Do not treat ChatGPT memory or chat history as canonical project state.

@@ -1,7 +1,7 @@
 {
   "project": "PINNmizer",
   "repository": "LucaBroadbentCefas/mizerPINN",
-  "last_updated": "2026-05-29",
+  "last_updated": "2026-06-01",
   "source_ref": {
     "branch": "main",
     "commit": "inspect_current_main_before_code_changes"
@@ -63,6 +63,7 @@
     "PINNmizer/biology/recruitment.py",
     "PINNmizer/pinn/models.py",
     "PINNmizer/pinn/sampling.py",
+    "PINNmizer/pinn/r3.py",
     "PINNmizer/pinn/model_eval.py",
     "PINNmizer/pinn/derivatives.py",
     "PINNmizer/pinn/pde_state.py",
@@ -82,13 +83,7 @@
     "PINNmizer/diagnostics/fields.py",
     "scripts/train_pde_only_single_species.py"
   ],
-  "planned_source_files": [
-    {
-      "path": "PINNmizer/pinn/r3.py",
-      "purpose": "Minimal R3 and Causal R3 paired-collocation population, scoring, retain/resample, and causal-gate utilities.",
-      "status": "planned_not_assumed_implemented"
-    }
-  ],
+  "planned_source_files": [],
   "current_training_entrypoint": "python scripts/train_pde_only_single_species.py",
   "current_training_scope": "single_species_only",
   "model_conventions": {
@@ -117,9 +112,11 @@
     "status": "active_default_path"
   },
   "r3_collocation_conventions": {
-    "status": "planned_implementation_target_not_assumed_merged",
-    "population": "R3Population.points with shape [n_pair, 2] and physical columns [x, t]",
-    "paired_batch_keys": [
+    "status": "implemented_experimental",
+    "source": "Inspect current source before assuming exact slab/time function names or tensor shapes.",
+    "flat_paired_population": "R3Population.points with shape [n_pair, 2] and physical columns [x, t] where that path is still present.",
+    "slab_time_sampling": "Implemented after the initial flat paired R3 path; user reports this removed the R3 performance bottleneck.",
+    "paired_batch_keys_historical": [
       "x_pair",
       "t_pair",
       "w_pair",
@@ -128,14 +125,13 @@
       "x_grid_scaled",
       "w_grid"
     ],
-    "paired_residual_shape": "[n_species, n_pair]",
-    "paired_grid_state_shape": "[n_pair, n_species, n_w]",
+    "paired_residual_shape_historical": "[n_species, n_pair]",
+    "paired_grid_state_shape_historical": "[n_pair, n_species, n_w]",
     "default_score": "sum_i M_ij |R_ij| / max(sum_i M_ij, 1)",
     "squared_score": "sum_i M_ij R_ij^2 / max(sum_i M_ij, 1)",
-    "retain_rule": "retain point j if score_j > mean(score)",
     "causal_gate": "G(t; alpha, gamma) = (1 - tanh(alpha * (t_scaled - gamma))) / 2",
     "recommended_guard": "require --causal-curriculum off when --collocation-strategy is r3 or causal-r3 unless future ADR allows stacking",
-    "planned_cli_args": [
+    "cli_args_to_check_in_source": [
       "--collocation-strategy {uniform,r3,causal-r3}",
       "--r3-population-size",
       "--r3-update-every",
@@ -147,7 +143,8 @@
       "--causal-r3-gamma-max",
       "--causal-r3-weight-pde-loss",
       "--no-causal-r3-score"
-    ]
+    ],
+    "important_result": "Causal R3 with population 300, update every 1, warmup 0, abs score, log residual, lambda_pde/ic/bc all 1, lambda_timestep 0 still collapsed predicted N to near-zero around approximately 300 iterations while scalar loss decreased."
   },
   "timestep_consistency_conventions": {
     "implementation": "PINNmizer/pinn/timestep_consistency.py",
@@ -159,7 +156,8 @@
     "default_lambda_timestep": 0.0,
     "default_detach_step_target": true,
     "default_timestep_dt": null,
-    "dt_source_when_not_overridden": "params.dt loaded from optional dt.csv"
+    "dt_source_when_not_overridden": "params.dt loaded from optional dt.csv",
+    "collapse_note": "Recent Causal R3 collapse used lambda_timestep 0.0, so it does not test timestep anchoring."
   },
   "current_training_features": {
     "pde_loss": true,
@@ -174,7 +172,8 @@
     "timestep_consistency_loss_default_active": false,
     "timestep_loss_wang_weighting_supported": true,
     "params_dt_loaded_from_fixture": true,
-    "r3_collocation_planned": true,
+    "r3_collocation_implemented_experimental": true,
+    "slab_time_r3_implemented": true,
     "r3_collocation_default_active": false
   },
   "generated_output_layout": {
@@ -197,19 +196,21 @@
     "continuous/off-grid PDE biology path",
     "fixed-grid mizer/TMB validation path",
     "timestep consistency is a fixed-grid temporal regulariser distinct from the continuous PDE residual",
-    "R3 must retain/resample paired (x,t) points rather than marginal x/t vectors",
+    "R3 must preserve scored collocation geometry rather than retained marginal x/t vectors recombined into unscored Cartesian points",
+    "slab/time R3 should not be removed or replaced with old flat paired R3 without explicit reason",
     "Causal R3 should not be silently stacked with the old causal curriculum",
     "biological equations"
   ],
   "known_active_issues": [
     "near-zero or collapsed solution risk",
+    "Causal R3 did not fix near-zero collapse in the recent population-300 run",
     "boundary loss sensitivity to clamping and scaling",
     "timestep loss scale, dt selection, and valid-pair filtering can dominate or destabilise training",
     "need formal PDE residual validation on mizer-generated trajectories",
     "continuous kernel support convention may not fully match mizer",
     "R3/Causal R3 can focus training on residual artefacts if the residual implementation is wrong",
-    "R3 is paired geometry, not retained marginal x/t vectors",
-    "exact paired R3 may be much slower than Cartesian sampling",
+    "R3 must preserve scored collocation geometry",
+    "old flat paired R3 performance bottleneck has been addressed by slab/time R3, but source should be inspected before runtime advice",
     "recent package-structure refactor means imports and docs must be checked against current files",
     "training script currently single-species only"
   ]
