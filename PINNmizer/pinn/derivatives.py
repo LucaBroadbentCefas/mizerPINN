@@ -106,3 +106,122 @@ def evaluate_log_model_with_derivatives_at_pairs(
         "dN_dt": N * dlogN_dt,
         "dN_dw": N * dlogN_dw,
     }
+
+def evaluate_log_model_with_derivatives_at_slabs(
+    model,
+    x_slab_scaled: torch.Tensor,
+    t_slab_scaled: torch.Tensor,
+    w_slab: torch.Tensor,
+    params: MizerTorchParams,
+) -> dict[str, torch.Tensor]:
+    """Autograd derivatives for slabbed R3 points.
+
+    Inputs
+    ------
+    x_slab_scaled:
+        [K, M]
+    t_slab_scaled:
+        [K]
+    w_slab:
+        [K, M]
+
+    Returns
+    -------
+    All returned tensors are [K, n_species, M].
+    """
+    dtype, device = _params_dtype_device(params)
+
+    x_slab_scaled = x_slab_scaled.to(dtype=dtype, device=device)
+    t_slab_scaled = t_slab_scaled.to(dtype=dtype, device=device)
+    w_slab = w_slab.to(dtype=dtype, device=device)
+
+    if x_slab_scaled.ndim != 2:
+        raise ValueError(f"x_slab_scaled must be [K, M], got {tuple(x_slab_scaled.shape)}.")
+    if w_slab.shape != x_slab_scaled.shape:
+        raise ValueError(
+            f"w_slab shape {tuple(w_slab.shape)} must match "
+            f"x_slab_scaled shape {tuple(x_slab_scaled.shape)}."
+        )
+    if t_slab_scaled.ndim != 1:
+        raise ValueError(f"t_slab_scaled must be [K], got {tuple(t_slab_scaled.shape)}.")
+    if t_slab_scaled.numel() != x_slab_scaled.shape[0]:
+        raise ValueError(
+            f"t_slab_scaled has length {t_slab_scaled.numel()}, "
+            f"but x_slab_scaled has K={x_slab_scaled.shape[0]}."
+        )
+
+    k, m = x_slab_scaled.shape
+    n_species = _n_species(params)
+
+    t_expanded = t_slab_scaled[:, None].expand(k, m)
+
+    inputs = torch.stack(
+        [
+            x_slab_scaled.reshape(-1),
+            t_expanded.reshape(-1),
+        ],
+        dim=1,
+    )
+    inputs.requires_grad_(True)
+
+    log_N_flat = model(inputs)
+
+    if log_N_flat.shape != (k * m, n_species):
+        raise ValueError(
+            f"Model returned {tuple(log_N_flat.shape)}, "
+            f"expected {(k * m, n_species)}."
+        )
+
+    dlogN_dx_scaled_rows = []
+    dlogN_dt_scaled_rows = []
+
+    for i in range(n_species):
+        grad_i = torch.autograd.grad(
+            log_N_flat[:, i].sum(),
+            inputs,
+            create_graph=True,
+            retain_graph=True,
+            allow_unused=False,
+        )[0]
+        dlogN_dx_scaled_rows.append(grad_i[:, 0])
+        dlogN_dt_scaled_rows.append(grad_i[:, 1])
+
+    log_N = (
+        log_N_flat
+        .reshape(k, m, n_species)
+        .permute(0, 2, 1)
+        .contiguous()
+    )
+    N = torch.exp(log_N)
+
+    dlogN_dx_scaled = (
+        torch.stack(dlogN_dx_scaled_rows, dim=1)
+        .reshape(k, m, n_species)
+        .permute(0, 2, 1)
+        .contiguous()
+    )
+    dlogN_dt_scaled = (
+        torch.stack(dlogN_dt_scaled_rows, dim=1)
+        .reshape(k, m, n_species)
+        .permute(0, 2, 1)
+        .contiguous()
+    )
+
+    x_min, x_max = _x_limits(params)
+    t_min, t_max = _t_limits(params)
+
+    dlogN_dx = dlogN_dx_scaled / (x_max - x_min)
+    dlogN_dt = dlogN_dt_scaled / (t_max - t_min)
+    dlogN_dw = dlogN_dx / w_slab[:, None, :]
+
+    dN_dt = N * dlogN_dt
+    dN_dw = N * dlogN_dw
+
+    return {
+        "log_N_eval": log_N,
+        "N_eval": N,
+        "dlogN_dt": dlogN_dt,
+        "dlogN_dw": dlogN_dw,
+        "dN_dt": dN_dt,
+        "dN_dw": dN_dw,
+    }

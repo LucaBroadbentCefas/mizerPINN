@@ -10,7 +10,11 @@ from PINNmizer.params import (
     active_grid_mask,
     active_eval_mask,
 )
-from PINNmizer.pinn.pde_state import compute_pde_state, compute_pde_state_paired
+from PINNmizer.pinn.pde_state import (
+    compute_pde_state,
+    compute_pde_state_paired,
+    compute_pde_state_r3_slabbed,
+)
 from PINNmizer.pinn.residual import compute_pde_residual_from_state
 
 
@@ -49,6 +53,19 @@ def _masked_square_mean(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         raise ValueError("Masked loss has zero active entries.")
 
     return ((x ** 2) * mask).sum() / denom
+
+def _active_eval_mask_for_slab(
+    w_slab: torch.Tensor,
+    params: MizerTorchParams,
+) -> torch.Tensor:
+    if w_slab.ndim != 2:
+        raise ValueError(f"w_slab must be [K, M], got {tuple(w_slab.shape)}.")
+
+    k, m = w_slab.shape
+    flat_mask = active_eval_mask(w_slab.reshape(-1), params)
+    n_species = flat_mask.shape[0]
+
+    return flat_mask.reshape(n_species, k, m).permute(1, 0, 2).contiguous()
 
 def compute_initial_condition_loss_from_state(state: dict[str, object], params: MizerTorchParams, n_init: torch.Tensor, *, species_idx: int | None = None, eps: float = 1e-30) -> dict[str, torch.Tensor]:
     dtype, device = _params_dtype_device(params)
@@ -218,6 +235,128 @@ def compute_pde_loss_paired(
         "loss_pde": loss_pde,
         "loss_ic": loss_ic,
         "loss_bc": loss_bc,
+    }
+
+    return loss, out
+
+def compute_pde_loss_r3_slabbed(
+    model,
+    batch: dict[str, torch.Tensor],
+    params: MizerTorchParams,
+    n_pp: torch.Tensor,
+    residual_form: str = "log",
+    *,
+    n_init: torch.Tensor | None = None,
+    lambda_pde: float = 1.0,
+    lambda_ic: float = 0.0,
+    lambda_bc: float = 0.0,
+    boundary_loss_form: str = "log",
+    species_idx: int | None = None,
+    eps: float = 1e-30,
+    bc_eps: float | None = None,
+    pde_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    include_ic = lambda_ic != 0.0
+
+    state = compute_pde_state_r3_slabbed(
+        model=model,
+        batch=batch,
+        params=params,
+        n_pp=n_pp,
+        include_ic=include_ic,
+    )
+
+    residual_out = compute_pde_residual_from_state(state)
+
+    if residual_form == "log":
+        residual = residual_out["residual_log"]
+    elif residual_form == "physical":
+        residual = residual_out["residual"]
+    else:
+        raise ValueError("residual_form must be 'log' or 'physical'.")
+
+    if residual.ndim != 3:
+        raise ValueError(
+            "Slabbed R3 residual must be [K, n_species, M], "
+            f"got {tuple(residual.shape)}."
+        )
+
+    w_slab = batch["w_slab"]
+    mask = _active_eval_mask_for_slab(w_slab, params).to(
+        dtype=residual.dtype,
+        device=residual.device,
+    )
+
+    if mask.shape != residual.shape:
+        raise ValueError(
+            f"Slabbed R3 mask shape {tuple(mask.shape)} does not match "
+            f"residual shape {tuple(residual.shape)}."
+        )
+
+    if pde_weights is None:
+        weighted_mask = mask
+    else:
+        pde_weights = pde_weights.to(dtype=residual.dtype, device=residual.device)
+        if pde_weights.ndim != 1 or pde_weights.numel() != residual.shape[0]:
+            raise ValueError(
+                "pde_weights must be [K] for slabbed R3. "
+                f"Got {tuple(pde_weights.shape)}, expected ({residual.shape[0]},)."
+            )
+        weighted_mask = mask * pde_weights[:, None, None]
+
+    denom = mask.sum()
+    if not bool((denom > 0).detach().cpu()):
+        raise ValueError("Slabbed R3 PDE loss has zero active entries.")
+
+    loss_pde = ((residual ** 2) * weighted_mask).sum() / denom
+
+    dtype, device = _params_dtype_device(params)
+    zero = torch.zeros((), dtype=dtype, device=device)
+
+    if lambda_ic != 0.0:
+        if n_init is None:
+            raise ValueError("lambda_ic != 0 requires n_init.")
+        ic_out = compute_initial_condition_loss_from_state(
+            state=state,
+            params=params,
+            n_init=n_init,
+            species_idx=species_idx,
+            eps=eps,
+        )
+        loss_ic = ic_out["loss_ic"]
+    else:
+        ic_out = {}
+        loss_ic = zero
+
+    if lambda_bc != 0.0:
+        bc_out = compute_recruitment_boundary_loss_from_state(
+            state=state,
+            params=params,
+            species_idx=species_idx,
+            loss_form=boundary_loss_form,
+            eps=eps if bc_eps is None else bc_eps,
+        )
+        loss_bc = bc_out["loss_bc"]
+    else:
+        bc_out = {}
+        loss_bc = zero
+
+    loss = lambda_pde * loss_pde + lambda_ic * loss_ic + lambda_bc * loss_bc
+
+    k, m = w_slab.shape
+
+    out = {
+        **residual_out,
+        **ic_out,
+        **bc_out,
+        "loss": loss,
+        "loss_pde": loss_pde,
+        "loss_ic": loss_ic,
+        "loss_bc": loss_bc,
+        "r3_n_time": torch.as_tensor(float(k), dtype=dtype, device=device),
+        "r3_n_eval_per_time": torch.as_tensor(float(m), dtype=dtype, device=device),
+        "r3_population_size": torch.as_tensor(float(k * m), dtype=dtype, device=device),
+        "r3_biology_time_loops": torch.as_tensor(float(k), dtype=dtype, device=device),
     }
 
     return loss, out

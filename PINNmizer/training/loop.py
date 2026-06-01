@@ -7,7 +7,11 @@ import torch
 import torch.nn as nn
 
 from PINNmizer.pinn.sampling import sample_pde_batch
-from PINNmizer.pinn.losses import compute_pde_loss, compute_pde_loss_paired
+from PINNmizer.pinn.losses import (
+    compute_pde_loss,
+    compute_pde_loss_paired,
+    compute_pde_loss_r3_slabbed,
+)
 from PINNmizer.pinn.r3 import update_r3_population_
 from PINNmizer.training.weighting import update_wang_gradient_weights_
 from PINNmizer.pinn.timestep_consistency import compute_timestep_consistency_loss
@@ -112,9 +116,11 @@ def train_one_step(
 
         pde_weights = None
         if collocation_strategy == "causal-r3" and causal_r3_weight_pde_loss:
-            pde_weights = causal_r3.gate(batch["t_pair"], params)
+            if causal_r3 is None:
+                raise ValueError("causal-r3 weighting requires causal_r3.")
+            pde_weights = causal_r3.gate(batch["t_slab"], params)
 
-        _, out = compute_pde_loss_paired(
+        _, out = compute_pde_loss_r3_slabbed(
             model=model,
             batch=batch,
             params=params,
@@ -242,6 +248,9 @@ def train_one_step(
 
     r3_diag = {
         "r3_population_size": math.nan,
+        "r3_n_time": math.nan,
+        "r3_n_eval_per_time": math.nan,
+        "r3_biology_time_loops": math.nan,
         "r3_retained_fraction": math.nan,
         "r3_resampled": math.nan,
         "r3_score_mean": math.nan,
@@ -260,6 +269,15 @@ def train_one_step(
             )
 
             r3_diag.update(
+                {
+                    "r3_population_size": float(batch["w_slab"].numel()),
+                    "r3_n_time": float(batch["t_slab"].numel()),
+                    "r3_n_eval_per_time": float(batch["w_slab"].shape[1]),
+                    "r3_biology_time_loops": float(batch["t_slab"].numel()),
+                }
+            )            
+
+            r3_diag.update(
                 update_r3_population_(
                     population=r3_population,
                     residual=residual_for_score,
@@ -273,7 +291,7 @@ def train_one_step(
 
         if collocation_strategy == "causal-r3":
             r3_diag.update(causal_r3.update_(out["loss_pde"]))
-            gate = causal_r3.gate(batch["t_pair"], params).detach()
+            gate = causal_r3.gate(batch["t_slab"], params).detach()
             r3_diag["causal_r3_gate_mean"] = float(gate.mean().cpu())
 
     residual_log = out["residual_log"].detach()

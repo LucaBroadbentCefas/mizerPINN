@@ -274,6 +274,7 @@ def main() -> None:
         r3_population = make_r3_population(
             params=params,
             n_pair=r3_population_size,
+            n_time=args.n_time,
             species_idx=0,
             seed=args.r3_seed,
         )
@@ -377,6 +378,15 @@ def main() -> None:
         "causal_r3_gamma_max": args.causal_r3_gamma_max,
         "causal_r3_weight_pde_loss": args.causal_r3_weight_pde_loss,
         "causal_r3_score": args.causal_r3_score,
+        "r3_effective_population_size": (
+            r3_population.population_size if r3_population is not None else None
+        ),
+        "r3_n_time": (
+            r3_population.n_time if r3_population is not None else None
+        ),
+        "r3_n_eval_per_time": (
+            r3_population.n_eval_per_time if r3_population is not None else None
+        ),
         "note": (
             "Composite PINN loss with PDE, IC, and recruitment boundary terms. "
             "IC/BC weights are adapted using Wang-style gradient statistics."
