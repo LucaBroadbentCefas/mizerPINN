@@ -189,9 +189,9 @@ def compute_recruitment_boundary_loss_from_state(
         elif loss_form == "physical":
             residual_valid = N_left[valid_mask] - target_N_valid
         else:
-            residual_valid = (
-                N_left[valid_mask] - target_N_valid
-            ) / torch.clamp(torch.abs(target_N_valid), min=eps)
+            residual_valid = 1 - (
+               (N_left[valid_mask]  * g_left[valid_mask]) / recruitment_flux[valid_mask]
+            ) 
 
         loss_bc = (residual_valid ** 2).mean()
 
