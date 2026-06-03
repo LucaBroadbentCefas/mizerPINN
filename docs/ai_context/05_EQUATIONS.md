@@ -52,7 +52,7 @@ dN_dt = N * dlogN_dt
 dN_dw = N * dlogN_dw
 ```
 
-This conversion is unchanged between Cartesian and paired R3 collocation. The tensor geometry changes; the calculus does not.
+This conversion is unchanged between Cartesian, flat paired, and slab/time R3 collocation. The tensor geometry changes; the calculus does not.
 
 ## Model output
 
@@ -335,7 +335,7 @@ mu_eval = mu_b_eval + pred_mort_eval
 
 The current continuous total mortality function used by PDE residual ignores fishing mortality.
 
-## Recruitment flux used in boundary loss
+## Recruitment flux and boundary loss
 
 Current direct recruitment from growth grid:
 
@@ -347,25 +347,38 @@ rdi_flux = 0.5 * repro_integral * erepro / egg_w
 rdd_flux = rdi_flux / (1 + rdi_flux / r_max)
 ```
 
-Boundary condition:
+Continuous flux-boundary equation assumed by the current BC loss:
 
 ```text
-g_i(w_min_i,t) * N_i(w_min_i,t) = RDD_i(t)
+J_i(w_min_i,t) = R_i(t)
+J_i = g_i N_i
+therefore g_i(w_min_i,t) * N_i(w_min_i,t) = R_i(t)
 ```
 
-The implemented left flux is:
+Current implementation excludes invalid boundary samples:
 
 ```text
-flux_left = g_left * N_left
+valid = finite(log_N_left, N_left, g_left, R) and g_left > bc_g_min and R > 0
 ```
 
-Boundary residual forms:
+When valid, target density is:
 
 ```text
-physical: flux_left - recruitment_flux
-log:      log(clamp(flux_left, eps)) - log(clamp(recruitment_flux, eps))
-relative: (flux_left - recruitment_flux) / clamp(abs(recruitment_flux), eps)
+N_target = R / g_left
+log_N_target = log(R) - log(g_left)
 ```
+
+Loss forms currently mean:
+
+```text
+log:      log_N_left - log_N_target
+physical: N_left - N_target
+relative: 1 - (N_left * g_left) / R
+```
+
+The relative form is a dimensionless flux-ratio residual. It replaced the older density-relative residual `(N_left - N_target) / abs(N_target)` on 2026-06-02.
+
+Do not treat this as validated evidence that the mizer first-bin numerical update satisfies `gN = R`. Recent work found `g(w_min)` can be extremely small while exported mizer first-bin `N` and recruitment `R` are similar in magnitude, making `R/g` numerically implausible as a direct density anchor. The BC loss is therefore an experimental continuous-flux assumption and remains inactive by default through `lambda_bc = 0.0`.
 
 ## Active-size masking
 
@@ -386,6 +399,7 @@ For arbitrary residual/evaluation points:
 ```text
 active_eval_mask(w_eval, params): [n_species, n_eval]
 active_eval_mask(w_pair, params): [n_species, n_pair]
+active_eval_mask(w_slab.reshape(-1), params) -> reshape to [K, n_species, M]
 ```
 
 Losses and R3 scores should not be influenced by inactive weights above known species `w_max`. Sampling inside `w_max` reduces wasted points but does not replace masking in the loss.
@@ -451,67 +465,87 @@ else:
 
 `params.dt` should represent the mizer timestep used by the fixture/export. `--timestep-dt` is an explicit experimental override.
 
-## R3 paired collocation equations
+## Current slab/time R3 equations
 
 R3/Causal R3 is a collocation strategy, not a biological equation.
 
-At optimisation step `m`, maintain a fixed population of paired physical collocation points:
+At optimisation step `m`, maintain a slabbed population:
 
 ```text
-P^(m) = {(x_j, t_j)}_{j=1}^{n_pair}
-w_j = exp(x_j)
+t_k: [K]
+x_km: [K, M]
+w_km = exp(x_km)
 ```
 
-Paired residual tensor convention:
+Before each R3/Causal R3 training step, current source resamples time slabs under the current causal time horizon:
 
 ```text
-R_ij = residual for species i at paired point j
-R: [n_species, n_pair]
+t_k ~ stratified Uniform(t_min, t_max_current)
+```
+
+where:
+
+```text
+t_max_current = t_min + causal_fraction(step) * (t_max - t_min)
+```
+
+The `x_km` values persist across steps except where released by R3. Residual tensor convention:
+
+```text
+R_kim = residual for species i at slab time k and x-index m
+R: [K, n_species, M]
 ```
 
 Active mask:
 
 ```text
-M_ij = 1[w_j <= w_max_i]
+M_kim = 1[w_km <= w_max_i]
 ```
 
-Default absolute R3 score:
+Default absolute R3 score per slab point:
 
 ```text
-s_j = sum_i M_ij |R_ij| / max(sum_i M_ij, 1)
+s_km = sum_i M_kim |R_kim| / max(sum_i M_kim, 1)
 ```
 
 Optional squared R3 score:
 
 ```text
-s_j = sum_i M_ij R_ij^2 / max(sum_i M_ij, 1)
+s_km = sum_i M_kim R_kim^2 / max(sum_i M_kim, 1)
+```
+
+If Causal R3 score-gating is active:
+
+```text
+s_km_causal = s_km * G(t_k; alpha, gamma)
 ```
 
 Mean threshold:
 
 ```text
-tau = mean_j s_j
+tau = mean_{k,m} s_km
 ```
 
 Retain/release rule:
 
 ```text
-retain point j if s_j > tau
-release point j if s_j <= tau
+retain x_km if s_km > tau
+release x_km if s_km <= tau
 ```
 
-Released points are resampled uniformly from the physical domain:
+Released `x` positions are resampled uniformly from the physical log-weight domain, bounded by species `w_max` for current single-species training:
 
 ```text
-x_new ~ Uniform(x_min, min(x_grid_max, log(w_max_i)))
-t_new ~ Uniform(t_min, t_max)
+x_new ~ Uniform(x_min, min(x_grid_max, log(w_max_0)))
 ```
 
-For current single-species training, use `species_idx = 0` for the sampling `w_max` bound.
+Only `x_points` are retained/resampled by R3. Time slabs are resampled every step.
+
+Historical flat-paired R3 equations used `P = {(x_j,t_j)}` and residual shape `[n_species, n_pair]`. Keep that only as historical context; the current performance-oriented implementation is slab/time R3.
 
 ## Causal R3 equations
 
-Causal R3 uses a smooth time gate over paired points:
+Causal R3 uses a smooth time gate over slab times:
 
 ```text
 t_scaled = (t - t_min) / (t_max - t_min)
@@ -523,16 +557,16 @@ Early times receive gate values near 1. Later times receive values near 0 until 
 Causal score option:
 
 ```text
-s_j_causal = s_j * G(t_j; alpha, gamma)
+s_km_causal = s_km * G(t_k; alpha, gamma)
 ```
 
 Causally weighted PDE loss option:
 
 ```text
-L_PDE_causal = sum_{i,j} M_ij G(t_j) R_ij^2 / sum_{i,j} M_ij
+L_PDE_causal = sum_{k,i,m} M_kim G(t_k) R_kim^2 / sum_{k,i,m} M_kim
 ```
 
-Do not normalise by `sum M_ij G(t_j)` if the intention is temporal reveal/suppression. Normalising by the gate sum turns the gate into relative reweighting rather than reducing unrevealed late-time influence.
+Do not normalise by `sum M_kim G(t_k)` if the intention is temporal reveal/suppression. Normalising by the gate sum turns the gate into relative reweighting rather than reducing unrevealed late-time influence.
 
 A simple gamma update is:
 
@@ -552,10 +586,10 @@ Current training uses PDE as the anchor:
 w_pde = 1
 ```
 
-For every non-PDE loss component currently present in `raw_losses`, including IC, BC, and timestep:
+For every non-PDE loss component currently present in the weighting dictionary, including IC, BC, and timestep:
 
 ```text
-target_weight_component = max_abs_grad(loss_pde) / mean_abs_grad(loss_component)
+target_weight_component = max_abs_grad(lambda_pde * loss_pde_anchor) / mean_abs_grad(lambda_component * loss_component)
 ```
 
 Then clipped to `[weight_min, weight_max]` and updated either by hard set or exponential smoothing:
@@ -564,9 +598,18 @@ Then clipped to `[weight_min, weight_max]` and updated either by hard set or exp
 w_component = (1 - alpha) * w_component + alpha * target_weight_component
 ```
 
-This is an optimisation heuristic, not a biological equation. Because timestep is now a possible non-PDE component, adding a future loss to `raw_losses` also adds it to the adaptive weighting system unless deliberately excluded.
+This is an optimisation heuristic, not a biological equation. Adding a future loss to the weighting dictionary also adds it to the adaptive weighting system unless deliberately excluded.
 
-If Causal R3 weights the PDE loss, the PDE loss seen by Wang weighting should be the actual PDE objective being optimised.
+Current diagnostics separate:
+
+```text
+wang_scaled_loss_component = w_component * loss_component
+objective_loss_component = lambda_component * w_component * loss_component
+```
+
+Use `objective_loss_*` or `weighted_loss_*` for actual objective contribution. Use `wang_scaled_loss_*` only to inspect adaptive-weight scaling before lambda multiplication.
+
+When Causal R3 uses a gated PDE objective, Wang weighting currently uses `loss_pde_ungated` as the PDE anchor if available. This keeps the gradient-statistic anchor tied to the full residual, while the optimised PDE objective can still be gated.
 
 ## Causal time curriculum
 
@@ -576,7 +619,7 @@ Current training supports the original causal curriculum:
 t_upper = t_min + fraction(step) * (t_max - t_min)
 ```
 
-The PDE sampler draws times from:
+The uniform PDE sampler draws times from:
 
 ```text
 Uniform(t_min, t_upper)
@@ -588,4 +631,4 @@ Modes:
 - `linear`: fraction ramps linearly from start fraction to 1;
 - `step`: fraction follows supplied schedule.
 
-This is distinct from Causal R3. The old causal curriculum restricts the sampled time interval. Causal R3 applies a smooth gate to paired points. Do not silently stack them without an explicit design decision.
+For R3/Causal R3, this same `t_upper` is passed as `t_max_current` to `R3Population.resample_time_points_()` before each step. Therefore the old categorical rule “do not stack R3 with causal curriculum” is obsolete for the current source. Causal time truncation and Causal R3 gating still have different meanings and should be interpreted separately.
