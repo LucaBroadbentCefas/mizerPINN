@@ -233,6 +233,20 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    parser.add_argument(
+        "--bc-use-constant-r",
+        action="store_true",
+        default=False,
+        help="Use a constant recruitment flux target in the BC loss.",
+    )
+    
+    parser.add_argument(
+        "--bc-constant-r",
+        type=float,
+        default=None,
+        help="Constant recruitment flux target used when --bc-use-constant-r is set.",
+    )
+
     return parser.parse_args()
 
 
@@ -397,7 +411,9 @@ def main() -> None:
         "r3_n_eval_per_time": (
             r3_population.n_eval_per_time if r3_population is not None else None
         ),
-        "bc_g_min": args.bc_g_min,        
+        "bc_g_min": args.bc_g_min, 
+        "bc_use_constant_r": args.bc_use_constant_r,
+        "bc_constant_r": args.bc_constant_r,
         "note": (
             "Composite PINN loss with PDE, IC, and recruitment boundary terms. "
             "IC/BC weights are adapted using Wang-style gradient statistics."
@@ -470,6 +486,8 @@ def main() -> None:
                 causal_r3=causal_r3,
                 causal_r3_weight_pde_loss=args.causal_r3_weight_pde_loss,
                 causal_r3_score=args.causal_r3_score,
+                bc_use_constant_r=args.bc_use_constant_r,
+                bc_constant_r=args.bc_constant_r,
             )
 
             history.append(row)
@@ -486,6 +504,8 @@ def main() -> None:
                     species_idx=0,
                     bc_g_min=args.bc_g_min,                    
                     compute_grad_norms=(step == 1 or step % diag_grad_every == 0),
+                    bc_use_constant_r=args.bc_use_constant_r,
+                    bc_constant_r=args.bc_constant_r,
                 )
             
                 diag_row = {
@@ -621,11 +641,13 @@ def main() -> None:
             n_init=n_init,
             outdir=run_dir / "fixed_grid_diagnostics",
             residual_form=args.residual_form,
-            boundary_loss_form="log",
+            boundary_loss_form=args.boundary_loss_form,
             species_idx=0,
             n_time=args.diag_final_n_time,
             n_eval=args.diag_final_n_eval,
             bc_g_min=args.bc_g_min,
+            bc_use_constant_r=args.bc_use_constant_r,
+            bc_constant_r=args.bc_constant_r,
         )
 
     except Exception:

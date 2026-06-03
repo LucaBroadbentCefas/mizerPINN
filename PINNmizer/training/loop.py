@@ -53,6 +53,8 @@ def train_one_step(
     eps: float,
     bc_eps: float | None,
     bc_g_min: float,
+    bc_use_constant_r: bool = False,
+    bc_constant_r: float | None = None,
     weight_state: dict[str, bool],
     hard_set_first_weight_update: bool,
     step: int,
@@ -108,6 +110,8 @@ def train_one_step(
             eps=eps,
             bc_eps=bc_eps,
             bc_g_min=bc_g_min,
+            use_constant_recruitment_r=bc_use_constant_r,
+            constant_recruitment_r=bc_constant_r,
         )
 
     elif collocation_strategy in {"r3", "causal-r3"}:
@@ -143,6 +147,8 @@ def train_one_step(
             bc_eps=bc_eps,
             bc_g_min=bc_g_min,
             pde_weights=pde_weights,
+            use_constant_recruitment_r=bc_use_constant_r,
+            constant_recruitment_r=bc_constant_r,
         )
 
     else:
@@ -402,5 +408,7 @@ def train_one_step(
         "timestep_log_abs_max": float((timestep_out["log_abs_max"] if timestep_out is not None else torch.tensor(float("nan"))).detach().cpu()),
         "timestep_relative_abs_mean": float((timestep_out["relative_abs_mean"] if timestep_out is not None else torch.tensor(float("nan"))).detach().cpu()),
         "timestep_relative_abs_max": float((timestep_out["relative_abs_max"] if timestep_out is not None else torch.tensor(float("nan"))).detach().cpu()),
+        "bc_use_constant_r": 1.0 if bc_use_constant_r else 0.0,
+        "bc_constant_r": float(bc_constant_r) if bc_constant_r is not None else math.nan,
     }
     return base

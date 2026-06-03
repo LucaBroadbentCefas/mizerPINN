@@ -97,6 +97,8 @@ def compute_recruitment_boundary_loss_from_state(
     loss_form: str = "log",
     eps: float = 1e-30,
     bc_g_min: float = 1e-12,
+    use_constant_recruitment_r: bool = False,
+    constant_recruitment_r: float | None = None,
 ) -> dict[str, torch.Tensor]:
     """
     Recruitment boundary condition.
@@ -135,6 +137,22 @@ def compute_recruitment_boundary_loss_from_state(
     N_grid = state["N_grid"]
     growth_grid = state["growth_grid"]
     recruitment_flux = state["recruitment"]["rdd_flux"]
+
+    if use_constant_recruitment_r:
+        if constant_recruitment_r is None:
+            raise ValueError(
+                "constant_recruitment_r must be provided when "
+                "use_constant_recruitment_r=True."
+            )
+        if constant_recruitment_r <= 0.0:
+            raise ValueError("constant_recruitment_r must be > 0.")
+    
+        constant_r = torch.as_tensor(
+            constant_recruitment_r,
+            dtype=recruitment_flux.dtype,
+            device=recruitment_flux.device,
+        )
+        recruitment_flux = torch.full_like(recruitment_flux, constant_r)
 
     egg_idx = params.w_min_idx.to(torch.long) - 1
 
@@ -259,9 +277,19 @@ def compute_recruitment_boundary_loss_from_state(
         "frac_g_left_clamped": invalid_g_fraction.detach(),
         "frac_recruitment_flux_clamped": invalid_rec_fraction.detach(),
         "frac_flux_left_clamped": (flux_left.detach() <= eps).to(dtype=log_N_left.dtype).mean(),
+        "bc_use_constant_recruitment_r": torch.as_tensor(
+            1.0 if use_constant_recruitment_r else 0.0,
+            dtype=log_N_left.dtype,
+            device=log_N_left.device,
+        ),
+        "bc_constant_recruitment_r": torch.as_tensor(
+            float(constant_recruitment_r) if constant_recruitment_r is not None else float("nan"),
+            dtype=log_N_left.dtype,
+            device=log_N_left.device,
+        ),
     }
 
-def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchParams, n_pp: torch.Tensor, residual_form: str = "log", *, n_init: torch.Tensor | None = None, lambda_pde: float = 1.0, lambda_ic: float = 0.0, lambda_bc: float = 0.0, boundary_loss_form: str = "log", species_idx: int | None = None, eps: float = 1e-30, bc_eps: float | None = None, bc_g_min: float = 1e-12,) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchParams, n_pp: torch.Tensor, residual_form: str = "log", *, n_init: torch.Tensor | None = None, lambda_pde: float = 1.0, lambda_ic: float = 0.0, lambda_bc: float = 0.0, boundary_loss_form: str = "log", species_idx: int | None = None, eps: float = 1e-30, bc_eps: float | None = None, bc_g_min: float = 1e-12, use_constant_recruitment_r: bool = False, constant_recruitment_r: float | None = None,) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     include_ic = lambda_ic != 0.0
     state = compute_pde_state(model=model, batch=batch, params=params, n_pp=n_pp, include_ic=include_ic)
     residual_out = compute_pde_residual_from_state(state)
@@ -287,6 +315,8 @@ def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchPa
             loss_form=boundary_loss_form,
             eps=bc_eps_value,
             bc_g_min=bc_g_min,
+            use_constant_recruitment_r=use_constant_recruitment_r,
+            constant_recruitment_r=constant_recruitment_r,
         )
         loss_bc = bc_out["loss_bc"]
     else:
@@ -312,6 +342,8 @@ def compute_pde_loss_paired(
     bc_eps: float | None = None, 
     bc_g_min: float = 1e-12,
     pde_weights: torch.Tensor | None = None,
+    use_constant_recruitment_r: bool = False,
+    constant_recruitment_r: float | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     include_ic = lambda_ic != 0.0
 
@@ -377,6 +409,8 @@ def compute_pde_loss_paired(
             loss_form=boundary_loss_form,
             eps=eps if bc_eps is None else bc_eps,
             bc_g_min=bc_g_min,
+            use_constant_recruitment_r=use_constant_recruitment_r,
+            constant_recruitment_r=constant_recruitment_r,
         )
         loss_bc = bc_out["loss_bc"]
     else:
@@ -414,6 +448,8 @@ def compute_pde_loss_r3_slabbed(
     bc_eps: float | None = None,
     pde_weights: torch.Tensor | None = None,
     bc_g_min: float = 1e-12,
+    use_constant_recruitment_r: bool = False,
+    constant_recruitment_r: float | None = None,    
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     include_ic = lambda_ic != 0.0
 
@@ -505,6 +541,8 @@ def compute_pde_loss_r3_slabbed(
             loss_form=boundary_loss_form,
             eps=eps if bc_eps is None else bc_eps,
             bc_g_min=bc_g_min,
+            use_constant_recruitment_r=use_constant_recruitment_r,
+            constant_recruitment_r=constant_recruitment_r,
         )
         loss_bc = bc_out["loss_bc"]
     else:

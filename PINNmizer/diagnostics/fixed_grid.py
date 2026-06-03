@@ -123,6 +123,8 @@ def compute_fixed_diagnostics(
     loss_weights: dict[str, float] | None = None,
     bc_eps: float | None = None,
     bc_g_min: float = 1e-12,    
+    bc_use_constant_r: bool = False,
+    bc_constant_r: float | None = None,
 ) -> dict[str, float]:
     """
     Deterministic diagnostics on a fixed grid.
@@ -148,6 +150,8 @@ def compute_fixed_diagnostics(
         eps=eps,
         bc_eps=bc_eps,
         bc_g_min=bc_g_min,
+        use_constant_recruitment_r=bc_use_constant_r,
+        constant_recruitment_r=bc_constant_r,
         )
 
     advective = out["g_eval"] * out["dlogN_dw"]
@@ -182,6 +186,8 @@ def compute_fixed_diagnostics(
         + row["fixed_loss_ic"]
         + row["fixed_loss_bc"]
     )
+    row["bc_use_constant_r"] = 1.0 if bc_use_constant_r else 0.0
+    row["bc_constant_r"] = float(bc_constant_r) if bc_constant_r is not None else math.nan
     
     if loss_weights is not None:
         row["fixed_w_pde"] = float(loss_weights["pde"])
@@ -237,6 +243,8 @@ def compute_fixed_diagnostics(
             "bc_target_log_N_max",
             "bc_target_N_min",
             "bc_target_N_max",
+            "bc_use_constant_recruitment_r",
+            "bc_constant_recruitment_r",
         ]:
             if key in out:
                 row[key] = _as_float(out[key])

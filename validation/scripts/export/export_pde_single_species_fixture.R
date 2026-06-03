@@ -2,7 +2,11 @@ outdir <- "validation/fixtures/pde_single_species"
 
 library(mizer)
 
-params_1 <- newMultispeciesParams(NS_params@species_params[1,], kappa = 1.0027e11)
+
+params_1 <- newMultispeciesParams(NS_params@species_params[1,], kappa = 2e11)
+
+params_1 <- steady(params_1)
+plot(project(params_1))
 
 export_mizer_inputs_for_python(
   params = params_1,

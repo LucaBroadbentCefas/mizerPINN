@@ -27,6 +27,8 @@ def save_fixed_grid_fields_and_plots(
     n_eval: int = 160,
     bc_g_min: float = 1e-12,
     fixed_batch: dict[str, torch.Tensor] | None = None,
+    bc_use_constant_r: bool = False,
+    bc_constant_r: float | None = None,
 ) -> None:
     """
     Final after-run diagnostic fields and heatmaps on one deterministic grid.
@@ -55,6 +57,8 @@ def save_fixed_grid_fields_and_plots(
         boundary_loss_form=boundary_loss_form,
         species_idx=species_idx,
         bc_g_min=bc_g_min,
+        use_constant_recruitment_r=bc_use_constant_r,
+        constant_recruitment_r=bc_constant_r,
     )
 
     t = fixed_batch["t_eval"].detach().cpu().numpy()
@@ -196,6 +200,12 @@ def save_fixed_grid_fields_and_plots(
                 "bc_valid": bc_valid_mask,
                 "bc_density_mismatch": N_left - bc_target_N,
                 "bc_log_density_mismatch": log_N_left - bc_target_log_N,
+                "bc_use_constant_r": np.full_like(t, 1.0 if bc_use_constant_r else 0.0, dtype=float),
+                "bc_constant_r": np.full_like(
+                    t,
+                    float(bc_constant_r) if bc_constant_r is not None else np.nan,
+                    dtype=float,
+                ),
             }
         ).to_csv(outdir / "boundary_flux_diagnostics.csv", index=False)
 
