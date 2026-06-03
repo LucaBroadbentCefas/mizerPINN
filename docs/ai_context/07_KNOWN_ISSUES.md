@@ -1,119 +1,120 @@
 # Known Issues
 
-## 1. Trivial or near-zero solution risk
+## 1. Trivial, near-zero, or time-invariant solution risk
 
 Status: active
 
 ### Description
 
-The PINN can reduce parts of the objective while producing very small abundance values over much of the domain. This is a known failure mode in PDE-constrained neural networks when constraints do not sufficiently identify the desired solution.
+The PINN can reduce parts of the objective while producing very small abundance values over much of the domain, or a nonzero but nearly time-invariant abundance surface. This is a known failure mode when constraints do not sufficiently identify the desired solution.
 
 ### Evidence so far
 
-Earlier logs and discussion showed cases where predicted `N` approached extremely small values while PDE residual terms could remain partly satisfied. The current training script now includes adaptive loss weighting, causal curriculum, final-bias initialisation from IC, optional timestep consistency, and diagnostics partly in response to this risk.
+Earlier logs and discussion showed cases where predicted `N` approached extremely small values while PDE residual terms could remain partly satisfied. The current training script now includes adaptive loss weighting, causal curriculum, final-bias initialisation from IC, optional timestep consistency, R3/Causal R3, and diagnostics partly in response to this risk.
 
-A recent Causal R3 run also showed collapse: with `--collocation-strategy causal-r3`, `--r3-population-size 300`, `--r3-update-every 1`, `--r3-warmup-steps 0`, `--r3-score-form abs`, `--residual-form log`, `--lambda-pde 1.0`, `--lambda-ic 1.0`, `--lambda-bc 1.0`, and `--lambda-timestep 0.0`, predicted `N` still moved toward near-zero around approximately 300 iterations while the scalar loss decreased.
+A Causal R3 run with population 300, update every 1, warmup 0, abs score, log residual, `lambda_pde = lambda_ic = lambda_bc = 1`, and `lambda_timestep = 0` still collapsed predicted `N` toward near-zero around approximately 300 iterations while scalar loss decreased.
 
-This means R3/Causal R3 is not, by itself, a fix for the trivial-solution problem. The failure is probably not only poor residual-point coverage. Stronger anchoring, loss scaling, timestep consistency, or residual validation remains necessary before interpreting training success.
+A later all-feature Causal R3 run avoided the strict zero solution but produced nearly time-invariant outputs. Fixed-grid PDE diagnostics improved early and then worsened. Timestep loss was effectively inactive because lambda and Wang weighting made the objective contribution negligible. IC weight also became very small. BC diagnostics were not yet trustworthy because the BC formulation was still being revised.
 
-### Plausible causes
+### Interpretation
 
-- PDE residual alone does not identify a unique biologically correct solution.
-- Initial, boundary, and timestep constraints may be too weak, badly scaled, inactive, or underweighted.
-- Log-form losses and clamping can hide physically bad flux behaviour.
-- Temporal propagation may be weak over long time horizons.
-- The network may satisfy local derivative constraints without learning the intended trajectory.
-- Biological operator or derivative mismatch may create a residual that is easier to satisfy than the true mizer dynamics.
-- Collocation sampling may underrepresent difficult regions.
-- R3/Causal R3 can concentrate sampling on residual artefacts if the residual or active-size masking is wrong.
+R3/Causal R3 is not, by itself, a fix for the trivial-solution problem. The failure is probably not only poor residual-point coverage. Strong anchoring, meaningful timestep consistency, valid recruitment-boundary handling, residual validation, and correct loss-scale diagnostics remain necessary before interpreting training success.
 
 ### Current mitigations
 
 - Initial-condition loss.
-- Recruitment-boundary loss implementation.
+- Recruitment-boundary loss implementation, inactive by default unless `lambda_bc` is overridden.
 - Optional fixed-grid timestep-consistency loss.
 - Wang-style gradient-statistic weighting.
 - Causal time curriculum.
-- R3/Causal R3 collocation to focus on high-residual paired or slabbed collocation regions.
+- Slab/time R3/Causal R3 collocation to focus on high-residual regions while reusing biological work across time slabs.
 - Final-layer bias initialisation from IC.
 - Fixed-grid diagnostics and output plots.
 
 ### Next checks
 
-- Treat the Causal R3 collapse run as evidence that residual-focused collocation alone is insufficient.
-- Compare PDE+IC with and without causal curriculum.
-- Compare Wang weights on/off.
-- Compare timestep loss inactive versus active.
-- Compare uniform collocation against R3/Causal R3 using fixed-grid diagnostics, not only training loss.
-- Run explicit PDE residual validation on mizer-generated trajectories.
-- Run timestep smoke checks before interpreting timestep-active training.
-- Check `N_eval_min`, `N_eval_max`, `log_N_eval_min`, and fixed-grid abundance heatmaps after every run.
+- Treat Causal R3 collapse and time-invariance runs as evidence that residual-focused collocation alone is insufficient.
+- Validate the PDE residual on known/mizer-generated trajectories before interpreting training failures as optimisation-only.
+- Compare uniform collocation against R3/Causal R3 using fixed-grid diagnostics, not only training batch loss.
+- Check `N_eval_min`, `N_eval_max`, `log_N_eval_min`, temporal variance, and fixed-grid abundance heatmaps after every run.
+- Inspect actual objective contributions using `objective_loss_*`, not only raw component losses.
 
-### Current collapse-debugging ablations
-
-Run these separately before stacking them:
-
-1. Stronger anchoring:
-   - `--lambda-ic 100`
-   - `--lambda-bc 100`
-   - Reason: collapse suggests PDE/R3 residual coverage is not enough to identify the desired abundance surface.
-2. Disable Wang weighting:
-   - `--disable-wang-weights`
-   - Reason: adaptive weights may suppress anchoring terms or overemphasise easy residual reduction.
-3. Slower optimiser:
-   - `--lr 3e-4`
-   - Reason: collapse around approximately 300 iterations may be an optimisation trajectory rather than only the final objective structure.
-4. Less aggressive R3 updating:
-   - `--r3-update-every 5` or `--r3-update-every 10`
-   - `--r3-warmup-steps 100`
-   - Reason: updating every step from iteration 1 may over-focus the population before the model has a meaningful surface.
-5. Weak timestep anchor:
-   - `--lambda-timestep 1e-4`
-   - `--timestep-loss-form log`
-   - `--timestep-dt 0.01`
-   - `--timestep-n-pairs 4`
-   - Reason: zero-collapse suggests weak temporal propagation; timestep loss gives a fixed-grid mizer-style temporal constraint.
-
-## 2. Boundary loss can be numerically misleading
+## 2. Recruitment boundary loss remains scientifically unsettled
 
 Status: active
 
 ### Description
 
-The recruitment-boundary loss has log, physical, and relative forms. The log form requires clamping. If `flux_left` is clamped heavily, the scalar loss can misrepresent actual boundary behaviour.
+The current code implements a recruitment-boundary loss under the continuous flux-boundary assumption:
 
-### Current diagnostics
+```text
+g(w_min,t) N(w_min,t) = R(t)
+```
 
-The current code exports:
+However, recent inspection showed that mizer-style exported values do not numerically support using the first-bin mizer `N` as if it satisfied this continuous boundary equation. In particular, `g(w_min)` can be extremely small while exported recruitment `R` and first-bin `N` are similar in magnitude, making `R/g` implausibly large as a direct density target.
 
-- `bc_eps`
-- `flux_left_min`
-- `flux_left_max`
-- `recruitment_flux_min`
-- `recruitment_flux_max`
-- `frac_flux_left_clamped`
-- `frac_recruitment_flux_clamped`
-- `boundary_residual_abs_p95`
-- `boundary_residual_abs_max`
-- flux mismatch metrics in fixed diagnostics.
+### Current implementation
 
-### Next checks
+`compute_recruitment_boundary_loss_from_state()` extracts:
 
-- Do not interpret BC loss without checking clamp fractions.
-- Compare log, physical, and relative boundary loss forms.
-- Confirm whether default `lambda_bc = 0.0` is intentional for current experiments.
+```text
+N_left, log_N_left, g_left, recruitment_flux
+```
 
-## 3. Timestep loss can dominate or go invalid
+at `egg_idx = params.w_min_idx - 1`, then excludes invalid samples:
+
+```text
+finite values
+and g_left > bc_g_min
+and recruitment_flux > 0
+```
+
+Loss forms currently mean:
+
+```text
+log:      log_N_left - log(R / g_left)
+physical: N_left - R / g_left
+relative: 1 - (N_left * g_left) / R
+```
+
+The relative form was changed on 2026-06-02 from a density-relative residual to a dimensionless flux-ratio residual. That is a scale improvement, not a proof that the boundary condition is biologically/numerically correct for the exported mizer data.
+
+### Current risks
+
+- `R/g` can become enormous when `g_left` is small but positive.
+- Excluding `g_left <= bc_g_min` may remove most or all BC samples.
+- The default `lambda_bc = 0.0`, so the BC implementation may be present but inactive.
+- A low relative flux-ratio loss does not imply that mizer first-bin density has been reproduced.
+- `gN/R` should not be treated as a mizer numerical validation metric unless the continuous-vs-discrete recruitment convention is explicitly reconciled.
+
+### Required diagnostics
+
+Check these before interpreting any BC-active run:
+
+- `bc_valid_fraction`
+- `bc_invalid_g_fraction`
+- `bc_invalid_recruitment_fraction`
+- `bc_nonfinite_fraction`
+- `bc_target_N_min`, `bc_target_N_max`
+- `bc_target_log_N_min`, `bc_target_log_N_max`
+- `boundary_residual_abs_p95`, `boundary_residual_abs_max`
+- `flux_left_min/max` and `recruitment_flux_min/max`
+
+### Next decision needed
+
+Decide whether recruitment should remain a strong pointwise boundary loss, be moved into a weak/integrated boundary formulation, be represented as a near-boundary source term, or be treated as diagnostic-only while other anchors are validated. Do not assume the current pointwise BC is final.
+
+## 3. Timestep loss can dominate, vanish, or go invalid
 
 Status: active
 
 ### Description
 
-The timestep-consistency loss compares model-predicted `N(w,t+dt)` with the fixed-grid `step(...)` projection from `N(w,t)`. Depending on residual form, `dt`, abundance scale, and Wang weights, this term can dominate the total objective or produce unstable gradients.
+The timestep-consistency loss compares model-predicted `N(w,t+dt)` with the fixed-grid `step(...)` projection from `N(w,t)`. Depending on residual form, `dt`, abundance scale, lambda, and Wang weights, this term can dominate the total objective or become effectively irrelevant.
 
 This loss is implemented in `PINNmizer/pinn/timestep_consistency.py`. It is an optional fixed-grid temporal regulariser, not part of the continuous/off-grid PDE residual.
 
-Recent collapse experiments used `--lambda-timestep 0.0`, so they do not test whether fixed-grid temporal anchoring prevents near-zero collapse.
+Recent all-feature runs showed timestep loss can be effectively inactive even when configured if `lambda_timestep` is small and Wang weighting drives `w_timestep` down.
 
 ### Current risks
 
@@ -121,31 +122,20 @@ Recent collapse experiments used `--lambda-timestep 0.0`, so they do not test wh
 - log-form residual depends on clamping;
 - relative-form residual can explode where the step target is near zero;
 - Wang weighting may amplify or suppress the term based on gradient statistics;
-- selected `t0` values near `t_max` are filtered, and all pairs may be removed;
+- selected `t0` values near `t_max_current` must satisfy `t0 + dt <= t_max_current`;
 - `detach_step_target=False` changes the gradient path substantially;
 - if `--timestep-dt` is omitted, behaviour depends on whether `params.dt` was loaded from `dt.csv`.
 
 ### Required checks
 
-- inspect `loss_timestep`, `w_timestep`, `weighted_loss_timestep`;
+- inspect `loss_timestep`, `w_timestep`, `lambda_timestep`, and `objective_loss_timestep`;
 - inspect `grad_timestep_mean_for_weighting` and `target_w_timestep`;
 - check timestep residual physical/log/relative summaries;
 - check whether valid timestep pairs remain after filtering;
 - compare `--timestep-loss-form physical`, `log`, and `relative`;
 - compare `--detach-step-target` against `--no-detach-step-target`;
 - verify explicit `--timestep-dt` versus fixture `params.dt`;
-- run the timestep smoke check before interpreting training.
-
-### Source-code issue recorded, not fixed here
-
-Current `PINNmizer/training/loop.py` filters sampled timestep pairs with logic equivalent to:
-
-```python
-valid = (t0 + dt_tensor) <= params.t_max
-t0 = t0[valid]
-```
-
-If all sampled times are too close to `t_max`, `t0` may become empty before calling `compute_timestep_consistency_loss()`. That could produce empty tensor reductions or NaN timestep loss. This should be patched separately if timestep-active training is used seriously.
+- run the timestep smoke check before interpreting timestep-active training.
 
 ## 4. PDE residual on mizer trajectory not yet formalised
 
@@ -190,31 +180,47 @@ The direct continuous encounter and predation mortality path may differ from the
 - Compare predation mortality at `w_eval = params.w`.
 - Document accepted discrepancy or add an ADR if kernel support changes.
 
-## 6. Wang-style weighting now supports arbitrary non-PDE losses
+## 6. Wang-style weighting diagnostics need objective-scale interpretation
 
-Status: active design risk, no longer module-location debt
+Status: active design risk
 
 ### Description
 
-The weighting code lives in `PINNmizer/training/weighting.py` and can update any non-PDE loss key included in the raw loss dictionary. PDE remains the anchor. For each non-PDE loss component included in `raw_losses`, including IC, BC, and timestep, the target weight is:
+The weighting code lives in `PINNmizer/training/weighting.py` and can update non-PDE loss weights using PDE gradients as anchor. Current training constructs lambda-scaled losses for the adaptive weighting calculation.
+
+For each non-PDE loss component included in the weighting dictionary, including IC, BC, and timestep, the target weight is effectively based on:
 
 ```text
-target_weight = max_abs_grad(loss_pde) / mean_abs_grad(loss_component)
+target_weight = max_abs_grad(lambda_pde * loss_pde_anchor) / mean_abs_grad(lambda_component * loss_component)
 ```
 
 The target is clipped to `[weight_min, weight_max]`, then either hard-set or exponentially smoothed.
 
+### Diagnostics distinction
+
+Use:
+
+```text
+objective_loss_component = lambda_component * w_component * loss_component
+```
+
+to interpret actual optimizer contribution.
+
+Use:
+
+```text
+wang_scaled_loss_component = w_component * loss_component
+```
+
+only to inspect adaptive-weight scaling before lambda multiplication.
+
+The older label `weighted_loss_*` is kept as a backward-compatible alias for objective contribution.
+
 ### Risk
 
-This generality is useful for timestep loss, but future losses must be added deliberately because every included loss affects adaptive weights. A diagnostic-only or experimental scalar loss should not be added to `raw_losses` unless it is intended to participate in optimisation and Wang weighting.
+A diagnostic-only or experimental scalar loss should not be added to the weighting dictionary unless it is intended to participate in optimisation and Wang weighting.
 
-If Causal R3 weights the PDE loss, Wang weighting should see the actual PDE objective being optimised; otherwise adaptive weighting diagnostics become hard to interpret.
-
-### Required checks
-
-- Confirm which loss keys are in `raw_losses` before interpreting weights.
-- Inspect `grad_*_mean_for_weighting` and `target_w_*` for every active component.
-- Do not describe Wang weighting as hard-coded only for PDE/IC/BC.
+If Causal R3 weights the PDE loss, current training uses `loss_pde_ungated` as the Wang anchor if available, while the optimised PDE term may be gated. Interpret `loss_pde_for_weighting`, `loss_pde_ungated`, `loss_pde_gated`, and `pde_gate_mean` together.
 
 ## 7. Training script is single-species only
 
@@ -246,145 +252,28 @@ Status: active feature risk
 
 R3 retains high-residual collocation regions and resamples low-residual regions. This can improve coverage of difficult regions, but it also means the method will concentrate training effort wherever the current residual is large.
 
+Current implementation is slab/time R3:
+
+```text
+t_points: [K]
+x_points: [K, M]
+residual: [K, n_species, M]
+```
+
+At each R3/Causal R3 step, time slabs are resampled under `t_max_current`; R3 retain/resample applies only to `x_points`.
+
 ### Risk
 
 If the residual implementation is wrong, the biological operator is mismatched, or active-size masking is incomplete, R3 will concentrate points on artefactual errors rather than fixing the underlying model. R3 is therefore not a replacement for residual validation.
 
-The recent Causal R3 collapse result confirms that residual-focused sampling alone is not sufficient evidence of a well-posed or biologically meaningful training objective.
+Do not keep recommending fixes for the old flat-paired performance bottleneck unless source inspection shows the slab/time path has regressed or is not being used.
+
+The old advice to forbid `R3/Causal R3 + causal_curriculum` is obsolete for current source: the ordinary causal curriculum now bounds R3 time resampling through `t_max_current`. Causal time truncation and Causal R3 gating still need separate interpretation.
 
 ### Required checks
 
 - Validate PDE residual on known/mizer-generated trajectories before treating R3 results as meaningful.
 - Compare R3 against uniform collocation using fixed-grid diagnostics, not only training batch loss.
-- Inspect where retained points concentrate if results look pathological.
+- Inspect where retained `x_points` concentrate if results look pathological.
+- Check `r3_n_time`, `r3_n_eval_per_time`, `r3_population_size`, and `r3_biology_time_loops` to understand actual work per step.
 - Keep active `w_max` masking in both sampling and loss/scoring.
-
-## 9. R3 geometry must preserve scored collocation structure
-
-Status: active feature risk
-
-### Description
-
-Daw-style R3 retains/replaces collocation points or regions based on their residual scores. A superficially simple implementation that retains separate marginal `x_eval` and `t_eval` vectors and then recombines them into a Cartesian product creates new points that were never scored.
-
-### Risk
-
-Do not describe retained marginal `x` and `t` vectors as exact R3.
-
-### Required checks
-
-- Flat R3 population should preserve full `(x,t)` pairs.
-- Slab/time R3 should preserve the intended scored slab/point structure and must document its retention semantics.
-- Retained locations should remain unchanged across an update.
-- Released locations should be replaced according to the strategy's documented sampling unit.
-
-## 10. Causal R3 and old causal curriculum should not be silently stacked
-
-Status: active feature risk
-
-### Description
-
-The existing causal curriculum truncates the sampled time horizon. Causal R3 uses a smooth gate over paired or slabbed collocation locations. These are not the same mechanism.
-
-### Risk
-
-Using both at once makes it unclear whether improvements or failures come from time-domain truncation, causal gate weighting, R3 resampling, or their interaction.
-
-### Required checks
-
-- Default R3/Causal R3 runs should use `--causal-curriculum off` unless deliberately testing stacked behaviour.
-- If stacking is later allowed, document it explicitly and run ablations.
-- Add or keep a CLI guard unless a future ADR deliberately permits stacking.
-
-### Important run-command warning
-
-When using `--collocation-strategy r3` or `--collocation-strategy causal-r3`, explicitly set:
-
-```bash
---causal-curriculum off
-```
-
-unless intentionally testing stacked behaviour.
-
-Reason:
-
-- old causal curriculum truncates `t_max_current`;
-- Causal R3 gates/scales collocation locations;
-- stacking both changes the training distribution and makes failure interpretation ambiguous.
-
-## 11. Flat paired R3 performance issue was addressed by slab/time R3
-
-Status: resolved by later implementation; keep as design history
-
-### Description
-
-Flat paired R3 can be slow because biological operators may be recomputed per pair. The project now has slab/time R3 sampling, and the user reports that the observed R3 performance issue has gone.
-
-### Risk
-
-Future assistants should not keep recommending performance fixes for the old flat paired R3 bottleneck unless inspecting the current source shows the slab/time path has regressed or is not being used.
-
-### Required checks
-
-- Inspect the current R3 implementation before giving runtime advice.
-- Distinguish exact flat paired R3 from slab/time R3.
-- Preserve the slab/time optimisation unless explicitly asked to revert it.
-
-## 12. Historical experiment logging is incomplete
-
-Status: active
-
-### Description
-
-The repository contains run outputs and configs, but the new `08_EXPERIMENT_LOG.jsonl` is not yet a complete historical record.
-
-### Risk
-
-Future chats may infer too much from sparse logs unless new experiments are appended systematically.
-
-### Required habit
-
-After each important run, append one JSONL row with:
-
-- date;
-- commit;
-- branch;
-- run directory;
-- command/config summary;
-- key metrics;
-- result interpretation;
-- next action.
-
-## 13. Matplotlib/diagnostic dependencies may fail in some environments
-
-Status: lower priority
-
-### Description
-
-Past discussion included a missing `matplotlib` error during post-training diagnostics. Current diagnostic modules import `matplotlib.pyplot`.
-
-### Risk
-
-A training run may finish but fail during plotting/output diagnostics if the environment lacks plotting dependencies.
-
-### Options
-
-1. Install plotting dependencies in the `mizer-torch` environment.
-2. Guard plotting imports and allow non-plot training completion.
-3. Separate training from post-training diagnostics.
-
-### Current recommendation
-
-If this failure recurs, use option 2 or 3 rather than letting plotting failure invalidate completed training.
-
-## 14. Root-level py_* validation-output folders are legacy artifacts
-
-Status: resolved as context/documentation issue; watch for regression
-
-### Description
-
-Generated validation outputs have been moved out of repository root and into:
-
-```text
-validation/outputs/
-```
