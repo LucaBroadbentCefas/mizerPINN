@@ -4,9 +4,11 @@
 
 | Symbol | Meaning |
 |---|---|
-| `n_time` | Number of sampled or diagnostic time values in Cartesian batches. |
-| `n_eval` | Number of arbitrary off-grid PDE evaluation weights in Cartesian batches. |
-| `n_pair` | Number of paired R3/Causal R3 collocation points. |
+| `n_time` | Number of sampled/diagnostic time values in Cartesian batches; also current slab count `K` in slabbed R3. |
+| `n_eval` | Number of arbitrary off-grid PDE evaluation weights in Cartesian batches; also default per-slab count `M` when `--r3-population-size` is omitted. |
+| `K` | Number of R3 time slabs. Current implementation uses `K = n_time`. |
+| `M` | Number of R3 x/log-weight points per time slab. |
+| `n_pair` | Historical flat-paired R3 point count; current effective slabbed population is `K * M`. |
 | `n_species` | Number of fish species. Current training script expects one species. |
 | `n_w` | Number of fish-grid size classes. |
 | `k_full` | Number of full grid points, including resource and fish grid points. |
@@ -61,20 +63,20 @@ reshape:    [n_time, n_x, n_species]
 permute:    [n_time, n_species, n_x]
 ```
 
-For planned paired R3 inputs, no Cartesian expansion is used:
+For current slabbed R3 inputs:
 
 ```text
-x_pair_scaled: [n_pair]
-t_pair_scaled: [n_pair]
-inputs:        [n_pair, 2]
-row j:         [x_pair_scaled[j], t_pair_scaled[j]]
+t_slab:        [K]
+x_slab:        [K, M]
+w_slab:        [K, M]
+t_slab_scaled: [K]
+x_slab_scaled: [K, M]
 ```
 
-Paired model outputs are transposed to:
+Each model input row corresponds to a specific slab cell `(k,m)`:
 
 ```text
-log_N_eval: [n_species, n_pair]
-N_eval:     [n_species, n_pair]
+row(k,m) = [x_slab_scaled[k,m], t_slab_scaled[k]]
 ```
 
 ## Model output convention
@@ -100,7 +102,7 @@ For Cartesian PDE collocation evaluation:
 | `dN_dt` | `[n_time, n_species, n_eval]` |
 | `dN_dw` | `[n_time, n_species, n_eval]` |
 
-For planned paired R3 PDE collocation evaluation:
+For historical flat-paired R3 PDE collocation evaluation:
 
 | Object | Shape |
 |---|---:|
@@ -110,6 +112,17 @@ For planned paired R3 PDE collocation evaluation:
 | `dlogN_dw` | `[n_species, n_pair]` |
 | `dN_dt` | `[n_species, n_pair]` |
 | `dN_dw` | `[n_species, n_pair]` |
+
+For current slabbed R3 PDE collocation evaluation:
+
+| Object | Shape |
+|---|---:|
+| `log_N_eval` | `[K, n_species, M]` |
+| `N_eval` | `[K, n_species, M]` |
+| `dlogN_dt` | `[K, n_species, M]` |
+| `dlogN_dw` | `[K, n_species, M]` |
+| `dN_dt` | `[K, n_species, M]` |
+| `dN_dw` | `[K, n_species, M]` |
 
 ## Coordinate and derivative scaling
 
@@ -140,7 +153,7 @@ dN_dt = N * dlogN_dt
 dN_dw = N * dlogN_dw
 ```
 
-The derivative conversion is identical for Cartesian and paired R3 paths. Only tensor geometry differs.
+The derivative conversion is identical for Cartesian, flat-paired, and slabbed R3 paths. Only tensor geometry differs.
 
 ## Batch dictionary from `sample_pde_batch()`
 
@@ -168,56 +181,67 @@ The Cartesian residual shape is:
 [n_time, n_species, n_eval]
 ```
 
-## Planned paired R3 batch dictionary
+## Current slabbed R3 batch dictionary
 
-R3/Causal R3 should use paired collocation points, not separate retained `x_eval` and `t_eval` vectors.
+Current R3/Causal R3 uses time slabs and per-slab x points.
 
-`R3Population.points`:
+`R3Population`:
 
-| Column | Shape | Meaning |
+| Object | Shape | Meaning |
 |---|---:|---|
-| `points[:, 0]` | `[n_pair]` | Physical log body mass `x = log(w)`. |
-| `points[:, 1]` | `[n_pair]` | Physical time `t`. |
+| `t_points` | `[K]` | Physical time slabs. Resampled each step under `t_max_current`. |
+| `x_points` | `[K, M]` | Physical log body mass values. Retained/resampled by R3. |
+| `population_size` | scalar | `K * M`. |
 
-Paired batch:
+Slabbed batch from `R3Population.as_batch()`:
 
 | Key | Shape | Meaning |
 |---|---:|---|
-| `x_pair` | `[n_pair]` | Physical paired log-weight values. |
-| `t_pair` | `[n_pair]` | Physical paired time values. |
-| `w_pair` | `[n_pair]` | Physical weights, `exp(x_pair)`. |
-| `x_pair_scaled` | `[n_pair]` | Scaled paired log-weight values. |
-| `t_pair_scaled` | `[n_pair]` | Scaled paired time values. |
+| `t_slab` | `[K]` | Physical slab times. |
+| `t_slab_scaled` | `[K]` | Scaled slab times. |
+| `x_slab` | `[K, M]` | Physical log-weight collocation values. |
+| `x_slab_scaled` | `[K, M]` | Scaled log-weight collocation values. |
+| `w_slab` | `[K, M]` | Physical weights, `exp(x_slab)`. |
 | `x_grid` | `[n_w]` | Fixed fish-grid log weights. |
 | `x_grid_scaled` | `[n_w]` | Scaled fixed fish-grid log weights. |
 | `w_grid` | `[n_w]` | Fixed fish physical weights. |
 
-Paired residual shape:
+Slabbed residual shape:
 
 ```text
-[n_species, n_pair]
+[K, n_species, M]
 ```
 
-Paired fixed-grid model state for nonlocal biology:
+Slabbed fixed-grid model state for nonlocal biology:
 
 ```text
-N_grid:     [n_pair, n_species, n_w]
-log_N_grid: [n_pair, n_species, n_w]
+N_grid:     [K, n_species, n_w]
+log_N_grid: [K, n_species, n_w]
 ```
 
-Paired continuous biological outputs at the residual point:
+Slabbed continuous biological outputs at residual points:
 
 ```text
-growth_eval terms: [n_species, n_pair]
-mortality terms:   [n_species, n_pair]
+growth_eval terms: [K, n_species, M]
+mortality terms:   [K, n_species, M]
 ```
 
-Paired fixed-grid biological outputs for recruitment/nonlocal terms:
+Slabbed fixed-grid biological outputs for recruitment/nonlocal terms:
 
 ```text
-growth_grid terms: [n_pair, n_species, n_w]
-recruitment terms: [n_pair, n_species]
+growth_grid terms: [K, n_species, n_w]
+recruitment terms: [K, n_species]
 ```
+
+Historical flat-paired R3 used:
+
+```text
+x_pair, t_pair, w_pair: [n_pair]
+residual: [n_species, n_pair]
+N_grid/log_N_grid: [n_pair, n_species, n_w]
+```
+
+Keep that only as historical context unless current source reintroduces a flat-paired path.
 
 ## Active-size masks
 
@@ -227,11 +251,18 @@ Grid mask:
 active_grid_mask(params): [n_species, n_w]
 ```
 
-Evaluation mask:
+Evaluation masks:
 
 ```text
 active_eval_mask(w_eval, params): [n_species, n_eval]
 active_eval_mask(w_pair, params): [n_species, n_pair]
+active_eval_mask(w_slab.reshape(-1), params): [n_species, K*M]
+```
+
+For slabbed R3, the flattened active mask is reshaped/permuted to:
+
+```text
+[K, n_species, M]
 ```
 
 The active mask is based on:
@@ -325,10 +356,10 @@ When stacked over Cartesian time by `_stack_dicts()`, these become:
 [n_time, n_species, n_eval]
 ```
 
-When concatenated over paired R3 points, these become:
+For slabbed R3, current downstream outputs become:
 
 ```text
-[n_species, n_pair]
+[K, n_species, M]
 ```
 
 ## PDE residual outputs
@@ -341,13 +372,21 @@ Cartesian outputs:
 | `residual` | `[n_time, n_species, n_eval]` |
 | `residual_physical_check` | `[n_time, n_species, n_eval]` |
 
-Paired R3 outputs:
+Historical flat-paired outputs:
 
 | Quantity | Shape |
 |---|---:|
 | `residual_log` | `[n_species, n_pair]` |
 | `residual` | `[n_species, n_pair]` |
 | `residual_physical_check` | `[n_species, n_pair]` |
+
+Current slabbed R3 outputs:
+
+| Quantity | Shape |
+|---|---:|
+| `residual_log` | `[K, n_species, M]` |
+| `residual` | `[K, n_species, M]` |
+| `residual_physical_check` | `[K, n_species, M]` |
 
 Current definitions:
 
@@ -367,13 +406,17 @@ Cartesian path:
 
 | Quantity | Shape |
 |---|---:|
+| `log_N_left` | `[n_time, n_species]` |
 | `N_left` | `[n_time, n_species]` |
 | `g_left` | `[n_time, n_species]` |
 | `flux_left = g_left * N_left` | `[n_time, n_species]` |
 | `recruitment_flux` | `[n_time, n_species]` |
+| `bc_valid_mask` | `[n_time, n_species]` or species-sliced equivalent |
+| `bc_target_log_N` | `[n_time, n_species]` or species-sliced equivalent |
+| `bc_target_N` | `[n_time, n_species]` or species-sliced equivalent |
 | `boundary_residual` | `[n_time, n_species]` or species-sliced equivalent |
 
-Paired path:
+Historical flat-paired path:
 
 | Quantity | Shape |
 |---|---:|
@@ -383,33 +426,57 @@ Paired path:
 | `recruitment_flux` | `[n_pair, n_species]` |
 | `boundary_residual` | `[n_pair, n_species]` or species-sliced equivalent |
 
-## R3 score shapes
+Current slabbed R3 path uses one boundary/recruitment state per slab time:
 
-For paired residuals:
+| Quantity | Shape |
+|---|---:|
+| `log_N_left` | `[K, n_species]` |
+| `N_left` | `[K, n_species]` |
+| `g_left` | `[K, n_species]` |
+| `flux_left = g_left * N_left` | `[K, n_species]` |
+| `recruitment_flux` | `[K, n_species]` |
+| `bc_valid_mask` | `[K, n_species]` or species-sliced equivalent |
+| `bc_target_log_N` | `[K, n_species]` or species-sliced equivalent |
+| `bc_target_N` | `[K, n_species]` or species-sliced equivalent |
+| `boundary_residual` | `[K, n_species]` or species-sliced equivalent |
+
+Current BC validity rule:
 
 ```text
-residual: [n_species, n_pair]
-mask:     [n_species, n_pair]
-score:    [n_pair]
+valid = finite(log_N_left, N_left, g_left, recruitment_flux)
+        and g_left > bc_g_min
+        and recruitment_flux > 0
+```
+
+## R3 score shapes
+
+For current slabbed residuals:
+
+```text
+residual: [K, n_species, M]
+mask:     [K, n_species, M]
+score:    [K, M]
 ```
 
 Default absolute score:
 
 ```text
-score_j = sum_i mask_ij * abs(residual_ij) / max(sum_i mask_ij, 1)
+score_km = sum_i mask_kim * abs(residual_kim) / max(sum_i mask_kim, 1)
 ```
 
 Squared score:
 
 ```text
-score_j = sum_i mask_ij * residual_ij^2 / max(sum_i mask_ij, 1)
+score_km = sum_i mask_kim * residual_kim^2 / max(sum_i mask_kim, 1)
 ```
 
 Retain rule:
 
 ```text
-retain_j = score_j > mean(score)
+retain_km = score_km > mean(score)
 ```
+
+Only `x_points[retain]` are kept across the R3 update. Time slabs are resampled every step before the batch is formed.
 
 ## Current single-species training assumption
 
