@@ -14,6 +14,7 @@ def _plot_lines(
     title: str,
     ylabel: str,
     yscale: str | None = None,
+    alpha: float = 1.0,
 ) -> None:
     available = [
         col for col in columns
@@ -23,9 +24,22 @@ def _plot_lines(
     if not available:
         return
 
+    plot_df = df[["step", *available]].copy()
+    if yscale == "log":
+        for col in available:
+            plot_df.loc[plot_df[col] <= 0.0, col] = np.nan
+        available = [
+            col for col in available
+            if plot_df[col].notna().any()
+        ]
+        if not available:
+            return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+
     plt.figure()
     for col in available:
-        plt.plot(df["step"], df[col], label=col)
+        plt.plot(plot_df["step"], plot_df[col], label=col, alpha=alpha)
 
     plt.xlabel("iteration")
     plt.ylabel(ylabel)
@@ -36,6 +50,25 @@ def _plot_lines(
     plt.tight_layout()
     plt.savefig(path, dpi=200)
     plt.close()
+
+def _plot_unscaled_loss_terms(*, loss_df: pd.DataFrame, plot_dir: Path) -> None:
+    loss_term_dir = plot_dir / "unscaled_loss_terms"
+    loss_terms = [
+        ("loss_pde", "Unscaled PDE loss"),
+        ("loss_ic", "Unscaled initial-condition loss"),
+        ("loss_bc", "Unscaled boundary-condition loss"),
+        ("loss_timestep", "Unscaled timestep-consistency loss"),
+    ]
+
+    for column, title in loss_terms:
+        _plot_lines(
+            df=loss_df,
+            columns=[column],
+            path=loss_term_dir / f"{column}.png",
+            title=title,
+            ylabel="unscaled loss",
+            yscale="log",
+        )
 
 def save_training_diagnostic_plots(run_dir: str | Path) -> None:
     run_dir = Path(run_dir)
@@ -59,7 +92,10 @@ def save_training_diagnostic_plots(run_dir: str | Path) -> None:
             title="Training losses",
             ylabel="loss",
             yscale="log",
+            alpha=0.65,
         )
+
+        _plot_unscaled_loss_terms(loss_df=loss_df, plot_dir=plot_dir)
 
         _plot_lines(
             df=loss_df,
