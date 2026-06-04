@@ -84,6 +84,8 @@ def train_one_step(
     causal_r3=None,
     causal_r3_weight_pde_loss: bool = False,
     causal_r3_score: bool = True,
+    lr_scheduler=None,
+    lr_scheduler_name: str = "none",
 ) -> dict:
     optimizer.zero_grad(set_to_none=True)
 
@@ -269,6 +271,14 @@ def train_one_step(
 
     optimizer.step()
 
+    if lr_scheduler is not None:
+        if lr_scheduler_name == "plateau":
+            lr_scheduler.step(float(loss.detach().cpu()))
+        else:
+            lr_scheduler.step()
+
+    lr = float(optimizer.param_groups[0]["lr"])
+
     r3_diag = {
         "r3_population_size": math.nan,
         "r3_n_time": math.nan,
@@ -322,6 +332,7 @@ def train_one_step(
     base = {
         "step": step,
         "loss": float(out["loss"].detach().cpu()),
+        "lr": lr,
         "loss_pde": float(out["loss_pde"].detach().cpu()),
         "loss_ic": float(out["loss_ic"].detach().cpu()),
         "loss_bc": float(out["loss_bc"].detach().cpu()),
