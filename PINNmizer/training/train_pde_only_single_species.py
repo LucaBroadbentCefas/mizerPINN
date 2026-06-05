@@ -57,7 +57,41 @@ def make_run_dir() -> Path:
     return run_dir
 
 
+def load_checkpoint_weights(
+    *,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer | None,
+    checkpoint_path: str | Path,
+    device,
+    load_optimizer_state: bool = False,
+) -> dict:
+    checkpoint_path = Path(checkpoint_path)
 
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint does not exist: {checkpoint_path}")
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    if "model_state_dict" not in checkpoint:
+        raise KeyError(f"Checkpoint has no 'model_state_dict': {checkpoint_path}")
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+
+    optimizer_loaded = False
+    if load_optimizer_state:
+        if optimizer is None:
+            raise ValueError("optimizer must be provided when load_optimizer_state=True.")
+        if "optimizer_state_dict" not in checkpoint:
+            raise KeyError(f"Checkpoint has no 'optimizer_state_dict': {checkpoint_path}")
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        optimizer_loaded = True
+
+    return {
+        "path": str(checkpoint_path),
+        "checkpoint_step": checkpoint.get("step", None),
+        "optimizer_loaded": optimizer_loaded,
+        "checkpoint_config": checkpoint.get("config", None),
+    }
 
 
 
@@ -247,13 +281,35 @@ def parse_args() -> argparse.Namespace:
         help="Constant recruitment flux target used when --bc-use-constant-r is set.",
     )
 
+    parser.add_argument("--seed", type=int, default=123)
+
+    parser.add_argument(
+        "--load-weights",
+        default=None,
+        help="Optional path to a saved .pt checkpoint. Loads model_state_dict before training.",
+    )
+    
+    parser.add_argument(
+        "--load-optimizer-state",
+        action="store_true",
+        help="Also load optimizer_state_dict from --load-weights checkpoint.",
+    )
+    
+    parser.add_argument(
+        "--start-step",
+        type=int,
+        default=0,
+        help="Initial step offset. Use 250 when continuing from model_step_250.pt.",
+    )
+
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
 
-
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
 
     run_dir = make_run_dir()
     save_run_command(run_dir / "run_command.txt")
@@ -316,7 +372,7 @@ def main() -> None:
         hidden_width=args.hidden_width,
         hidden_layers=args.hidden_layers,
     ).to(dtype=torch.float64, device=params.w.device)
-
+    
     if args.init_final_bias_from_ic:
         initialise_final_bias_from_ic(
             model=model,
@@ -324,8 +380,18 @@ def main() -> None:
             params=params,
             eps=args.loss_eps,
         )
-
+    
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    
+    loaded_checkpoint = None
+    if args.load_weights is not None:
+        loaded_checkpoint = load_checkpoint_weights(
+            model=model,
+            optimizer=optimizer,
+            checkpoint_path=args.load_weights,
+            device=params.w.device,
+            load_optimizer_state=args.load_optimizer_state,
+        )
     
     loss_weights = {
         "pde": args.initial_w_pde,
@@ -414,6 +480,18 @@ def main() -> None:
         "bc_g_min": args.bc_g_min, 
         "bc_use_constant_r": args.bc_use_constant_r,
         "bc_constant_r": args.bc_constant_r,
+        "load_weights": args.load_weights,
+        "load_optimizer_state": args.load_optimizer_state,
+        "start_step": args.start_step,
+        "loaded_checkpoint_step": (
+            loaded_checkpoint["checkpoint_step"] if loaded_checkpoint is not None else None
+        ),
+        "loaded_checkpoint_path": (
+            loaded_checkpoint["path"] if loaded_checkpoint is not None else None
+        ),
+        "loaded_optimizer_state": (
+            loaded_checkpoint["optimizer_loaded"] if loaded_checkpoint is not None else False
+        ),   
         "note": (
             "Composite PINN loss with PDE, IC, and recruitment boundary terms. "
             "IC/BC weights are adapted using Wang-style gradient statistics."
@@ -433,7 +511,7 @@ def main() -> None:
     start_time = time.perf_counter()
 
     try:
-        for step in range(1, args.n_steps + 1):
+        for step in range(args.start_step + 1, args.n_steps + 1):
           
             current_causal_fraction, current_t_max = causal_t_max_current(
                 params=params,
@@ -534,7 +612,7 @@ def main() -> None:
                     f"res_p95={diag_row['fixed_residual_log_abs_p95']:.6e}"
                 )
 
-            if step == args.warmup_steps:
+            if step == args.start_step + args.warmup_steps:
                 elapsed = time.perf_counter() - start_time
                 seconds_per_step = elapsed / args.warmup_steps
                 timing["seconds_per_step"] = seconds_per_step

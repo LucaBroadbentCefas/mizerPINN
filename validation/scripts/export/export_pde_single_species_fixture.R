@@ -63,3 +63,4 @@ ggplot(df, aes(x = x, y = log10_N, colour = time, group = time)) +
     title = "mizer log10(N) profiles through time"
   ) +
   theme_bw()
+
