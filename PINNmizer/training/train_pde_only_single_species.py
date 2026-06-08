@@ -11,7 +11,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
-from PINNmizer.pinn.models import MLP
+from PINNmizer.pinn.models import build_pinn_model
 from PINNmizer.training.checkpointing import save_checkpoint
 from PINNmizer.training.config import (
     _to_float,
@@ -95,6 +95,39 @@ def load_checkpoint_weights(
 
 
 
+
+
+def current_lr(optimizer: torch.optim.Optimizer) -> float:
+    return float(optimizer.param_groups[0]["lr"])
+
+
+def build_lr_scheduler(*, optimizer: torch.optim.Optimizer, args: argparse.Namespace):
+    if args.lr_scheduler == "none":
+        return None
+
+    if args.lr_scheduler == "cosine":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, args.n_steps),
+            eta_min=args.lr_min,
+        )
+
+    if args.lr_scheduler == "step":
+        return torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=max(1, args.lr_step_size),
+            gamma=args.lr_gamma,
+        )
+
+    if args.lr_scheduler == "plateau":
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            factor=args.lr_gamma,
+            patience=max(0, args.lr_plateau_patience),
+        )
+
+    raise ValueError(f"Unknown lr_scheduler: {args.lr_scheduler}")
+
 def initialise_final_bias_from_ic(
     *,
     model: nn.Module,
@@ -152,6 +185,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-time", type=int, default=10)
     parser.add_argument("--n-eval", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr-scheduler", choices=["none", "cosine", "step", "plateau"], default="none")
+    parser.add_argument("--lr-step-size", type=int, default=500)
+    parser.add_argument("--lr-gamma", type=float, default=0.5)
+    parser.add_argument("--lr-min", type=float, default=0.0)
+    parser.add_argument("--lr-plateau-patience", type=int, default=50)
+    parser.add_argument("--model-arch", choices=["mlp", "fourier"], default="mlp")
+    parser.add_argument("--fourier-num-features", type=int, default=64)
+    parser.add_argument("--fourier-scale", type=float, default=1.0)
+    parser.add_argument("--fourier-include-raw-input", action="store_true")
+    parser.add_argument("--fourier-seed", type=int, default=None)
     parser.add_argument("--hidden-width", type=int, default=64)
     parser.add_argument("--hidden-layers", type=int, default=3)
     parser.add_argument("--residual-form", choices=["log", "physical"], default="log")
@@ -366,11 +409,16 @@ def main() -> None:
             alpha=args.causal_r3_alpha,
         )
 
-    model = MLP(
+    model = build_pinn_model(
+        model_arch=args.model_arch,
         in_dim=2,
         out_dim=n_species,
         hidden_width=args.hidden_width,
         hidden_layers=args.hidden_layers,
+        fourier_num_features=args.fourier_num_features,
+        fourier_scale=args.fourier_scale,
+        fourier_include_raw_input=args.fourier_include_raw_input,
+        fourier_seed=args.fourier_seed,
     ).to(dtype=torch.float64, device=params.w.device)
     
     if args.init_final_bias_from_ic:
@@ -382,6 +430,7 @@ def main() -> None:
         )
     
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    scheduler = build_lr_scheduler(optimizer=optimizer, args=args)
     
     loaded_checkpoint = None
     if args.load_weights is not None:
@@ -412,8 +461,22 @@ def main() -> None:
         "n_eval": args.n_eval,
         "residual_form": args.residual_form,
         "learning_rate": args.lr,
+        "initial_lr": args.lr,
+        "model_arch": args.model_arch,
         "hidden_width": args.hidden_width,
         "hidden_layers": args.hidden_layers,
+        "activation": "tanh",
+        "fourier_num_features": args.fourier_num_features,
+        "fourier_scale": args.fourier_scale,
+        "fourier_include_raw_input": args.fourier_include_raw_input,
+        "fourier_seed": args.fourier_seed,
+        "lr_scheduler": args.lr_scheduler,
+        "lr_step_size": args.lr_step_size,
+        "lr_gamma": args.lr_gamma,
+        "lr_min": args.lr_min,
+        "lr_plateau_patience": args.lr_plateau_patience,
+        "current_lr": current_lr(optimizer),
+        "final_lr": None,
         "dtype": "torch.float64",
         "device": str(params.w.device),
         "t_min": float(params.t_min),
@@ -566,6 +629,8 @@ def main() -> None:
                 causal_r3_score=args.causal_r3_score,
                 bc_use_constant_r=args.bc_use_constant_r,
                 bc_constant_r=args.bc_constant_r,
+                lr_scheduler=scheduler,
+                lr_scheduler_name=args.lr_scheduler,
             )
 
             history.append(row)
@@ -633,6 +698,7 @@ def main() -> None:
                 print(
                     f"step={step:5d} "
                     f"loss={row['loss']:.6e} "
+                    f"lr={row['lr']:.6e} "
                     f"loss_pde={row['loss_pde']:.6e} "
                     f"loss_ic={row['loss_ic']:.6e} "
                     f"loss_bc={row['loss_bc']:.6e} "
@@ -676,6 +742,9 @@ def main() -> None:
                 )
 
         timing["actual_total_seconds"] = time.perf_counter() - start_time
+        config["current_lr"] = current_lr(optimizer)
+        config["final_lr"] = current_lr(optimizer)
+        save_json(config, run_dir / "config.json")
 
         pd.DataFrame([timing]).to_csv(
             run_dir / "timing_summary.csv",

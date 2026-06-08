@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 
@@ -66,3 +68,96 @@ class MLP(nn.Module):
         done by the PDE/model-evaluation utilities using torch.exp(log_N).
         """
         return self.net(x)
+
+
+class FourierFeatureMLP(nn.Module):
+    """
+    MLP with a fixed Fourier feature input transform.
+
+    The transform preserves the existing scaled input convention
+    [x_scaled, t_scaled] and maps z to [sin(2*pi*zB), cos(2*pi*zB)]. The
+    projection matrix B is a buffer so device/dtype conversions follow the
+    module and autograd remains connected to z.
+    """
+
+    def __init__(
+        self,
+        in_dim: int = 2,
+        out_dim: int = 1,
+        hidden_width: int = 64,
+        hidden_layers: int = 3,
+        num_features: int = 64,
+        scale: float = 1.0,
+        include_raw_input: bool = False,
+        seed: int | None = None,
+    ):
+        super().__init__()
+
+        if num_features <= 0:
+            raise ValueError("num_features must be positive.")
+
+        if seed is None:
+            projection = torch.randn(in_dim, num_features) * scale
+        else:
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(seed)
+            projection = torch.randn(in_dim, num_features, generator=generator) * scale
+
+        self.register_buffer("B", projection)
+        self.include_raw_input = include_raw_input
+
+        transformed_dim = 2 * num_features
+        if include_raw_input:
+            transformed_dim += in_dim
+
+        self.net = MLP(
+            in_dim=transformed_dim,
+            out_dim=out_dim,
+            hidden_width=hidden_width,
+            hidden_layers=hidden_layers,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        projected = x @ self.B
+        features = [
+            torch.sin(2.0 * math.pi * projected),
+            torch.cos(2.0 * math.pi * projected),
+        ]
+        if self.include_raw_input:
+            features.insert(0, x)
+        return self.net(torch.cat(features, dim=-1))
+
+
+def build_pinn_model(
+    *,
+    model_arch: str = "mlp",
+    in_dim: int = 2,
+    out_dim: int = 1,
+    hidden_width: int = 64,
+    hidden_layers: int = 3,
+    fourier_num_features: int = 64,
+    fourier_scale: float = 1.0,
+    fourier_include_raw_input: bool = False,
+    fourier_seed: int | None = None,
+) -> nn.Module:
+    if model_arch == "mlp":
+        return MLP(
+            in_dim=in_dim,
+            out_dim=out_dim,
+            hidden_width=hidden_width,
+            hidden_layers=hidden_layers,
+        )
+
+    if model_arch == "fourier":
+        return FourierFeatureMLP(
+            in_dim=in_dim,
+            out_dim=out_dim,
+            hidden_width=hidden_width,
+            hidden_layers=hidden_layers,
+            num_features=fourier_num_features,
+            scale=fourier_scale,
+            include_raw_input=fourier_include_raw_input,
+            seed=fourier_seed,
+        )
+
+    raise ValueError(f"Unknown model_arch: {model_arch}")
