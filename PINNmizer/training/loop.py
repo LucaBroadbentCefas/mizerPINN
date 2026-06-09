@@ -86,7 +86,12 @@ def train_one_step(
     causal_r3_score: bool = True,
     lr_scheduler=None,
     lr_scheduler_name: str = "none",
+    wang_weight_batch: str = "fixed",
+    weight_calibration_batch: dict[str, torch.Tensor] | None = None,
 ) -> dict:
+    if wang_weight_batch not in {"fixed", "training"}:
+        raise ValueError("wang_weight_batch must be 'fixed' or 'training'.")
+
     optimizer.zero_grad(set_to_none=True)
 
     if collocation_strategy == "uniform":
@@ -217,23 +222,68 @@ def train_one_step(
         "hard_set": 0.0,
     }
 
-    if (
+    weight_update_due = (
         not disable_wang_weights
         and step >= weight_warmup_steps
         and step % weight_update_every == 0
-        ):
+    )
+    weight_update_used_fixed_batch = 0.0
+    calibration_out = None
+    calibration_loss_timestep = None
+    losses_for_current_weight_update = losses_for_weighting
+
+    if weight_update_due:
+        if wang_weight_batch == "fixed":
+            if weight_calibration_batch is None:
+                raise ValueError(
+                    "wang_weight_batch='fixed' requires weight_calibration_batch."
+                )
+
+            _, calibration_out = compute_pde_loss(
+                model=model,
+                batch=weight_calibration_batch,
+                params=params,
+                n_pp=n_pp,
+                residual_form=residual_form,
+                n_init=n_init,
+                lambda_pde=lambda_pde,
+                lambda_ic=lambda_ic,
+                lambda_bc=lambda_bc,
+                boundary_loss_form=boundary_loss_form,
+                species_idx=0,
+                eps=eps,
+                bc_eps=bc_eps,
+                bc_g_min=bc_g_min,
+                use_constant_recruitment_r=bc_use_constant_r,
+                constant_recruitment_r=bc_constant_r,
+            )
+            calibration_loss_pde_for_weighting = calibration_out.get(
+                "loss_pde_ungated",
+                calibration_out["loss_pde"],
+            )
+            calibration_loss_timestep = calibration_out["loss_pde"].new_zeros(())
+            losses_for_current_weight_update = {
+                "pde": lambda_pde * calibration_loss_pde_for_weighting,
+                "ic": lambda_ic * calibration_out["loss_ic"],
+                "bc": lambda_bc * calibration_out["loss_bc"],
+                "timestep": lambda_timestep * calibration_loss_timestep,
+            }
+            weight_update_used_fixed_batch = 1.0
+        elif wang_weight_batch == "training":
+            losses_for_current_weight_update = losses_for_weighting
+
         hard_set = hard_set_first_weight_update and not weight_state["has_updated"]
-    
+
         weight_stats = update_wang_gradient_weights_(
             model=model,
-            losses=losses_for_weighting,
+            losses=losses_for_current_weight_update,
             weights=loss_weights,
             alpha=weight_alpha,
             min_weight=weight_min,
             max_weight=weight_max,
             hard_set=hard_set,
         )
-    
+
         weight_state["has_updated"] = True
 
     loss_unweighted = (
@@ -328,6 +378,12 @@ def train_one_step(
             r3_diag["causal_r3_gate_mean"] = float(gate.mean().cpu())
 
     residual_log = out["residual_log"].detach()
+    calibration_nan = torch.tensor(float("nan"), dtype=out["loss_pde"].dtype, device=out["loss_pde"].device)
+    calibration_residual_log = (
+        calibration_out["residual_log"].detach()
+        if calibration_out is not None
+        else calibration_nan
+    )
 
     base = {
         "step": step,
@@ -363,6 +419,13 @@ def train_one_step(
         "pde_gate_max": float(out.get("pde_gate_max", torch.ones((), dtype=out["loss_pde"].dtype, device=out["loss_pde"].device)).detach().cpu()),
         "wang_uses_lambda_scaled_losses": True,
         "wang_pde_anchor": "loss_pde_ungated_if_available",
+        "wang_weight_batch": wang_weight_batch,
+        "weight_update_used_fixed_batch": weight_update_used_fixed_batch,
+        "weight_calibration_loss_pde": float((calibration_out["loss_pde"] if calibration_out is not None else calibration_nan).detach().cpu()),
+        "weight_calibration_loss_ic": float((calibration_out["loss_ic"] if calibration_out is not None else calibration_nan).detach().cpu()),
+        "weight_calibration_loss_bc": float((calibration_out["loss_bc"] if calibration_out is not None else calibration_nan).detach().cpu()),
+        "weight_calibration_loss_timestep": float((calibration_loss_timestep if calibration_loss_timestep is not None else calibration_nan).detach().cpu()),
+        "weight_calibration_residual_log_abs_mean": scalar_mean(torch.abs(calibration_residual_log)),
         "objective_loss_pde": float((lambda_pde * loss_weights["pde"] * out["loss_pde"]).detach().cpu()),
         "objective_loss_ic": float((lambda_ic * loss_weights["ic"] * out["loss_ic"]).detach().cpu()),
         "objective_loss_bc": float((lambda_bc * loss_weights["bc"] * out["loss_bc"]).detach().cpu()),
