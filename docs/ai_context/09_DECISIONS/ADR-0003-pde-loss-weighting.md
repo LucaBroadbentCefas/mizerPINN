@@ -34,9 +34,25 @@ The target is clipped to `[weight_min, weight_max]`. Weight updates can be hard-
 w_component = (1 - alpha) * w_component + alpha * target_w_component
 ```
 
+
+### Weight batch source for R3 training
+
+Wang adaptive weights can be computed from either the current training batch
+(`--wang-weight-batch training`) or a fixed calibration batch
+(`--wang-weight-batch fixed`). The default is now the fixed calibration batch.
+
+Reason: R3 deliberately changes the sampled PDE objective during training, so
+using R3 collocation points for gradient-statistic weight estimation can make
+scalar weights chase sampling noise rather than global component imbalance. R3
+remains the training collocation strategy; the fixed batch only affects scalar
+loss-weight updates.
+
+Validation should compare `--wang-weight-batch fixed`,
+`--wang-weight-batch training`, and `--disable-wang-weights`.
+
 ## Current source location
 
-`validation_steps/train_pde_only_single_species.py`
+`PINNmizer/training/train_pde_only_single_species.py`
 
 Key functions:
 

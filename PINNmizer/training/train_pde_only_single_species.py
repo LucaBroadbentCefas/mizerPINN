@@ -207,6 +207,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-alpha", type=float, default=0.05)
     parser.add_argument("--weight-min", type=float, default=1e-3)
     parser.add_argument("--weight-max", type=float, default=1e3)
+    parser.add_argument(
+        "--wang-weight-batch",
+        choices=["fixed", "training"],
+        default="fixed",
+        help=(
+            "Batch source for Wang gradient statistics. 'fixed' uses the "
+            "fixed diagnostic batch; 'training' preserves the previous behavior."
+        ),
+    )
     parser.add_argument("--diag-every", type=int, default=0)
     parser.add_argument("--diag-grad-every", type=int, default=0)
     parser.add_argument("--diag-n-time", type=int, default=31)
@@ -490,6 +499,7 @@ def main() -> None:
         "weight_alpha": args.weight_alpha,
         "weight_min": args.weight_min,
         "weight_max": args.weight_max,
+        "wang_weight_batch": args.wang_weight_batch,
         "diag_every": diag_every,
         "diag_grad_every": diag_grad_every,
         "diag_n_time": args.diag_n_time,
@@ -631,6 +641,8 @@ def main() -> None:
                 bc_constant_r=args.bc_constant_r,
                 lr_scheduler=scheduler,
                 lr_scheduler_name=args.lr_scheduler,
+                wang_weight_batch=args.wang_weight_batch,
+                weight_calibration_batch=fixed_diag_batch,
             )
 
             history.append(row)
