@@ -117,7 +117,7 @@ def make_r3_population(
     params: MizerTorchParams,
     n_pair: int,
     n_time: int,
-    species_idx: int = 0,
+    species_idx: int | None = 0,
     seed: int | None = None,
 ) -> R3Population:
     dtype, device = _params_dtype_device(params)
@@ -198,7 +198,7 @@ class CausalR3:
         }
 
 
-def _r3_domain(params: MizerTorchParams, species_idx: int = 0):
+def _r3_domain(params: MizerTorchParams, species_idx: int | None = 0):
     dtype, device = _params_dtype_device(params)
 
     x_grid = _x_grid(params).to(dtype=dtype, device=device)
@@ -209,6 +209,8 @@ def _r3_domain(params: MizerTorchParams, species_idx: int = 0):
         w_max = torch.as_tensor(params.w_max, dtype=dtype, device=device)
         if w_max.ndim == 0:
             w_max_species = w_max
+        elif species_idx is None:
+            w_max_species = torch.max(w_max)
         else:
             w_max_species = w_max[species_idx]
         x_max = torch.minimum(x_max, torch.log(w_max_species))
@@ -273,6 +275,7 @@ def update_r3_population_(
     score_form: str = "abs",
     causal: CausalR3 | None = None,
     causal_score: bool = True,
+    species_idx: int | None = 0,
 ) -> dict[str, float]:
     scores = _r3_score(
         residual=residual.detach(),
@@ -299,7 +302,7 @@ def update_r3_population_(
         dtype = population.x_points.dtype
         device = population.x_points.device
 
-        x_min, x_max, _, _ = _r3_domain(params, species_idx=0)
+        x_min, x_max, _, _ = _r3_domain(params, species_idx=species_idx)
         x_min = x_min.to(dtype=dtype, device=device)
         x_max = x_max.to(dtype=dtype, device=device)
 
