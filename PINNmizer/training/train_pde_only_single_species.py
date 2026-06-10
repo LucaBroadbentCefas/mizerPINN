@@ -11,7 +11,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
-from PINNmizer.pinn.models import build_pinn_model
+from PINNmizer.pinn.models import FactorizedLinear, build_pinn_model
 from PINNmizer.training.checkpointing import save_checkpoint
 from PINNmizer.training.config import (
     _to_float,
@@ -141,12 +141,12 @@ def initialise_final_bias_from_ic(
     """
     final_linear = None
     for module in reversed(list(model.modules())):
-        if isinstance(module, nn.Linear):
+        if isinstance(module, (nn.Linear, FactorizedLinear)):
             final_linear = module
             break
 
     if final_linear is None:
-        raise ValueError("Could not find final nn.Linear layer.")
+        raise ValueError("Could not find final linear layer.")
 
     n_init = n_init.detach()
     if n_init.ndim == 1:
@@ -162,7 +162,7 @@ def initialise_final_bias_from_ic(
     target_bias = (log_init * mask).sum(dim=1) / denom
         
     if final_linear.bias is None:
-        raise ValueError("Final nn.Linear layer has no bias.")
+        raise ValueError("Final linear layer has no bias.")
 
     if final_linear.bias.numel() != target_bias.numel():
         raise ValueError(
@@ -195,6 +195,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fourier-scale", type=float, default=1.0)
     parser.add_argument("--fourier-include-raw-input", action="store_true")
     parser.add_argument("--fourier-seed", type=int, default=None)
+    parser.add_argument("--weight-factorization", choices=["none", "rwf"], default="none")
+    parser.add_argument("--rwf-mu", type=float, default=1.0)
+    parser.add_argument("--rwf-sigma", type=float, default=0.1)
+    parser.add_argument("--rwf-apply-to", choices=["hidden", "all"], default="all")
+    parser.add_argument("--rwf-base-init", choices=["pytorch", "xavier_uniform", "xavier_normal"], default="pytorch")
     parser.add_argument("--hidden-width", type=int, default=64)
     parser.add_argument("--hidden-layers", type=int, default=3)
     parser.add_argument("--residual-form", choices=["log", "physical"], default="log")
@@ -428,6 +433,11 @@ def main() -> None:
         fourier_scale=args.fourier_scale,
         fourier_include_raw_input=args.fourier_include_raw_input,
         fourier_seed=args.fourier_seed,
+        weight_factorization=args.weight_factorization,
+        rwf_mu=args.rwf_mu,
+        rwf_sigma=args.rwf_sigma,
+        rwf_apply_to=args.rwf_apply_to,
+        rwf_base_init=args.rwf_base_init,
     ).to(dtype=torch.float64, device=params.w.device)
     
     if args.init_final_bias_from_ic:
@@ -479,6 +489,11 @@ def main() -> None:
         "fourier_scale": args.fourier_scale,
         "fourier_include_raw_input": args.fourier_include_raw_input,
         "fourier_seed": args.fourier_seed,
+        "weight_factorization": args.weight_factorization,
+        "rwf_mu": args.rwf_mu,
+        "rwf_sigma": args.rwf_sigma,
+        "rwf_apply_to": args.rwf_apply_to,
+        "rwf_base_init": args.rwf_base_init,
         "lr_scheduler": args.lr_scheduler,
         "lr_step_size": args.lr_step_size,
         "lr_gamma": args.lr_gamma,
