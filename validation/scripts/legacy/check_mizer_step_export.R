@@ -178,7 +178,7 @@ export_mizer_inputs_for_python <- function(params,
   write_vec(n_pp, "n_pp")
   write_vec(dt, "dt")
 
-  f_mort <- matrix(0, nrow = nrow(n), ncol = ncol(n))
+  f_mort <- matrix(0, nrow = nrow(n), ncol = length(params@w))
   write_mat(f_mort, "f_mort")
 
   invisible(TRUE)
