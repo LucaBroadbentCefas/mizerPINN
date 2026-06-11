@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 
 from PINNmizer.params import MizerTorchParams, _params_dtype_device, _t_limits, _x_grid, scale_t, scale_x
@@ -11,6 +13,8 @@ def sample_pde_batch(
     n_eval: int,
     *,
     t_max_current=None,
+    time_sampling: str = "uniform",
+    causal_n_chunks: int = 32,
 ) -> dict[str, torch.Tensor]:
     """Sample PDE collocation points in time and log-weight.
 
@@ -34,10 +38,35 @@ def sample_pde_batch(
     if not bool((t_upper > t_min_t).detach().cpu()):
         raise ValueError(f"t_max_current must be greater than t_min. Got t_min={float(t_min_t.detach().cpu())}, t_max_current={float(t_upper.detach().cpu())}.")
 
-    t_eval = t_min_t + (t_upper - t_min_t) * torch.rand(n_time, dtype=dtype, device=device)
+    if time_sampling == "uniform":
+        t_eval = t_min_t + (t_upper - t_min_t) * torch.rand(n_time, dtype=dtype, device=device)
+        t_chunk_idx = None
+    elif time_sampling == "stratified":
+        if causal_n_chunks <= 0:
+            raise ValueError(f"causal_n_chunks must be positive, got {causal_n_chunks}.")
+        samples_per_chunk = max(1, math.ceil(n_time / causal_n_chunks))
+        chunk_edges = torch.linspace(
+            t_min_t,
+            t_upper,
+            causal_n_chunks + 1,
+            dtype=dtype,
+            device=device,
+        )
+        chunks = []
+        idx = []
+        for i in range(causal_n_chunks):
+            lo = chunk_edges[i]
+            hi = chunk_edges[i + 1]
+            chunks.append(lo + (hi - lo) * torch.rand(samples_per_chunk, dtype=dtype, device=device))
+            idx.append(torch.full((samples_per_chunk,), i, dtype=torch.long, device=device))
+        t_eval = torch.cat(chunks, dim=0)
+        t_chunk_idx = torch.cat(idx, dim=0)
+    else:
+        raise ValueError("time_sampling must be 'uniform' or 'stratified'.")
+
     x_eval = x_min + (x_max - x_min) * torch.rand(n_eval, dtype=dtype, device=device)
     w_eval = torch.exp(x_eval)
-    return {
+    batch = {
         "t_eval": t_eval,
         "t_scaled": scale_t(t_eval, params),
         "x_eval": x_eval,
@@ -47,3 +76,7 @@ def sample_pde_batch(
         "x_grid_scaled": scale_x(x_grid, params),
         "w_grid": params.w,
     }
+    if t_chunk_idx is not None:
+        batch["t_chunk_idx"] = t_chunk_idx
+        batch["effective_n_time"] = torch.as_tensor(t_eval.numel(), device=device)
+    return batch

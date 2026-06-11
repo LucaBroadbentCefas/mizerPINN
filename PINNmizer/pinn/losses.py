@@ -55,6 +55,70 @@ def _masked_square_mean(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 
     return ((x ** 2) * mask).sum() / denom
 
+
+def compute_expert_causal_pde_loss(
+    *,
+    residual: torch.Tensor,
+    active_mask: torch.Tensor,
+    t_chunk_idx: torch.Tensor,
+    n_chunks: int,
+    epsilon: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Compute expert-guide causal temporal weighting for PDE residuals."""
+    if residual.ndim < 1:
+        raise ValueError("residual must have time as its first dimension.")
+    if n_chunks <= 0:
+        raise ValueError(f"n_chunks must be positive, got {n_chunks}.")
+
+    t_chunk_idx = t_chunk_idx.to(device=residual.device, dtype=torch.long)
+    if t_chunk_idx.ndim != 1 or t_chunk_idx.numel() != residual.shape[0]:
+        raise ValueError(
+            "t_chunk_idx must be a 1D tensor with one entry per residual time; "
+            f"got {tuple(t_chunk_idx.shape)} for residual shape {tuple(residual.shape)}."
+        )
+
+    mask = active_mask.to(dtype=residual.dtype, device=residual.device).expand_as(residual)
+    sq = residual ** 2
+    chunk_losses = []
+    for i in range(n_chunks):
+        time_mask = t_chunk_idx == i
+        if not bool(time_mask.any().detach().cpu()):
+            raise ValueError(f"Expert causal PDE loss received an empty temporal chunk {i}.")
+        chunk_mask = mask[time_mask]
+        denom = chunk_mask.sum()
+        if not bool((denom > 0).detach().cpu()):
+            raise ValueError(f"Expert causal PDE loss chunk {i} has zero active residual entries.")
+        chunk_losses.append((sq[time_mask] * chunk_mask).sum() / denom)
+
+    chunk_losses_t = torch.stack(chunk_losses)
+    previous_cumulative = torch.cat([
+        torch.zeros(1, dtype=residual.dtype, device=residual.device),
+        torch.cumsum(chunk_losses_t[:-1], dim=0),
+    ])
+    causal_weights = torch.exp(-float(epsilon) * previous_cumulative).detach()
+    loss_pde = (causal_weights * chunk_losses_t).mean()
+    loss_ungated = _masked_square_mean(residual, active_mask)
+
+    diagnostics = {
+        "loss_pde_ungated": loss_ungated,
+        "loss_pde_causal": loss_pde,
+        "loss_pde_gated": loss_pde,
+        "pde_causal_weights": causal_weights,
+        "pde_causal_chunk_losses": chunk_losses_t.detach(),
+        "pde_causal_weight_min": causal_weights.min(),
+        "pde_causal_weight_mean": causal_weights.mean(),
+        "pde_causal_weight_max": causal_weights.max(),
+        "pde_causal_weight_first": causal_weights[0],
+        "pde_causal_weight_last": causal_weights[-1],
+        "pde_causal_chunk_loss_min": chunk_losses_t.detach().min(),
+        "pde_causal_chunk_loss_mean": chunk_losses_t.detach().mean(),
+        "pde_causal_chunk_loss_max": chunk_losses_t.detach().max(),
+        "causal_n_chunks": torch.as_tensor(float(n_chunks), dtype=residual.dtype, device=residual.device),
+        "causal_epsilon": torch.as_tensor(float(epsilon), dtype=residual.dtype, device=residual.device),
+    }
+    return loss_pde, diagnostics
+
+
 def _active_eval_mask_for_slab(
     w_slab: torch.Tensor,
     params: MizerTorchParams,
@@ -289,7 +353,7 @@ def compute_recruitment_boundary_loss_from_state(
         ),
     }
 
-def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchParams, n_pp: torch.Tensor, residual_form: str = "log", *, n_init: torch.Tensor | None = None, lambda_pde: float = 1.0, lambda_ic: float = 0.0, lambda_bc: float = 0.0, boundary_loss_form: str = "log", species_idx: int | None = None, eps: float = 1e-30, bc_eps: float | None = None, bc_g_min: float = 1e-12, use_constant_recruitment_r: bool = False, constant_recruitment_r: float | None = None,) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchParams, n_pp: torch.Tensor, residual_form: str = "log", *, n_init: torch.Tensor | None = None, lambda_pde: float = 1.0, lambda_ic: float = 0.0, lambda_bc: float = 0.0, boundary_loss_form: str = "log", species_idx: int | None = None, eps: float = 1e-30, bc_eps: float | None = None, bc_g_min: float = 1e-12, use_constant_recruitment_r: bool = False, constant_recruitment_r: float | None = None, causal_loss: str = "off", causal_n_chunks: int = 32, causal_epsilon: float = 1.0,) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     include_ic = lambda_ic != 0.0
     state = compute_pde_state(model=model, batch=batch, params=params, n_pp=n_pp, include_ic=include_ic)
     residual_out = compute_pde_residual_from_state(state)
@@ -297,7 +361,21 @@ def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchPa
     elif residual_form == "physical": residual = residual_out["residual"]
     else: raise ValueError("residual_form must be either 'log' or 'physical'.")
     pde_mask = active_eval_mask(batch["w_eval"], params)[None, :, :]
-    loss_pde = _masked_square_mean(residual, pde_mask)
+    causal_out = {}
+    if causal_loss == "off":
+        loss_pde = _masked_square_mean(residual, pde_mask)
+    elif causal_loss == "expert":
+        if "t_chunk_idx" not in batch:
+            raise ValueError("causal_loss='expert' requires batch['t_chunk_idx']; use time_sampling='stratified'.")
+        loss_pde, causal_out = compute_expert_causal_pde_loss(
+            residual=residual,
+            active_mask=pde_mask,
+            t_chunk_idx=batch["t_chunk_idx"],
+            n_chunks=causal_n_chunks,
+            epsilon=causal_epsilon,
+        )
+    else:
+        raise ValueError("causal_loss must be 'off' or 'expert'.")
     dtype, device = _params_dtype_device(params)
     zero = torch.zeros((), dtype=dtype, device=device)
     if lambda_ic != 0.0:
@@ -322,7 +400,7 @@ def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchPa
     else:
         bc_out, loss_bc = {}, zero
     loss = lambda_pde * loss_pde + lambda_ic * loss_ic + lambda_bc * loss_bc
-    out = {**residual_out, **ic_out, **bc_out, "loss": loss, "loss_pde": loss_pde, "loss_ic": loss_ic, "loss_bc": loss_bc}
+    out = {**residual_out, **ic_out, **bc_out, **causal_out, "loss": loss, "loss_pde": loss_pde, "loss_ic": loss_ic, "loss_bc": loss_bc}
     return loss, out
 
 def compute_pde_loss_paired(
@@ -449,8 +527,17 @@ def compute_pde_loss_r3_slabbed(
     pde_weights: torch.Tensor | None = None,
     bc_g_min: float = 1e-12,
     use_constant_recruitment_r: bool = False,
-    constant_recruitment_r: float | None = None,    
+    constant_recruitment_r: float | None = None,
+    causal_loss: str = "off",
+    causal_n_chunks: int = 32,
+    causal_epsilon: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    if causal_loss != "off":
+        raise ValueError(
+            "Expert causal PDE loss currently requires uniform stratified sampling; "
+            "do not combine causal_loss='expert' with R3/causal-R3."
+        )
+
     include_ic = lambda_ic != 0.0
 
     state = compute_pde_state_r3_slabbed(
