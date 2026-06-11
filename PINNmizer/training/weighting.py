@@ -79,3 +79,54 @@ def update_wang_gradient_weights_(
         stats[f"target_{name}"] = target
 
     return stats
+
+
+def update_expert_gradient_norm_weights_(
+    *,
+    model: nn.Module,
+    losses: dict[str, torch.Tensor],
+    weights: dict[str, float],
+    alpha: float,
+    min_weight: float,
+    max_weight: float,
+    eps: float = 1e-12,
+    hard_set: bool = False,
+) -> dict[str, float]:
+    """Update loss weights using expert-guide inverse gradient-norm targets."""
+    known = ("pde", "ic", "bc", "timestep")
+    stats = {f"grad_norm_{name}_for_weighting": math.nan for name in known}
+    stats.update({f"target_w_{name}": math.nan for name in known})
+    stats["expert_weight_total_grad_norm"] = math.nan
+    stats["expert_weight_hard_set"] = float(hard_set)
+
+    params = [p for p in model.parameters() if p.requires_grad]
+    grad_norms: dict[str, torch.Tensor] = {}
+
+    for name in known:
+        loss = losses.get(name)
+        if loss is None or not torch.is_tensor(loss) or not loss.requires_grad:
+            continue
+        grad = _flat_loss_grad(loss, params)
+        if grad is None:
+            continue
+        norm = torch.linalg.vector_norm(grad, ord=2)
+        if not bool((norm > eps).detach().cpu()):
+            continue
+        grad_norms[name] = norm
+        stats[f"grad_norm_{name}_for_weighting"] = float(norm.cpu())
+
+    if not grad_norms:
+        return stats
+
+    total = torch.stack(list(grad_norms.values())).sum()
+    stats["expert_weight_total_grad_norm"] = float(total.cpu())
+
+    for name, norm in grad_norms.items():
+        target = float((total / norm.clamp_min(eps)).cpu())
+        target = max(min_weight, min(max_weight, target))
+        if name not in weights:
+            weights[name] = 1.0
+        weights[name] = target if hard_set else alpha * weights[name] + (1.0 - alpha) * target
+        stats[f"target_w_{name}"] = target
+
+    return stats

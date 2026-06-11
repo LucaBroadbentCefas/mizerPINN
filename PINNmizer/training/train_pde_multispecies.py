@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 
 from PINNmizer.pinn.models import FactorizedLinear, build_pinn_model
+from PINNmizer.pinn.sampling import sample_pde_batch
 from PINNmizer.training.checkpointing import save_checkpoint
 from PINNmizer.training.config import (
     _to_float,
@@ -224,6 +225,16 @@ def parse_args() -> argparse.Namespace:
             "fixed diagnostic batch; 'training' preserves the previous behavior."
         ),
     )
+    parser.add_argument("--time-sampling", choices=["uniform", "stratified"], default="uniform")
+    parser.add_argument("--causal-loss", choices=["off", "expert"], default="off")
+    parser.add_argument("--causal-n-chunks", type=int, default=32)
+    parser.add_argument("--causal-epsilon", type=float, default=1.0)
+    parser.add_argument("--loss-weighting", choices=["legacy-wang", "none", "expert-grad-norm"], default="legacy-wang")
+    parser.add_argument("--expert-weight-update-every", type=int, default=1000)
+    parser.add_argument("--expert-weight-alpha", type=float, default=0.9)
+    parser.add_argument("--expert-weight-min", type=float, default=None)
+    parser.add_argument("--expert-weight-max", type=float, default=None)
+    parser.add_argument("--expert-weight-batch", choices=["fixed", "training"], default="fixed")
     parser.add_argument("--diag-every", type=int, default=0)
     parser.add_argument("--diag-grad-every", type=int, default=0)
     parser.add_argument("--diag-n-time", type=int, default=31)
@@ -368,6 +379,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    if args.causal_loss == "expert" and args.time_sampling != "stratified":
+        raise ValueError("--causal-loss expert requires --time-sampling stratified.")
+    if args.causal_loss == "expert" and args.collocation_strategy != "uniform":
+        raise ValueError("--causal-loss expert currently requires --collocation-strategy uniform.")
+
     if args.seed is not None:
         torch.manual_seed(args.seed)
 
@@ -477,6 +493,19 @@ def main() -> None:
         "has_updated": False,
     }
     
+    fixed_weight_batch = fixed_diag_batch
+    if args.causal_loss == "expert" and (
+        (args.loss_weighting == "legacy-wang" and args.wang_weight_batch == "fixed")
+        or (args.loss_weighting == "expert-grad-norm" and args.expert_weight_batch == "fixed")
+    ):
+        fixed_weight_batch = sample_pde_batch(
+            params=params,
+            n_time=args.n_time,
+            n_eval=args.n_eval,
+            time_sampling=args.time_sampling,
+            causal_n_chunks=args.causal_n_chunks,
+        )
+
     config = {
         "input_dir": args.input_dir,
         "run_dir": str(run_dir),
@@ -486,6 +515,17 @@ def main() -> None:
         "n_steps": args.n_steps,
         "n_time": args.n_time,
         "n_eval": args.n_eval,
+        "time_sampling": args.time_sampling,
+        "effective_n_time": None,
+        "causal_loss": args.causal_loss,
+        "causal_n_chunks": args.causal_n_chunks,
+        "causal_epsilon": args.causal_epsilon,
+        "loss_weighting": "none" if args.disable_wang_weights else args.loss_weighting,
+        "expert_weight_update_every": args.expert_weight_update_every,
+        "expert_weight_alpha": args.expert_weight_alpha,
+        "expert_weight_min": args.weight_min if args.expert_weight_min is None else args.expert_weight_min,
+        "expert_weight_max": args.weight_max if args.expert_weight_max is None else args.expert_weight_max,
+        "expert_weight_batch": args.expert_weight_batch,
         "residual_form": args.residual_form,
         "learning_rate": args.lr,
         "initial_lr": args.lr,
@@ -665,7 +705,17 @@ def main() -> None:
                 lr_scheduler=scheduler,
                 lr_scheduler_name=args.lr_scheduler,
                 wang_weight_batch=args.wang_weight_batch,
-                weight_calibration_batch=fixed_diag_batch,
+                weight_calibration_batch=fixed_weight_batch,
+                time_sampling=args.time_sampling,
+                causal_loss=args.causal_loss,
+                causal_n_chunks=args.causal_n_chunks,
+                causal_epsilon=args.causal_epsilon,
+                loss_weighting=args.loss_weighting,
+                expert_weight_update_every=args.expert_weight_update_every,
+                expert_weight_alpha=args.expert_weight_alpha,
+                expert_weight_min=args.expert_weight_min,
+                expert_weight_max=args.expert_weight_max,
+                expert_weight_batch=args.expert_weight_batch,
             )
 
             history.append(row)
