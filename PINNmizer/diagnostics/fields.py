@@ -29,6 +29,8 @@ def save_fixed_grid_fields_and_plots(
     fixed_batch: dict[str, torch.Tensor] | None = None,
     bc_use_constant_r: bool = False,
     bc_constant_r: float | None = None,
+    make_plots: bool = True,
+    save_boundary_diagnostics: bool = True,
 ) -> None:
     """
     Final after-run diagnostic fields and heatmaps on one deterministic grid.
@@ -110,6 +112,9 @@ def save_fixed_grid_fields_and_plots(
         }
     ).to_csv(outdir / "fixed_grid_fields.csv", index=False)
 
+    if not make_plots:
+        return
+
     _plot_heatmap(
         values=log10_N,
         t=t,
@@ -163,7 +168,7 @@ def save_fixed_grid_fields_and_plots(
     plt.savefig(outdir / "log10_N_profiles_by_time.png", dpi=200)
     plt.close()
 
-    if "flux_left" in out and "recruitment_flux" in out:
+    if save_boundary_diagnostics and "flux_left" in out and "recruitment_flux" in out:
         flux_left = out["flux_left"][:, species_idx].detach().cpu().numpy()
         recruitment_flux = out["recruitment_flux"][:, species_idx].detach().cpu().numpy()
         g_left = out["g_left"][:, species_idx].detach().cpu().numpy()
