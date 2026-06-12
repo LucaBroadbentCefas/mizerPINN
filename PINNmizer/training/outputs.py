@@ -43,8 +43,74 @@ def save_run_command(args_path: Path, module: str = "scripts.train_pde_only_sing
 
     args_path.write_text(text, encoding="utf-8")
 
-def save_history(history: list[dict], run_dir: Path) -> None:
-    pd.DataFrame(history).to_csv(run_dir / "loss_history.csv", index=False)
+HPC_HISTORY_COLUMNS = [
+    "step",
+    "seconds_elapsed",
+    "lr",
+    "loss",
+    "loss_unweighted",
+    "loss_pde",
+    "loss_ic",
+    "loss_bc",
+    "loss_timestep",
+    "loss_pde_ungated",
+    "loss_pde_gated",
+    "objective_loss_pde",
+    "objective_loss_ic",
+    "objective_loss_bc",
+    "objective_loss_timestep",
+    "w_pde",
+    "w_ic",
+    "w_bc",
+    "w_timestep",
+    "grad_norm",
+    "causal_fraction",
+    "t_max_current",
+    "pde_causal_weight_first",
+    "pde_causal_weight_mean",
+    "pde_causal_weight_last",
+    "pde_causal_chunk_loss_mean",
+    "pde_causal_chunk_loss_max",
+]
+
+HPC_FIXED_DIAGNOSTIC_COLUMNS = [
+    "step",
+    "fixed_loss",
+    "fixed_loss_unweighted",
+    "fixed_loss_pde",
+    "fixed_loss_ic",
+    "fixed_loss_bc",
+    "fixed_residual_log_rms",
+    "fixed_residual_log_abs_mean",
+    "fixed_residual_log_abs_p95",
+    "fixed_residual_log_abs_max",
+    "rms_dlogN_dt",
+    "rms_advective",
+    "rms_mu",
+    "rms_dg_dw",
+]
+
+
+def filter_row(row: dict, columns: list[str]) -> dict:
+    return {key: row.get(key, float("nan")) for key in columns}
+
+
+def filter_hpc_history_row(row: dict) -> dict:
+    return filter_row(row, HPC_HISTORY_COLUMNS)
+
+
+def filter_hpc_fixed_diagnostic_row(row: dict) -> dict:
+    return filter_row(row, HPC_FIXED_DIAGNOSTIC_COLUMNS)
+
+
+def save_history(history: list[dict], run_dir: Path, columns: list[str] | None = None) -> None:
+    if columns is None:
+        pd.DataFrame(history).to_csv(run_dir / "loss_history.csv", index=False)
+    else:
+        pd.DataFrame([filter_row(row, columns) for row in history], columns=columns).to_csv(
+            run_dir / "loss_history.csv",
+            index=False,
+        )
 
 
 def save_final_predictions(*, run_dir: Path, model: nn.Module, params, n_times: int = 50) -> None:

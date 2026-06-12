@@ -21,6 +21,10 @@ from PINNmizer.training.config import (
     parse_fraction_schedule,
 )
 from PINNmizer.training.outputs import (
+    HPC_FIXED_DIAGNOSTIC_COLUMNS,
+    HPC_HISTORY_COLUMNS,
+    filter_hpc_fixed_diagnostic_row,
+    filter_hpc_history_row,
     save_final_predictions,
     save_final_residual_sample,
     save_history,
@@ -102,6 +106,104 @@ def current_lr(optimizer: torch.optim.Optimizer) -> float:
     return float(optimizer.param_groups[0]["lr"])
 
 
+def _fmt_metric(row: dict | None, key: str, default: float = math.nan) -> float:
+    if row is None:
+        return default
+    value = row.get(key, default)
+    return float(value) if value is not None else default
+
+
+def should_hpc_emit(step: int, every: int = 2000) -> bool:
+    return step > 0 and step % every == 0
+
+
+def save_hpc_final_summary(
+    *,
+    run_dir: Path,
+    args: argparse.Namespace,
+    config: dict,
+    status: str,
+    error_message: str | None,
+    n_steps_completed: int,
+    timing: dict,
+    latest_history_row: dict | None,
+    latest_fixed_diagnostic_row: dict | None,
+    final_checkpoint_path: str | None,
+    final_model_path: str | None,
+) -> None:
+    actual_total_seconds = float(timing.get("actual_total_seconds", math.nan))
+    seconds_per_step = float(timing.get("seconds_per_step", math.nan))
+    if not math.isfinite(seconds_per_step) and n_steps_completed > 0 and math.isfinite(actual_total_seconds):
+        seconds_per_step = actual_total_seconds / n_steps_completed
+
+    row = {
+        "run_id": str(run_dir),
+        "run_dir": str(run_dir),
+        "seed": args.seed,
+        "fourier_seed": args.fourier_seed,
+        "model_arch": args.model_arch,
+        "hidden_width": args.hidden_width,
+        "hidden_layers": args.hidden_layers,
+        "fourier_num_features": args.fourier_num_features,
+        "fourier_scale": args.fourier_scale,
+        "fourier_include_raw_input": args.fourier_include_raw_input,
+        "weight_factorization": args.weight_factorization,
+        "rwf_mu": args.rwf_mu,
+        "rwf_sigma": args.rwf_sigma,
+        "rwf_apply_to": args.rwf_apply_to,
+        "rwf_base_init": args.rwf_base_init,
+        "n_steps_completed": n_steps_completed,
+        "status": status,
+        "error_message": error_message or "",
+        "seconds_per_step": seconds_per_step,
+        "actual_total_seconds": actual_total_seconds,
+        "final_loss": _fmt_metric(latest_history_row, "loss"),
+        "final_loss_unweighted": _fmt_metric(latest_history_row, "loss_unweighted"),
+        "final_loss_pde": _fmt_metric(latest_history_row, "loss_pde"),
+        "final_loss_ic": _fmt_metric(latest_history_row, "loss_ic"),
+        "final_loss_bc": _fmt_metric(latest_history_row, "loss_bc"),
+        "final_loss_pde_ungated": _fmt_metric(latest_history_row, "loss_pde_ungated"),
+        "final_fixed_loss": _fmt_metric(latest_fixed_diagnostic_row, "fixed_loss"),
+        "final_fixed_loss_unweighted": _fmt_metric(latest_fixed_diagnostic_row, "fixed_loss_unweighted"),
+        "final_fixed_loss_pde": _fmt_metric(latest_fixed_diagnostic_row, "fixed_loss_pde"),
+        "final_fixed_loss_ic": _fmt_metric(latest_fixed_diagnostic_row, "fixed_loss_ic"),
+        "final_fixed_loss_bc": _fmt_metric(latest_fixed_diagnostic_row, "fixed_loss_bc"),
+        "final_fixed_residual_log_abs_p95": _fmt_metric(latest_fixed_diagnostic_row, "fixed_residual_log_abs_p95"),
+        "final_checkpoint_path": final_checkpoint_path,
+        "final_model_path": final_model_path,
+    }
+    pd.DataFrame([row]).to_csv(run_dir / "final_summary.csv", index=False)
+    save_json(row, run_dir / "final_summary.json")
+
+
+def print_hpc_training_line(
+    *,
+    row: dict,
+    fixed_row: dict | None,
+    latest_checkpoint_path: str | None,
+) -> None:
+    checkpoint_text = latest_checkpoint_path or ""
+    print(
+        f"step={int(row['step'])} "
+        f"elapsed={row['seconds_elapsed']:.1f}s "
+        f"lr={row['lr']:.6e} "
+        f"loss={row['loss']:.6e} "
+        f"loss_unweighted={row['loss_unweighted']:.6e} "
+        f"loss_pde={row['loss_pde']:.6e} "
+        f"loss_ic={row['loss_ic']:.6e} "
+        f"loss_bc={row['loss_bc']:.6e} "
+        f"loss_pde_ungated={row['loss_pde_ungated']:.6e} "
+        f"w_pde={row['w_pde']:.3e} "
+        f"w_ic={row['w_ic']:.3e} "
+        f"w_bc={row['w_bc']:.3e} "
+        f"fixed_loss_pde={_fmt_metric(fixed_row, 'fixed_loss_pde'):.6e} "
+        f"fixed_loss_ic={_fmt_metric(fixed_row, 'fixed_loss_ic'):.6e} "
+        f"fixed_loss_bc={_fmt_metric(fixed_row, 'fixed_loss_bc'):.6e} "
+        f"fixed_residual_log_abs_p95={_fmt_metric(fixed_row, 'fixed_residual_log_abs_p95'):.6e} "
+        f"checkpoint={checkpoint_text}"
+    )
+
+
 def build_lr_scheduler(*, optimizer: torch.optim.Optimizer, args: argparse.Namespace):
     if args.lr_scheduler == "none":
         return None
@@ -155,13 +257,13 @@ def initialise_final_bias_from_ic(
 
     log_init = torch.log(torch.clamp(n_init, min=eps))
     mask = active_grid_mask(params).to(dtype=log_init.dtype, device=log_init.device)
-    
+
     denom = mask.sum(dim=1)
     if not bool((denom > 0).all().detach().cpu()):
         raise ValueError("Cannot initialise final bias: active-grid mask has zero active entries.")
-    
+
     target_bias = (log_init * mask).sum(dim=1) / denom
-        
+
     if final_linear.bias is None:
         raise ValueError("Final linear layer has no bias.")
 
@@ -246,39 +348,39 @@ def parse_args() -> argparse.Namespace:
         choices=["log", "physical", "relative"],
         default="log",
     )
-    
+
     parser.add_argument("--loss-eps", type=float, default=1e-30)
-    
+
     parser.add_argument(
         "--bc-eps",
         type=float,
         default=None,
         help="Optional separate floor for log boundary loss. If omitted, uses --loss-eps.",
     )
-    
+
     parser.add_argument("--initial-w-pde", type=float, default=1.0)
     parser.add_argument("--initial-w-ic", type=float, default=1.0)
     parser.add_argument("--initial-w-bc", type=float, default=1e-3)
     parser.add_argument("--initial-w-timestep", type=float, default=1.0)
-    
+
     parser.add_argument(
         "--hard-set-first-weight-update",
         action="store_true",
         default=True,
     )
-    
+
     parser.add_argument(
         "--no-hard-set-first-weight-update",
         dest="hard_set_first_weight_update",
         action="store_false",
     )
-    
+
     parser.add_argument(
         "--init-final-bias-from-ic",
         action="store_true",
         default=True,
     )
-    
+
     parser.add_argument(
         "--no-init-final-bias-from-ic",
         dest="init_final_bias_from_ic",
@@ -299,7 +401,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lambda-pde", type=float, default=1.0)
     parser.add_argument("--lambda-ic", type=float, default=1.0)
     parser.add_argument("--lambda-bc", type=float, default=0.0)
-    parser.add_argument("--disable-wang-weights", action="store_true") 
+    parser.add_argument("--disable-wang-weights", action="store_true")
     parser.add_argument("--lambda-timestep", type=float, default=0.0)
     parser.add_argument("--timestep-loss-form", choices=["physical", "log", "relative"], default="physical")
     parser.add_argument("--detach-step-target", action="store_true", default=True)
@@ -341,7 +443,7 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Use a constant recruitment flux target in the BC loss.",
     )
-    
+
     parser.add_argument(
         "--bc-constant-r",
         type=float,
@@ -350,19 +452,20 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--hpc", action="store_true", help="Use streamlined output files for HPC batch runs.")
 
     parser.add_argument(
         "--load-weights",
         default=None,
         help="Optional path to a saved .pt checkpoint. Loads model_state_dict before training.",
     )
-    
+
     parser.add_argument(
         "--load-optimizer-state",
         action="store_true",
         help="Also load optimizer_state_dict from --load-weights checkpoint.",
     )
-    
+
     parser.add_argument(
         "--start-step",
         type=int,
@@ -375,6 +478,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    hpc_history_every = 2000
+    hpc_checkpoint_every = 4000
 
     if args.causal_loss == "expert" and args.time_sampling != "stratified":
         raise ValueError("--causal-loss expert requires --time-sampling stratified.")
@@ -393,9 +499,13 @@ def main() -> None:
         device=args.device,
     )
 
-    diag_every = args.diag_every if args.diag_every > 0 else args.print_every
-    diag_grad_every = args.diag_grad_every if args.diag_grad_every > 0 else diag_every
-    
+    if args.hpc:
+        diag_every = hpc_history_every
+        diag_grad_every = hpc_history_every
+    else:
+        diag_every = args.diag_every if args.diag_every > 0 else args.print_every
+        diag_grad_every = args.diag_grad_every if args.diag_grad_every > 0 else diag_every
+
     if args.diag_grid_csv is not None:
         fixed_diag_batch = make_fixed_pde_batch_from_csv(
             params=params,
@@ -407,7 +517,7 @@ def main() -> None:
             n_time=args.diag_n_time,
             n_eval=args.diag_n_eval,
             use_mizer_x_grid=args.diag_use_mizer_x_grid,
-        )  
+        )
 
     n_species = params.interaction.shape[0]
 
@@ -455,7 +565,7 @@ def main() -> None:
         rwf_apply_to=args.rwf_apply_to,
         rwf_base_init=args.rwf_base_init,
     ).to(dtype=torch.float64, device=params.w.device)
-    
+
     if args.init_final_bias_from_ic:
         initialise_final_bias_from_ic(
             model=model,
@@ -463,10 +573,10 @@ def main() -> None:
             params=params,
             eps=args.loss_eps,
         )
-    
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scheduler = build_lr_scheduler(optimizer=optimizer, args=args)
-    
+
     loaded_checkpoint = None
     if args.load_weights is not None:
         loaded_checkpoint = load_checkpoint_weights(
@@ -476,18 +586,18 @@ def main() -> None:
             device=params.w.device,
             load_optimizer_state=args.load_optimizer_state,
         )
-    
+
     loss_weights = {
         "pde": args.initial_w_pde,
         "ic": args.initial_w_ic,
         "bc": args.initial_w_bc,
         "timestep": args.initial_w_timestep,
     }
-    
+
     weight_state = {
         "has_updated": False,
     }
-    
+
     fixed_weight_batch = fixed_diag_batch
     if args.causal_loss == "expert" and (
         (args.loss_weighting == "legacy-wang" and args.wang_weight_batch == "fixed")
@@ -605,12 +715,13 @@ def main() -> None:
         "r3_n_eval_per_time": (
             r3_population.n_eval_per_time if r3_population is not None else None
         ),
-        "bc_g_min": args.bc_g_min, 
+        "bc_g_min": args.bc_g_min,
         "bc_use_constant_r": args.bc_use_constant_r,
         "bc_constant_r": args.bc_constant_r,
         "load_weights": args.load_weights,
         "load_optimizer_state": args.load_optimizer_state,
         "start_step": args.start_step,
+        "hpc": args.hpc,
         "loaded_checkpoint_step": (
             loaded_checkpoint["checkpoint_step"] if loaded_checkpoint is not None else None
         ),
@@ -619,7 +730,7 @@ def main() -> None:
         ),
         "loaded_optimizer_state": (
             loaded_checkpoint["optimizer_loaded"] if loaded_checkpoint is not None else False
-        ),   
+        ),
         "note": (
             "Composite PINN loss with PDE, IC, and recruitment boundary terms. "
             "IC/BC weights are adapted using Wang-style gradient statistics."
@@ -627,8 +738,19 @@ def main() -> None:
     }
 
     save_json(config, run_dir / "config.json")
+    if args.hpc:
+        pd.DataFrame(columns=HPC_FIXED_DIAGNOSTIC_COLUMNS).to_csv(
+            run_dir / "fixed_diagnostic_history.csv",
+            index=False,
+        )
 
     history = []
+    hpc_history = []
+    latest_history_row = None
+    latest_fixed_diagnostic_row = None
+    latest_checkpoint_path = None
+    final_model_path = None
+    n_steps_completed = args.start_step
     timing = {
         "warmup_steps": args.warmup_steps,
         "seconds_per_step": math.nan,
@@ -640,7 +762,7 @@ def main() -> None:
 
     try:
         for step in range(args.start_step + 1, args.n_steps + 1):
-          
+
             current_causal_fraction, current_t_max = causal_t_max_current(
                 params=params,
                 step=step,
@@ -649,7 +771,7 @@ def main() -> None:
                 ramp_steps=args.causal_ramp_steps,
                 step_fractions=args.causal_step_fractions,
             )
-          
+
             row = train_one_step(
                 model=model,
                 optimizer=optimizer,
@@ -666,11 +788,11 @@ def main() -> None:
                 weight_warmup_steps=args.weight_warmup_steps,
                 weight_alpha=args.weight_alpha,
                 weight_min=args.weight_min,
-                weight_max=args.weight_max,  
+                weight_max=args.weight_max,
                 boundary_loss_form=args.boundary_loss_form,
                 eps=args.loss_eps,
                 bc_eps=args.bc_eps,
-                bc_g_min=args.bc_g_min,                
+                bc_g_min=args.bc_g_min,
                 weight_state=weight_state,
                 hard_set_first_weight_update=args.hard_set_first_weight_update,
                 causal_fraction=current_causal_fraction,
@@ -711,8 +833,18 @@ def main() -> None:
             )
 
             history.append(row)
+            latest_history_row = row
+            n_steps_completed = step
 
-            if step == 1 or step % diag_every == 0:
+            if args.hpc and (should_hpc_emit(step, hpc_history_every) or step == args.n_steps):
+                hpc_history.append(filter_hpc_history_row(row))
+                save_history(hpc_history, run_dir, columns=HPC_HISTORY_COLUMNS)
+
+            run_fixed_diag = (
+                (not args.hpc and (step == 1 or step % diag_every == 0))
+                or (args.hpc and should_hpc_emit(step, hpc_history_every))
+            )
+            if run_fixed_diag:
                 diag_row = compute_fixed_diagnostics(
                     model=model,
                     params=params,
@@ -722,37 +854,46 @@ def main() -> None:
                     residual_form=args.residual_form,
                     boundary_loss_form=args.boundary_loss_form,
                     species_idx=0,
-                    bc_g_min=args.bc_g_min,                    
+                    bc_g_min=args.bc_g_min,
                     compute_grad_norms=(step == 1 or step % diag_grad_every == 0),
                     bc_use_constant_r=args.bc_use_constant_r,
                     bc_constant_r=args.bc_constant_r,
                 )
-            
+
                 diag_row = {
                     "step": step,
                     **diag_row,
                 }
-            
-                append_diagnostic_row(
-                    diag_row,
-                    run_dir / "fixed_diagnostic_history.csv",
-                )
-            
-                save_latest_metrics_table(
-                    metrics=diag_row,
-                    outdir=run_dir / "diagnostics",
-                )
-            
-                print(
-                    f"diag step={step:5d} "
-                    f"fixed_pde={diag_row['fixed_loss_pde']:.6e} "
-                    f"fixed_ic={diag_row['fixed_loss_ic']:.6e} "
-                    f"fixed_bc={diag_row['fixed_loss_bc']:.6e} "
-                    f"grad_pde={diag_row['grad_norm_pde']:.6e} "
-                    f"grad_ic={diag_row['grad_norm_ic']:.6e} "
-                    f"grad_bc={diag_row['grad_norm_bc']:.6e} "
-                    f"res_p95={diag_row['fixed_residual_log_abs_p95']:.6e}"
-                )
+
+                if args.hpc:
+                    diag_row = filter_hpc_fixed_diagnostic_row(diag_row)
+                    latest_fixed_diagnostic_row = diag_row
+                    append_diagnostic_row(
+                        diag_row,
+                        run_dir / "fixed_diagnostic_history.csv",
+                    )
+                else:
+                    latest_fixed_diagnostic_row = diag_row
+                    append_diagnostic_row(
+                        diag_row,
+                        run_dir / "fixed_diagnostic_history.csv",
+                    )
+
+                    save_latest_metrics_table(
+                        metrics=diag_row,
+                        outdir=run_dir / "diagnostics",
+                    )
+
+                    print(
+                        f"diag step={step:5d} "
+                        f"fixed_pde={diag_row['fixed_loss_pde']:.6e} "
+                        f"fixed_ic={diag_row['fixed_loss_ic']:.6e} "
+                        f"fixed_bc={diag_row['fixed_loss_bc']:.6e} "
+                        f"grad_pde={diag_row['grad_norm_pde']:.6e} "
+                        f"grad_ic={diag_row['grad_norm_ic']:.6e} "
+                        f"grad_bc={diag_row['grad_norm_bc']:.6e} "
+                        f"res_p95={diag_row['fixed_residual_log_abs_p95']:.6e}"
+                    )
 
             if step == args.start_step + args.warmup_steps:
                 elapsed = time.perf_counter() - start_time
@@ -765,13 +906,34 @@ def main() -> None:
                     index=False,
                 )
 
-                print(
-                    "Timing:",
-                    f"{seconds_per_step:.4f} sec/step;",
-                    f"estimated 2000 steps = {seconds_per_step * 2000 / 60:.2f} min",
-                )
+                if not args.hpc:
+                    print(
+                        "Timing:",
+                        f"{seconds_per_step:.4f} sec/step;",
+                        f"estimated 2000 steps = {seconds_per_step * 2000 / 60:.2f} min",
+                    )
 
-            if step % args.print_every == 0 or step == 1:
+            if args.hpc and step % hpc_checkpoint_every == 0:
+                latest_checkpoint_path = str(save_checkpoint(
+                    run_dir=run_dir,
+                    step=step,
+                    model=model,
+                    optimizer=optimizer,
+                    config=config,
+                    scheduler=scheduler,
+                    latest_history_row=filter_hpc_history_row(row),
+                    latest_fixed_diagnostic_row=latest_fixed_diagnostic_row,
+                    subdir="checkpoints",
+                ))
+
+            if args.hpc:
+                if should_hpc_emit(step, hpc_history_every):
+                    print_hpc_training_line(
+                        row=row,
+                        fixed_row=latest_fixed_diagnostic_row,
+                        latest_checkpoint_path=latest_checkpoint_path,
+                    )
+            elif step % args.print_every == 0 or step == 1:
                 print(
                     f"step={step:5d} "
                     f"loss={row['loss']:.6e} "
@@ -809,14 +971,14 @@ def main() -> None:
 
                 save_history(history, run_dir)
 
-            if step % args.checkpoint_every == 0:
-                save_checkpoint(
+            if (not args.hpc) and step % args.checkpoint_every == 0:
+                latest_checkpoint_path = str(save_checkpoint(
                     run_dir=run_dir,
                     step=step,
                     model=model,
                     optimizer=optimizer,
                     config=config,
-                )
+                ))
 
         timing["actual_total_seconds"] = time.perf_counter() - start_time
         config["current_lr"] = current_lr(optimizer)
@@ -828,17 +990,25 @@ def main() -> None:
             index=False,
         )
 
-        save_history(history, run_dir)
+        if args.hpc:
+            if latest_history_row is not None and (
+                not hpc_history or hpc_history[-1].get("step") != latest_history_row.get("step")
+            ):
+                hpc_history.append(filter_hpc_history_row(latest_history_row))
+            save_history(hpc_history, run_dir, columns=HPC_HISTORY_COLUMNS)
+        else:
+            save_history(history, run_dir)
 
-        torch.save(
-            {
-                "step": args.n_steps,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "config": config,
-            },
-            run_dir / "model_final.pt",
-        )
+        final_model_path = run_dir / "model_final.pt"
+        final_checkpoint = {
+            "step": args.n_steps,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "config": config,
+        }
+        if args.hpc and scheduler is not None:
+            final_checkpoint["scheduler_state_dict"] = scheduler.state_dict()
+        torch.save(final_checkpoint, final_model_path)
 
         save_final_predictions(
             run_dir=run_dir,
@@ -847,35 +1017,102 @@ def main() -> None:
             n_times=50,
         )
 
-        save_final_residual_sample(
-            run_dir=run_dir,
-            model=model,
-            params=params,
-            n_pp=n_pp,
-            n_time=args.n_time,
-            n_eval=args.n_eval,
-        )
+        if args.hpc:
+            final_fixed_row = compute_fixed_diagnostics(
+                model=model,
+                params=params,
+                n_pp=n_pp,
+                n_init=n_init,
+                fixed_batch=fixed_diag_batch,
+                residual_form=args.residual_form,
+                boundary_loss_form=args.boundary_loss_form,
+                species_idx=0,
+                bc_g_min=args.bc_g_min,
+                compute_grad_norms=False,
+                bc_use_constant_r=args.bc_use_constant_r,
+                bc_constant_r=args.bc_constant_r,
+            )
+            latest_fixed_diagnostic_row = filter_hpc_fixed_diagnostic_row({
+                "step": args.n_steps,
+                **final_fixed_row,
+            })
+            save_fixed_grid_fields_and_plots(
+                model=model,
+                params=params,
+                n_pp=n_pp,
+                n_init=n_init,
+                outdir=run_dir,
+                residual_form=args.residual_form,
+                boundary_loss_form=args.boundary_loss_form,
+                species_idx=0,
+                n_time=args.diag_final_n_time,
+                n_eval=args.diag_final_n_eval,
+                bc_g_min=args.bc_g_min,
+                bc_use_constant_r=args.bc_use_constant_r,
+                bc_constant_r=args.bc_constant_r,
+                make_plots=False,
+                save_boundary_diagnostics=False,
+            )
+            save_hpc_final_summary(
+                run_dir=run_dir,
+                args=args,
+                config=config,
+                status="completed",
+                error_message=None,
+                n_steps_completed=n_steps_completed,
+                timing=timing,
+                latest_history_row=latest_history_row,
+                latest_fixed_diagnostic_row=latest_fixed_diagnostic_row,
+                final_checkpoint_path=latest_checkpoint_path,
+                final_model_path=str(final_model_path),
+            )
+        else:
+            save_final_residual_sample(
+                run_dir=run_dir,
+                model=model,
+                params=params,
+                n_pp=n_pp,
+                n_time=args.n_time,
+                n_eval=args.n_eval,
+            )
 
-        save_training_diagnostic_plots(run_dir)
-        
-        save_fixed_grid_fields_and_plots(
-            model=model,
-            params=params,
-            n_pp=n_pp,
-            n_init=n_init,
-            outdir=run_dir / "fixed_grid_diagnostics",
-            residual_form=args.residual_form,
-            boundary_loss_form=args.boundary_loss_form,
-            species_idx=0,
-            n_time=args.diag_final_n_time,
-            n_eval=args.diag_final_n_eval,
-            bc_g_min=args.bc_g_min,
-            bc_use_constant_r=args.bc_use_constant_r,
-            bc_constant_r=args.bc_constant_r,
-        )
+            save_training_diagnostic_plots(run_dir)
 
-    except Exception:
-        save_history(history, run_dir)
+            save_fixed_grid_fields_and_plots(
+                model=model,
+                params=params,
+                n_pp=n_pp,
+                n_init=n_init,
+                outdir=run_dir / "fixed_grid_diagnostics",
+                residual_form=args.residual_form,
+                boundary_loss_form=args.boundary_loss_form,
+                species_idx=0,
+                n_time=args.diag_final_n_time,
+                n_eval=args.diag_final_n_eval,
+                bc_g_min=args.bc_g_min,
+                bc_use_constant_r=args.bc_use_constant_r,
+                bc_constant_r=args.bc_constant_r,
+            )
+
+    except Exception as exc:
+        timing["actual_total_seconds"] = time.perf_counter() - start_time
+        if args.hpc:
+            save_history(hpc_history, run_dir, columns=HPC_HISTORY_COLUMNS)
+            save_hpc_final_summary(
+                run_dir=run_dir,
+                args=args,
+                config=config,
+                status="failed",
+                error_message=str(exc),
+                n_steps_completed=n_steps_completed,
+                timing=timing,
+                latest_history_row=latest_history_row,
+                latest_fixed_diagnostic_row=latest_fixed_diagnostic_row,
+                final_checkpoint_path=latest_checkpoint_path,
+                final_model_path=str(final_model_path) if final_model_path is not None else None,
+            )
+        else:
+            save_history(history, run_dir)
         pd.DataFrame([timing]).to_csv(
             run_dir / "timing_summary.csv",
             index=False,
@@ -884,16 +1121,17 @@ def main() -> None:
 
     print("Finished.")
     print(f"Run directory: {run_dir}")
-    from PINNmizer.diagnostics.output_surface import save_output_surface_diagnostics
+    if not args.hpc:
+        from PINNmizer.diagnostics.output_surface import save_output_surface_diagnostics
 
-    save_output_surface_diagnostics(
-       model=model,
-       params=params,
-       outdir=run_dir / "output_diagnostics",
-       n_t=101,
-       n_x=200,
-       species_idx=0,
-    )
+        save_output_surface_diagnostics(
+           model=model,
+           params=params,
+           outdir=run_dir / "output_diagnostics",
+           n_t=101,
+           n_x=200,
+           species_idx=0,
+        )
 
 
 if __name__ == "__main__":
