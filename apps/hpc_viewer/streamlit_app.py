@@ -21,7 +21,7 @@ RUN_COLUMNS = [
     "seconds_per_step","actual_total_seconds","model_arch","hidden_width","hidden_layers","fourier_num_features",
     "fourier_scale","fourier_include_raw_input","weight_factorization","rwf_mu","rwf_sigma","rwf_apply_to",
     "rwf_base_init","residual_form","boundary_loss_form","time_sampling","causal_loss","loss_weighting",
-    "collocation_strategy","r3_population_size","seed","fourier_seed","hpc",
+    "collocation_strategy","r3_population_size","seed","fourier_seed","lr","n_steps","n_time","n_eval","lambda_pde","lambda_ic","lambda_bc","lambda_timestep","hpc",
 ]
 
 
@@ -230,9 +230,114 @@ def line_desc(file, required, transform="none", log_y=False, dropped=False):
     return f"- File read: `{file}`.\n- Required columns/arrays: {', '.join(required)}.\n- Transformations: {transform}.\n- Nearest/interpolation/summary: none unless stated in the plot controls.\n- Y-axis log-scaled: {log_y}.\n- Non-positive values removed for log scaling: {dropped}."
 
 
+
+def format_scalar(value: Any) -> str:
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return "NA"
+    if not np.isfinite(x):
+        return "NA"
+    if x == 0:
+        return "0"
+    ax = abs(x)
+    if 1e-3 <= ax < 1e4:
+        return f"{x:.4g}"
+    return f"{x:.3e}".replace("e-0", "e-").replace("e+0", "e")
+
+
+def format_time_label(value: Any) -> str:
+    try:
+        return f"{float(value):.6g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def parse_comparison_times(text: str) -> list[float]:
+    vals=[]
+    for part in str(text).replace(";", ",").split(","):
+        part=part.strip()
+        if not part:
+            continue
+        try:
+            vals.append(float(part))
+        except ValueError:
+            st.warning(f"Ignoring non-numeric comparison time: {part}")
+    return vals or [0.0]
+
+
+def format_nearest_times_message(requested: list[float], used_by_source: dict[str, list[float]]) -> str:
+    lines=["Requested times: " + ", ".join(format_time_label(t) for t in requested) + "."]
+    for source, used in used_by_source.items():
+        lines.append(f"{source} nearest times used: " + ", ".join(format_time_label(t) for t in used) + ".")
+    return "\n".join(lines)
+
+
+PLOT_INTERPRETATIONS = {
+    "Total loss": "`loss` is the scalar optimiser objective used to update neural-network parameters: w_pde*lambda_pde*L_pde + w_ic*lambda_ic*L_ic + w_bc*lambda_bc*L_bc + w_ts*lambda_ts*L_ts. Falling values usually indicate easier optimisation; spikes can indicate unstable batches, weights, or learning-rate interactions.",
+    "Total unweighted loss": "`loss_unweighted` is the combined mathematical loss before adaptive/objective weighting. It is useful for checking raw error scale separately from the weighted update objective.",
+    "Unscaled loss terms": "Raw terms split the PINN constraints: `loss_pde` is mean(R_log^2) for R_log = d_t log N + g d_w log N + mu + d_w g; `loss_ic` is initial-condition mismatch; `loss_bc` is boundary-condition mismatch; `loss_timestep` is optional timestep consistency and is inactive when its weight is zero.",
+    "Objective loss terms": "`objective_loss_pde`, `objective_loss_ic`, `objective_loss_bc`, and `objective_loss_timestep` are weighted optimiser contributions w_k*lambda_k*L_k. They show how strongly each term influences parameter updates, not always the raw mathematical error size.",
+    "Adaptive weight trajectories": "`w_pde`, `w_ic`, `w_bc`, and `w_timestep` are adaptive multipliers in the training objective. These are training-control variables, not biological outputs; high values make a constraint dominate updates.",
+    "Gradient norm": "Gradient norm is |grad_theta L_train|, the size of the optimiser update signal seen by neural-network parameters. Large spikes can indicate unstable optimisation; near-zero values can mean convergence, saturation, or a stuck optimiser, so read it alongside loss curves.",
+    "Causal curriculum": "Causal curriculum diagnostics are training controls, not biological outputs. `causal_fraction` is the fraction of the time domain included in the PDE loss, and `t_max_current` is the largest physical time currently included.",
+    "Causal chunk diagnostics": "Causal chunk diagnostics show curriculum weighting across time chunks: first/mean/last weights indicate how strongly early/middle/late chunks contribute; mean/max chunk losses show average and worst PDE loss over causal chunks.",
+    "Fixed-grid losses": "Fixed losses are PDE/IC/BC diagnostics evaluated on a fixed validation grid, not necessarily the random collocation batch used for training. They provide comparable run-to-run checks of constraint satisfaction.",
+    "Fixed residual summaries": "Fixed residual summaries measure R_log on the fixed grid: RMS is sqrt(mean(R_log^2)), mean/max are absolute residual summaries, and p95 is the 95th percentile of |R_log|. High tails identify local PDE failures.",
+    "PDE term RMS balance": "PDE-term balance decomposes R_log = d_t log N + g d_w log N + mu + d_w g. `rms_dlogN_dt` is the time-derivative size, `rms_advective` is g*d_w log N, `rms_mu` is mortality, and `rms_dg_dw` is the growth-gradient term.",
+}
+
 def plot_with_desc(func, interpretation: str, calculation: str) -> None:
     func(); add_plot_description(interpretation, calculation)
 
+
+
+def _value_group_key(value: Any) -> tuple[str, Any]:
+    if pd.isna(value):
+        return ("missing", "NA")
+    try:
+        x=float(value)
+        if np.isfinite(x):
+            return ("float", round(x, 12))
+    except (TypeError, ValueError):
+        pass
+    return ("str", str(value))
+
+
+def show_architecture_differences(run_df: pd.DataFrame, selected_runs: list[str]) -> None:
+    st.subheader("Selected-run architecture/config differences")
+    fields=["model_arch","hidden_width","hidden_layers","fourier_num_features","fourier_scale","fourier_include_raw_input","weight_factorization","rwf_mu","rwf_sigma","rwf_apply_to","rwf_base_init","residual_form","boundary_loss_form","time_sampling","causal_loss","loss_weighting","collocation_strategy","r3_population_size","seed","fourier_seed","lr","n_steps","n_time","n_eval","lambda_pde","lambda_ic","lambda_bc","lambda_timestep"]
+    sel=run_df[run_df.run_id.isin(selected_runs)].set_index("run_id")
+    rows=[]; common={}
+    for field in fields:
+        vals=[sel.at[r, field] if field in sel.columns and r in sel.index else np.nan for r in selected_runs]
+        groups=[]
+        for v in vals:
+            placed=False
+            for g in groups:
+                gv=g[0]
+                try:
+                    if np.isclose(float(v), float(gv), rtol=1e-6, atol=1e-12, equal_nan=True):
+                        g.append(v); placed=True; break
+                except (TypeError, ValueError):
+                    if _value_group_key(v)==_value_group_key(gv):
+                        g.append(v); placed=True; break
+            if not placed: groups.append([v])
+        if len(groups) <= 1:
+            continue
+        mode=max(groups, key=len)[0]; common[field]=mode
+        rows.append({"field":field, **{r:("NA" if pd.isna(v) else v) for r,v in zip(selected_runs, vals)}})
+    if not rows:
+        st.info("No differing architecture/config fields among the selected runs."); return
+    d=pd.DataFrame(rows).set_index("field")
+    def style_cell(value, field):
+        mode=common.get(field, np.nan)
+        try:
+            same=np.isclose(float(value), float(mode), rtol=1e-6, atol=1e-12, equal_nan=True)
+        except (TypeError, ValueError):
+            same=_value_group_key(value)==_value_group_key(mode)
+        return "" if same else "background-color: #ffe08a; font-weight: 600"
+    st.dataframe(d.style.apply(lambda row:[style_cell(v, row.name) for v in row], axis=1), use_container_width=True)
 
 def run_browser_page(run_df: pd.DataFrame, selected_runs: list[str], log_y: bool, markers: bool) -> None:
     st.header("Run browser")
@@ -242,6 +347,8 @@ def run_browser_page(run_df: pd.DataFrame, selected_runs: list[str], log_y: bool
         chosen = st.multiselect(f"Filter {col}", vals, key=f"filter_{col}")
         if chosen: filtered = filtered[filtered[col].astype(str).isin(chosen)]
     st.dataframe(filtered, use_container_width=True)
+    if len(selected_runs) >= 2:
+        show_architecture_differences(run_df, selected_runs)
     metrics = ["final_fixed_residual_log_abs_p95","final_loss","final_loss_unweighted","final_loss_pde","final_loss_ic","final_loss_bc","final_fixed_loss","final_fixed_loss_pde","final_fixed_loss_ic","final_fixed_loss_bc","seconds_per_step"]
     metric = st.selectbox("Ranking metric", metrics)
     def rank():
@@ -272,13 +379,13 @@ def history_page(run_dir: Path, fixed: bool, log_y: bool, markers: bool) -> None
     if fixed:
         cards = ["fixed_residual_log_abs_p95","fixed_loss_pde","fixed_loss_ic","fixed_loss_bc"]
         cols = st.columns(4)
-        for c, m in zip(cols, cards): c.metric(m, df[m].dropna().iloc[-1] if m in df and df[m].notna().any() else "NA")
+        for c, m in zip(cols, cards): c.metric(m, format_scalar(df[m].dropna().iloc[-1] if m in df and df[m].notna().any() else np.nan))
         plots = [("Fixed-grid losses", ["fixed_loss","fixed_loss_unweighted","fixed_loss_pde","fixed_loss_ic","fixed_loss_bc"]),("Fixed residual summaries", ["fixed_residual_log_rms","fixed_residual_log_abs_mean","fixed_residual_log_abs_p95","fixed_residual_log_abs_max"]),("PDE term RMS balance", ["rms_dlogN_dt","rms_advective","rms_mu","rms_dg_dw"])]
     else:
         plots = [("Total loss", ["loss"]),("Total unweighted loss", ["loss_unweighted"]),("Unscaled loss terms", ["loss_pde","loss_ic","loss_bc","loss_timestep"]),("Objective loss terms", ["objective_loss_pde","objective_loss_ic","objective_loss_bc","objective_loss_timestep"]),("Adaptive weight trajectories", ["w_pde","w_ic","w_bc","w_timestep"]),("Gradient norm", ["grad_norm"]),("Causal curriculum", ["causal_fraction","t_max_current"]),("Causal chunk diagnostics", ["pde_causal_weight_first","pde_causal_weight_mean","pde_causal_weight_last","pde_causal_chunk_loss_mean","pde_causal_chunk_loss_max"])]
     for title, ys in plots:
         use_log = log_y and ("Causal" not in title)
-        plot_with_desc(lambda ys=ys,title=title,use_log=use_log: make_multi_line_plot(df, "step", ys, title, "value", use_log, markers), f"Tracks {title.lower()} from `{file}` to reveal convergence, imbalance, spikes, or curriculum behaviour.", line_desc(file, ["step"]+ys, "non-positive y values become NaN only for log plots", use_log, "reported above if any"))
+        plot_with_desc(lambda ys=ys,title=title,use_log=use_log: make_multi_line_plot(df, "step", ys, title, "value", use_log, markers), PLOT_INTERPRETATIONS.get(title, f"Tracks {title.lower()} from `{file}` to reveal convergence, imbalance, spikes, or curriculum behaviour."), line_desc(file, ["step"]+ys, "non-positive y values become NaN only for log plots", use_log, "reported above if any"))
 
 # More field/compare/mizer helpers compact but explicit
 
@@ -290,9 +397,9 @@ def fields_page(run_dir: Path, clip: bool, mode: str, markers: bool) -> None:
     if missing: show_missing("Fields", missing, "fixed_grid_fields.npz/csv"); return
     t,x = fields["t_eval"], fields["x_eval"]
     for name,z,title in [("log10_N",fields["log10_N"],"Predicted abundance heatmap"),("residual_log",fields["residual_log"],"Signed log-residual heatmap"),("abs_residual_log",np.abs(fields["residual_log"]),"Absolute log-residual heatmap")]:
-        plot_with_desc(lambda z=z,name=name,title=title: make_heatmap(x,t,z,title,name,mode if "residual" in name else "auto",clip), f"Shows `{name}` over the fixed diagnostic grid to locate temporal or weight regions with abundance structure or residual failure.", line_desc("fixed_grid_fields.npz (fallback fixed_grid_fields.csv)", ["t_eval","x_eval",name.replace("abs_","")], "absolute value for abs residual; optional percentile/symmetric colour limits", False, False))
+        plot_with_desc(lambda z=z,name=name,title=title: make_heatmap(x,t,z,title,name,mode if "residual" in name else "auto",clip), FIELD_INTERPRETATIONS[name], line_desc("fixed_grid_fields.npz (fallback fixed_grid_fields.csv)", ["t_eval","x_eval",name.replace("abs_","")], "absolute value for abs residual; optional percentile/symmetric colour limits", False, False))
     comp = st.selectbox("PDE component", [c for c in ["dlogN_dt","advective","mu","dg_dw","g_eval"] if c in fields]) if any(c in fields for c in ["dlogN_dt","advective","mu","dg_dw","g_eval"]) else None
-    if comp: plot_with_desc(lambda: make_heatmap(x,t,fields[comp],f"PDE component heatmap: {comp}",comp,mode,clip), "Shows one fixed-grid PDE component to diagnose imbalance in the residual equation.", line_desc("fixed_grid_fields.npz/csv", ["t_eval","x_eval",comp], "optional colour clipping", False, False))
+    if comp: plot_with_desc(lambda: make_heatmap(x,t,fields[comp],f"PDE component heatmap: {comp}",comp,mode,clip), FIELD_INTERPRETATIONS[comp], line_desc("fixed_grid_fields.npz/csv", ["t_eval","x_eval",comp], "optional colour clipping", False, False))
     default_times = [float(t[i]) for i in sorted(set(np.linspace(0, len(t)-1, min(6,len(t)), dtype=int)))]
     times = st.multiselect("Profile times", [float(v) for v in t], default=default_times)
     def profiles(resid=False):
@@ -321,6 +428,8 @@ def fields_page(run_dir: Path, clip: bool, mode: str, markers: bool) -> None:
         plot_with_desc(summ, f"Aggregates absolute residual by {axis_name} to locate broad regions of PDE mismatch.", line_desc("fixed_grid_fields.npz/csv", ["residual_log"], f"mean, p95, max of abs residual along the other axis", False, False))
 
 # Comparison and mizer abbreviated implementation covering requested plots
+FIELD_INTERPRETATIONS={"log10_N":"`log10_N` is the neural-network predicted abundance on the fixed diagnostic grid, shown as log10(N). High or low regions show the learned size spectrum over time.","residual_log":"`residual_log` is the signed log PDE residual R_log. Positive/negative regions show which side of d_t log N + g d_w log N + mu + d_w g is imbalanced.","abs_residual_log":"`abs_residual_log` is the magnitude of the PDE mismatch; high values mark where the neural-network field least satisfies the PDE.","dlogN_dt":"`dlogN_dt` is the time derivative of network-predicted log abundance on the fixed grid.","advective":"`advective` is the growth/advection contribution g*d_w log N in the log residual.","mu":"`mu` is the mortality contribution in the log residual.","dg_dw":"`dg_dw` is the body-size derivative of growth rate in the log residual.","g_eval":"`g_eval` is the growth rate evaluated on the fixed grid; it is a biological PDE coefficient used by the residual, not a network output."}
+
 def normalise_mizer_dataframe(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
     aliases={"t":["time","t","t_eval"],"species":["sp","species","species_id","species_name"],"w":["weight","w","w_eval"],"x":["x","log_weight","log_w","x_eval"],"N":["N","n","abundance","density"],"log_N":["log_N","logN","ln_N"],"log10_N":["log10_N","log10N"]}
     out=pd.DataFrame(index=df.index); out["source_name"]=source_name
@@ -334,7 +443,10 @@ def normalise_mizer_dataframe(df: pd.DataFrame, source_name: str) -> pd.DataFram
     out.loc[out["log10_N"].isna() & out["log_N"].notna(), "log10_N"] = out["log_N"] / np.log(10)
     out.loc[out["N"].isna() & out["log_N"].notna(), "N"] = np.exp(out["log_N"])
     out.loc[out["N"].isna() & out["log10_N"].notna(), "N"] = 10 ** out["log10_N"]
-    return out[["source_name","t","species","w","x","N","log_N","log10_N"]]
+    required_ok = out["t"].notna().any() and out["species"].notna().any() and out["w"].notna().any() and out["N"].notna().any()
+    if not required_ok:
+        raise ValueError("Could not use this mizer file.\n\nExpected long-format mizer data with columns equivalent to:\ntime, sp/species, w/weight, and N/abundance.\n\nThe mizer object appears to be a time × species × weight array, so export it to long CSV first: one row per time/species/weight.")
+    return out[["source_name","t","species","w","x","N","log_N","log10_N"]].dropna(subset=["t","species","w","x","N","log10_N"])
 
 
 def compare_page(run_df, selected_runs, clip, mode, markers):
@@ -353,14 +465,17 @@ def compare_page(run_df, selected_runs, clip, mode, markers):
         plot_with_desc(overlay, f"Overlays `{metric}` across selected runs to compare convergence histories.", line_desc(file, ["step",metric], "concatenate selected runs; no interpolation", False, False))
     st.dataframe(run_df[run_df.run_id.isin(selected_runs)], use_container_width=True)
     add_plot_description("One-row-per-run table of final metrics/config for selected runs.", line_desc("final_summary.csv/json, config.json, timing_summary.csv", RUN_COLUMNS, "scan immediate run folders", False, False))
-    tsel=st.number_input("Selected time for profile overlays", value=0.0)
+    times=parse_comparison_times(st.text_input("Selected times for profile overlays", "0"))
     def profile(resid=False):
-        rows=[]
+        rows=[]; used={}
         for rid in selected_runs:
             f=load_fixed_fields(run_dirs[rid]);
             if f and not check_required_arrays(f,["t_eval","x_eval","log10_N","residual_log"]):
-                i=nearest_index(f["t_eval"], tsel); arr=np.abs(f["residual_log"][i]) if resid else f["log10_N"][i]
-                rows += [{"x":xx,"value":vv,"run_id":rid} for xx,vv in zip(f["x_eval"],arr)]
+
+                for tv in times:
+                    i=nearest_index(f["t_eval"], tv); used.setdefault(rid, []).append(f["t_eval"][i]); arr=np.abs(f["residual_log"][i]) if resid else f["log10_N"][i]
+                    rows += [{"x":xx,"value":vv,"run_id":f"{rid} | t={format_time_label(f['t_eval'][i])}"} for xx,vv in zip(f["x_eval"],arr)]
+        st.caption(format_nearest_times_message(times, used))
         if rows: st.plotly_chart(px.line(pd.DataFrame(rows),x="x",y="value",color="run_id",markers=markers,title="Residual profile overlay" if resid else "Abundance profile overlay"),use_container_width=True)
     plot_with_desc(lambda: profile(False), "Overlays final abundance profiles at nearest time; different x grids are allowed because each line carries its own x coordinates.", line_desc("fixed_grid_fields.npz/csv", ["t_eval","x_eval","log10_N"], "nearest time per run; no interpolation", False, False))
     plot_with_desc(lambda: profile(True), "Overlays residual profiles at nearest time to compare where selected runs violate the PDE most.", line_desc("fixed_grid_fields.npz/csv", ["t_eval","x_eval","residual_log"], "nearest time; absolute value", False, False))
@@ -378,9 +493,13 @@ def load_mizer_sources(local_paths: str, uploads) -> dict[str,pd.DataFrame]:
     out={}
     for raw in [p.strip() for p in local_paths.splitlines() if p.strip()]:
         df=safe_read_csv(Path(raw));
-        if df is not None: out[Path(raw).name]=normalise_mizer_dataframe(df,Path(raw).name)
+
+        if df is not None:
+            try: out[Path(raw).name]=normalise_mizer_dataframe(df,Path(raw).name)
+            except ValueError as e: st.error(str(e))
     for up in uploads or []:
         try: out[up.name]=normalise_mizer_dataframe(pd.read_csv(up), up.name)
+        except ValueError as e: st.error(str(e))
         except Exception: st.warning(f"Could not read uploaded mizer CSV: {up.name}")
     return out
 
@@ -401,11 +520,17 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
     run_dirs=dict(zip(run_df.run_id, run_df.run_dir)); fields=load_fixed_fields(run_dirs.get(selected_run,"")) if selected_run else None
     if not fields or check_required_arrays(fields,["t_eval","x_eval","log10_N"]): st.warning("Selected PINN run needs fixed_grid_fields.npz/csv with t_eval, x_eval, log10_N."); return
     allm=pd.concat(mizers.values(), ignore_index=True); species=st.selectbox("Species", sorted(allm.species.astype(str).dropna().unique()))
-    tsel=st.number_input("Comparison time", value=float(fields["t_eval"][0])); xsel=st.number_input("Comparison log-weight x", value=float(fields["x_eval"][0])); srcs=st.multiselect("Mizer sources", list(mizers), default=list(mizers))
+    times=parse_comparison_times(st.text_input("Comparison times", ", ".join(format_time_label(v) for v in fields["t_eval"][:1])))
+    xsel=st.number_input("Comparison log-weight x", value=float(fields["x_eval"][0])); srcs=st.multiselect("Mizer sources", list(mizers), default=list(mizers))
     def prof():
-        rows=[]; i=nearest_index(fields["t_eval"],tsel); rows += [{"x":x,"log10_N":v,"source":"PINN"} for x,v in zip(fields["x_eval"],fields["log10_N"][i])]
+        rows=[]; used={"PINN": []}
+        for tv in times:
+            i=nearest_index(fields["t_eval"],tv); used["PINN"].append(fields["t_eval"][i]); rows += [{"x":x,"log10_N":v,"source":f"PINN | t={format_time_label(fields['t_eval'][i])}"} for x,v in zip(fields["x_eval"],fields["log10_N"][i])]
         for name in srcs:
-            s=mizers[name][mizers[name].species.astype(str)==str(species)].dropna(subset=["t","x","log10_N"]); nt=nearest_value(s.t.to_numpy(),tsel); ss=s[np.isclose(s.t,nt)]; rows += [{"x":r.x,"log10_N":r.log10_N,"source":name} for r in ss.itertuples()]
+            s=mizers[name][mizers[name].species.astype(str)==str(species)].dropna(subset=["t","x","log10_N"])
+            for tv in times:
+                nt=nearest_value(s.t.to_numpy(),tv); used.setdefault(name, []).append(nt); ss=s[np.isclose(s.t,nt)]; rows += [{"x":r.x,"log10_N":r.log10_N,"source":f"{name} | t={format_time_label(nt)}"} for r in ss.itertuples()]
+        st.caption(format_nearest_times_message(times, used))
         st.plotly_chart(px.line(pd.DataFrame(rows),x="x",y="log10_N",color="source",markers=markers,title="PINN and mizer abundance profile overlay"),use_container_width=True)
     plot_with_desc(prof, "Compares PINN abundance to selected mizer profiles at nearest available times.", line_desc("fixed_grid_fields.npz/csv plus mizer CSV", ["t/x/log10_N or aliases"], "nearest time in each source; aliases normalised", False, False))
     def ts():
@@ -420,9 +545,16 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
     miz_grid=interpolate_mizer_to_pinn(mizers[one], species, fields["t_eval"], fields["x_eval"])
     def delta_profile():
         if miz_grid is None: st.warning("Interpolation impossible: mizer source needs t, x, log10_N for selected species."); return
-        i=nearest_index(fields["t_eval"],tsel); delta=fields["log10_N"][i]-miz_grid[i]
-        st.warning("Mizer values were interpolated/nearest-time selected onto the PINN grid.")
-        st.plotly_chart(px.line(pd.DataFrame({"x":fields["x_eval"],"delta":delta}),x="x",y="delta",markers=markers,title="PINN minus mizer profile"),use_container_width=True)
+        rows=[]; used={"PINN": [], one: []}
+        sub=mizers[one][mizers[one].species.astype(str)==str(species)].dropna(subset=["t","x","log10_N"])
+        for tv in times:
+            i=nearest_index(fields["t_eval"],tv); pinnt=fields["t_eval"][i]; mt=nearest_value(sub.t.to_numpy(), pinnt)
+            used["PINN"].append(pinnt); used[one].append(mt)
+            delta=fields["log10_N"][i]-miz_grid[i]
+            rows += [{"x":x,"delta":v,"source":f"PINN - {one} | t={format_time_label(pinnt)}"} for x,v in zip(fields["x_eval"],delta)]
+        st.warning("Mizer comparison used nearest-time selection and linear interpolation in log-weight x onto the PINN grid.")
+        st.caption(format_nearest_times_message(times, used))
+        st.plotly_chart(px.line(pd.DataFrame(rows),x="x",y="delta",color="source",markers=markers,title="PINN minus mizer profile"),use_container_width=True)
     plot_with_desc(delta_profile, "Shows signed abundance error along weight at the selected time.", line_desc("fixed_grid_fields.npz/csv plus one mizer CSV", ["t_eval","x_eval","log10_N","mizer t/x/log10_N"], f"nearest time and {'linear interpolation in x' if interp else 'nearest x selection'}; delta=PINN-mizer", False, False))
     def delta_heat():
         if miz_grid is None: st.warning("Interpolation impossible: mizer source needs t, x, log10_N for selected species."); return
@@ -433,8 +565,12 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
         for rid in selected_runs:
             f=load_fixed_fields(run_dirs[rid])
             if f and not check_required_arrays(f,["t_eval","x_eval","log10_N"]):
-                i=nearest_index(f["t_eval"],tsel); rows += [{"x":x,"log10_N":v,"source":rid} for x,v in zip(f["x_eval"],f["log10_N"][i])]
-        s=mizers[one][mizers[one].species.astype(str)==str(species)].dropna(subset=["t","x","log10_N"]); nt=nearest_value(s.t.to_numpy(),tsel); rows += [{"x":r.x,"log10_N":r.log10_N,"source":one} for r in s[np.isclose(s.t,nt)].itertuples()]
+
+                for tv in times:
+                    i=nearest_index(f["t_eval"],tv); rows += [{"x":x,"log10_N":v,"source":f"{rid} | t={format_time_label(f['t_eval'][i])}"} for x,v in zip(f["x_eval"],f["log10_N"][i])]
+        s=mizers[one][mizers[one].species.astype(str)==str(species)].dropna(subset=["t","x","log10_N"]);
+        for tv in times:
+            nt=nearest_value(s.t.to_numpy(),tv); rows += [{"x":r.x,"log10_N":r.log10_N,"source":f"{one} | t={format_time_label(nt)}"} for r in s[np.isclose(s.t,nt)].itertuples()]
         st.plotly_chart(px.line(pd.DataFrame(rows),x="x",y="log10_N",color="source",markers=markers,title="Multiple PINN runs vs one mizer profile"),use_container_width=True)
     plot_with_desc(multi, "Compares several PINN abundance profiles with one mizer source at nearest times.", line_desc("fixed_grid_fields.npz/csv plus mizer CSV", ["t/x/log10_N"], "nearest time per source; no cross-run grid assumption", False, False))
     for by, axis, vals in [("time",1,fields["t_eval"]),("weight",0,fields["x_eval"] )]:

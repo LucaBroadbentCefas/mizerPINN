@@ -100,3 +100,16 @@ Run-to-run difference heatmaps are stricter: they are plotted only when `t_eval`
 - **Empty CSV**: empty CSV files are tolerated and reported as empty.
 - **Log-axis warning**: non-positive values are replaced with `NaN` before log-scaled plots so Plotly does not display invalid values.
 - **Mizer interpolation impossible**: ensure the mizer CSV has time, log-weight or weight, and abundance/log-abundance columns after alias normalisation.
+
+### Required long CSV for mizer array exports
+
+For a mizer abundance array with dimensions `time × species × weight`, export a long CSV before loading it in the viewer. The CSV should contain one row per time/species/weight combination:
+
+```text
+time, sp, w, N
+0, Sprat, 0.001, 123.4
+0, Sprat, 0.00111, 120.7
+1, Sprat, 0.001, 118.9
+```
+
+The viewer normalises this internally to `t, species, w, x, N, log_N, log10_N`, with `x = log(w)` and `log10_N = log10(max(N, tiny))`. `.rds` and `.RData` files are intentionally not read; export the R object to CSV first to keep the app portable and read-only.
