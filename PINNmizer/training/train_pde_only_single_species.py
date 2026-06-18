@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import math
 import sys
 import time
@@ -56,8 +57,19 @@ from PINNmizer.diagnostics.fields import (
 
 
 def make_run_dir() -> Path:
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = PROJECT_ROOT / "runs" / "pde_only_single_species" / stamp
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+    slurm_job_id = os.environ.get("SLURM_JOB_ID")
+    slurm_array_task_id = os.environ.get("SLURM_ARRAY_TASK_ID")
+
+    if slurm_job_id is not None and slurm_array_task_id is not None:
+        name = f"{stamp}_job{slurm_job_id}_task{slurm_array_task_id}"
+    elif slurm_job_id is not None:
+        name = f"{stamp}_job{slurm_job_id}"
+    else:
+        name = stamp
+
+    run_dir = PROJECT_ROOT / "runs" / "pde_only_single_species" / name
     run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
 
@@ -473,11 +485,15 @@ def parse_args() -> argparse.Namespace:
         help="Initial step offset. Use 250 when continuing from model_step_250.pt.",
     )
 
+    parser.add_argument("--dtype", choices=["float32", "float64"], default="float64")
+
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    dtype = torch.float32 if args.dtype == "float32" else torch.float64
+
 
     hpc_history_every = 2000
     hpc_checkpoint_every = 4000
@@ -495,7 +511,7 @@ def main() -> None:
 
     params, n_init, n_pp = load_mizer_inputs(
         args.input_dir,
-        dtype=torch.float64,
+        dtype=dtype,
         device=args.device,
     )
 
@@ -564,7 +580,7 @@ def main() -> None:
         rwf_sigma=args.rwf_sigma,
         rwf_apply_to=args.rwf_apply_to,
         rwf_base_init=args.rwf_base_init,
-    ).to(dtype=torch.float64, device=params.w.device)
+    ).to(dtype=dtype, device=params.w.device)
 
     if args.init_final_bias_from_ic:
         initialise_final_bias_from_ic(
@@ -651,7 +667,7 @@ def main() -> None:
         "lr_plateau_patience": args.lr_plateau_patience,
         "current_lr": current_lr(optimizer),
         "final_lr": None,
-        "dtype": "torch.float64",
+        "dtype": args.dtype,
         "device": str(params.w.device),
         "t_min": float(params.t_min),
         "t_max": float(params.t_max),
