@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 
 from PINNmizer.pinn.models import FactorizedLinear, build_pinn_model
-from PINNmizer.pinn.sampling import sample_pde_batch
+from PINNmizer.pinn.sampling import make_fixed_pde_batch as make_fixed_training_pde_batch, sample_pde_batch
 from PINNmizer.training.checkpointing import save_checkpoint
 from PINNmizer.training.config import (
     _to_float,
@@ -39,7 +39,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 from PINNmizer.io import load_mizer_inputs
 from PINNmizer.params import scale_x, scale_t, active_grid_mask
 from PINNmizer.diagnostics.fixed_grid import (
-    make_fixed_pde_batch,
+    make_fixed_pde_batch as make_fixed_diagnostic_pde_batch,
     make_fixed_pde_batch_from_csv,
     compute_fixed_diagnostics,
 )
@@ -423,9 +423,10 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--collocation-strategy",
-        choices=["uniform", "r3", "causal-r3"],
+        choices=["uniform", "fixed-grid", "r3", "causal-r3"],
         default="uniform",
     )
+    parser.add_argument("--fixed-collocation-use-mizer-x-grid", action="store_true")
     parser.add_argument("--r3-population-size", type=int, default=None)
     parser.add_argument("--r3-update-every", type=int, default=1)
     parser.add_argument("--r3-warmup-steps", type=int, default=0)
@@ -528,11 +529,21 @@ def main() -> None:
             path=args.diag_grid_csv,
         )
     else:
-        fixed_diag_batch = make_fixed_pde_batch(
+        fixed_diag_batch = make_fixed_diagnostic_pde_batch(
             params=params,
             n_time=args.diag_n_time,
             n_eval=args.diag_n_eval,
             use_mizer_x_grid=args.diag_use_mizer_x_grid,
+        )
+
+    fixed_collocation_batch = None
+    if args.collocation_strategy == "fixed-grid":
+        fixed_collocation_batch = make_fixed_training_pde_batch(
+            params=params,
+            n_time=args.n_time,
+            n_eval=args.n_eval,
+            t_max_current=None,
+            use_mizer_x_grid=args.fixed_collocation_use_mizer_x_grid,
         )
 
     n_species = params.interaction.shape[0]
@@ -712,6 +723,8 @@ def main() -> None:
         "timestep_dt": args.timestep_dt,
         "timestep_n_pairs": args.timestep_n_pairs,
         "collocation_strategy": args.collocation_strategy,
+        "fixed_collocation_use_mizer_x_grid": args.fixed_collocation_use_mizer_x_grid,
+        "fixed_collocation_is_static": fixed_collocation_batch is not None,
         "r3_population_size": r3_population_size,
         "r3_update_every": args.r3_update_every,
         "r3_warmup_steps": args.r3_warmup_steps,
@@ -846,6 +859,7 @@ def main() -> None:
                 expert_weight_min=args.expert_weight_min,
                 expert_weight_max=args.expert_weight_max,
                 expert_weight_batch=args.expert_weight_batch,
+                fixed_collocation_batch=fixed_collocation_batch,
             )
 
             history.append(row)

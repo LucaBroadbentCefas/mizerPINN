@@ -98,6 +98,7 @@ def train_one_step(
     expert_weight_min: float | None = None,
     expert_weight_max: float | None = None,
     expert_weight_batch: str = "fixed",
+    fixed_collocation_batch: dict[str, torch.Tensor] | None = None,
 ) -> dict:
     if wang_weight_batch not in {"fixed", "training"}:
         raise ValueError("wang_weight_batch must be 'fixed' or 'training'.")
@@ -119,6 +120,34 @@ def train_one_step(
             time_sampling=time_sampling,
             causal_n_chunks=causal_n_chunks,
         )
+
+        _, out = compute_pde_loss(
+            model=model,
+            batch=batch,
+            params=params,
+            n_pp=n_pp,
+            residual_form=residual_form,
+            n_init=n_init,
+            lambda_pde=lambda_pde,
+            lambda_ic=lambda_ic,
+            lambda_bc=lambda_bc,
+            boundary_loss_form=boundary_loss_form,
+            species_idx=0,
+            eps=eps,
+            bc_eps=bc_eps,
+            bc_g_min=bc_g_min,
+            use_constant_recruitment_r=bc_use_constant_r,
+            constant_recruitment_r=bc_constant_r,
+            causal_loss=causal_loss,
+            causal_n_chunks=causal_n_chunks,
+            causal_epsilon=causal_epsilon,
+        )
+
+    elif collocation_strategy == "fixed-grid":
+        if fixed_collocation_batch is None:
+            raise ValueError("fixed-grid collocation requires fixed_collocation_batch.")
+
+        batch = fixed_collocation_batch
 
         _, out = compute_pde_loss(
             model=model,
@@ -183,7 +212,7 @@ def train_one_step(
         )
 
     else:
-        raise ValueError("collocation_strategy must be 'uniform', 'r3', or 'causal-r3'.")
+        raise ValueError("collocation_strategy must be 'uniform', 'fixed-grid', 'r3', or 'causal-r3'.")
 
     loss_timestep = out["loss_pde"].new_zeros(())
     timestep_out = None
