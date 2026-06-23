@@ -28,6 +28,19 @@ RUN_COLUMNS = [
 def _as_path(path: str | Path) -> Path:
     return Path(path).expanduser()
 
+def is_run_dir(path: Path) -> bool:
+    return any(
+        (path / name).exists()
+        for name in [
+            "config.json",
+            "final_summary.json",
+            "final_summary.csv",
+            "loss_history.csv",
+            "fixed_diagnostic_history.csv",
+            "fixed_grid_fields.npz",
+            "fixed_grid_fields.csv",
+        ]
+    )
 
 @st.cache_data(show_spinner=False)
 def safe_read_csv(path: str | Path) -> pd.DataFrame | None:
@@ -98,12 +111,16 @@ def scan_runs(run_root: str | Path) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     if not root.exists() or not root.is_dir():
         return pd.DataFrame(columns=RUN_COLUMNS)
-    for run_dir in sorted([p for p in root.iterdir() if p.is_dir()]):
+
+    run_dirs = [root] if is_run_dir(root) else sorted(p for p in root.rglob("*") if p.is_dir() and is_run_dir(p))
+
+    for run_dir in run_dirs:
         summary = load_final_summary(run_dir)
         config = load_config(run_dir)
         timing = _first_row_dict(safe_read_csv(run_dir / "timing_summary.csv"))
         row = {c: np.nan for c in RUN_COLUMNS}
-        row.update({"run_id": run_dir.name, "run_dir": str(run_dir), "error_message": ""})
+        run_id = run_dir.name if run_dir == root else str(run_dir.relative_to(root))
+        row.update({"run_id": run_id, "run_dir": str(run_dir), "error_message": ""})
         for key in RUN_COLUMNS:
             if key in ("run_id", "run_dir"):
                 continue
@@ -339,36 +356,111 @@ def show_architecture_differences(run_df: pd.DataFrame, selected_runs: list[str]
         return "" if same else "background-color: #ffe08a; font-weight: 600"
     st.dataframe(d.style.apply(lambda row:[style_cell(v, row.name) for v in row], axis=1), use_container_width=True)
 
+def add_loss_at_step(run_df: pd.DataFrame, target_step: int, metric: str) -> pd.DataFrame:
+    out = run_df.copy()
+    values = []
+    used_steps = []
+
+    for run_dir in out["run_dir"]:
+        df = load_loss_history(run_dir)
+        if df is None or df.empty or "step" not in df.columns or metric not in df.columns:
+            values.append(np.nan)
+            used_steps.append(np.nan)
+            continue
+
+        d = df[["step", metric]].copy()
+        d["step"] = pd.to_numeric(d["step"], errors="coerce")
+        d[metric] = pd.to_numeric(d[metric], errors="coerce")
+        d = d.dropna(subset=["step", metric])
+
+        if d.empty:
+            values.append(np.nan)
+            used_steps.append(np.nan)
+            continue
+
+        idx = (d["step"] - target_step).abs().idxmin()
+        values.append(float(d.loc[idx, metric]))
+        used_steps.append(int(d.loc[idx, "step"]))
+
+    out[f"{metric}_at_selected_step"] = values
+    out["selected_loss_step_used"] = used_steps
+    return out
+
 def run_browser_page(run_df: pd.DataFrame, selected_runs: list[str], log_y: bool, markers: bool) -> None:
     st.header("Run browser")
     filtered = run_df.copy()
+
     for col in ["status","model_arch","collocation_strategy","loss_weighting","causal_loss","weight_factorization","seed"]:
         vals = sorted([str(v) for v in filtered[col].dropna().unique() if str(v) != ""])
         chosen = st.multiselect(f"Filter {col}", vals, key=f"filter_{col}")
-        if chosen: filtered = filtered[filtered[col].astype(str).isin(chosen)]
-    st.dataframe(filtered, use_container_width=True)
+        if chosen:
+            filtered = filtered[filtered[col].astype(str).isin(chosen)]
+
+    loss_metric = st.selectbox("Loss-history metric for selected iteration", ["loss","loss_unweighted","loss_pde","loss_ic","loss_bc","loss_timestep"])
+    loss_step = st.number_input("Iteration for direct loss comparison", min_value=0, value=1000, step=100)
+    filtered = add_loss_at_step(filtered, int(loss_step), loss_metric)
+
+    st.caption("Selected-iteration loss uses the nearest logged step in each run's loss_history.csv.")
+
+    event = st.dataframe(
+        filtered,
+        use_container_width=True,
+        key="run_browser_table",
+        on_select="rerun",
+        selection_mode="single-row",
+    )
+
+    clicked_rows = event.selection.rows
+    if clicked_rows:
+        clicked_run = str(filtered.iloc[clicked_rows[0]]["run_id"])
+    
+        # Only apply the table click when it is a NEW table selection.
+        # This prevents an old selected table row from overriding the sidebar selectbox.
+        if clicked_run != st.session_state.get("last_table_selected_run"):
+            st.session_state["last_table_selected_run"] = clicked_run
+            st.session_state["selected_run"] = clicked_run
+            st.rerun()
+
     if len(selected_runs) >= 2:
-        show_architecture_differences(run_df, selected_runs)
-    metrics = ["final_fixed_residual_log_abs_p95","final_loss","final_loss_unweighted","final_loss_pde","final_loss_ic","final_loss_bc","final_fixed_loss","final_fixed_loss_pde","final_fixed_loss_ic","final_fixed_loss_bc","seconds_per_step"]
+        show_architecture_differences(filtered, selected_runs)
+
+    selected_step_metric = f"{loss_metric}_at_selected_step"
+    metrics = [selected_step_metric,"final_fixed_residual_log_abs_p95","final_loss","final_loss_unweighted","final_loss_pde","final_loss_ic","final_loss_bc","final_fixed_loss","final_fixed_loss_pde","final_fixed_loss_ic","final_fixed_loss_bc","seconds_per_step"]
     metric = st.selectbox("Ranking metric", metrics)
+
     def rank():
         d = filtered[["run_id", metric]].dropna().sort_values(metric, ascending=True)
+        if d.empty:
+            st.info(f"No values available for {metric}.")
+            return
         st.plotly_chart(px.bar(d, x=metric, y="run_id", orientation="h", title=f"Final metric ranking: {metric}"), use_container_width=True)
-    plot_with_desc(rank, "Ranks run folders by a final scalar metric from summaries/timing to identify best-quality or fastest runs and failed outliers.", line_desc("final_summary.csv/json and timing_summary.csv", ["run_id", metric], "sorted ascending (best to worst for losses/residuals)", False, False))
+
+    plot_with_desc(rank, "Ranks run folders by the selected metric.", line_desc("final_summary.csv/json, timing_summary.csv, or loss_history.csv", ["run_id", metric], "sorted ascending", False, False))
+
     decomp_cols = ["final_loss_pde","final_loss_ic","final_loss_bc","final_fixed_loss_pde","final_fixed_loss_ic","final_fixed_loss_bc"]
+
     def decomp():
         d = filtered[filtered.run_id.isin(selected_runs)][["run_id"] + decomp_cols].melt("run_id", var_name="term", value_name="loss").dropna()
+        if d.empty:
+            st.info("No selected runs contain final loss decomposition values.")
+            return
         st.plotly_chart(px.bar(d, x="run_id", y="loss", color="term", barmode="group", title="Final loss decomposition", log_y=log_y), use_container_width=True)
-    plot_with_desc(decomp, "Compares final PDE/IC/BC contributions so a run dominated by one constraint can be diagnosed.", line_desc("final_summary.csv/json", ["run_id"]+decomp_cols, "wide-to-long reshape", log_y, False))
+
+    plot_with_desc(decomp, "Compares final PDE/IC/BC contributions.", line_desc("final_summary.csv/json", ["run_id"]+decomp_cols, "wide-to-long reshape", log_y, False))
+
     group = st.selectbox("Scatter colour", ["model_arch","collocation_strategy","loss_weighting","causal_loss","weight_factorization"])
+
     def speed():
         st.plotly_chart(px.scatter(filtered, x="seconds_per_step", y="final_fixed_residual_log_abs_p95", color=group, hover_data=["run_id","hidden_width","hidden_layers","seed","final_loss"], title="Speed-quality scatter"), use_container_width=True)
-    plot_with_desc(speed, "Shows the cost/accuracy trade-off; slow runs with poor residuals or fast accurate runs stand out.", line_desc("run index from summaries/config/timing", ["seconds_per_step","final_fixed_residual_log_abs_p95",group], "none", False, False))
+
+    plot_with_desc(speed, "Shows the cost/accuracy trade-off.", line_desc("run index from summaries/config/timing", ["seconds_per_step","final_fixed_residual_log_abs_p95",group], "none", False, False))
+
     x = st.selectbox("Architecture scatter x", ["hidden_width","hidden_layers","fourier_scale","fourier_num_features","rwf_sigma","r3_population_size"])
+
     def arch():
         st.plotly_chart(px.scatter(filtered, x=x, y="final_fixed_residual_log_abs_p95", color=group, hover_data=["run_id"], title="Architecture / hyperparameter scatter"), use_container_width=True)
-    plot_with_desc(arch, "Relates architecture or sampling settings to final fixed-grid residual quality.", line_desc("run index from summaries/config", [x,"final_fixed_residual_log_abs_p95",group], "none", False, False))
 
+    plot_with_desc(arch, "Relates architecture or sampling settings to final fixed-grid residual quality.", line_desc("run index from summaries/config", [x,"final_fixed_residual_log_abs_p95",group], "none", False, False))
 
 def history_page(run_dir: Path, fixed: bool, log_y: bool, markers: bool) -> None:
     file = "fixed_diagnostic_history.csv" if fixed else "loss_history.csv"
@@ -465,7 +557,7 @@ def compare_page(run_df, selected_runs, clip, mode, markers):
         plot_with_desc(overlay, f"Overlays `{metric}` across selected runs to compare convergence histories.", line_desc(file, ["step",metric], "concatenate selected runs; no interpolation", False, False))
     st.dataframe(run_df[run_df.run_id.isin(selected_runs)], use_container_width=True)
     add_plot_description("One-row-per-run table of final metrics/config for selected runs.", line_desc("final_summary.csv/json, config.json, timing_summary.csv", RUN_COLUMNS, "scan immediate run folders", False, False))
-    times=parse_comparison_times(st.text_input("Selected times for profile overlays", "0"))
+    times = parse_comparison_times(st.text_input("Selected times for profile overlays", "0"))
     def profile(resid=False):
         rows=[]; used={}
         for rid in selected_runs:
@@ -516,70 +608,178 @@ def interpolate_mizer_to_pinn(miz, species, t_grid, x_grid):
 
 def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers):
     st.header("Mizer comparison")
-    if not mizers: st.info("Provide one or more mizer CSV files in the sidebar."); return
-    run_dirs=dict(zip(run_df.run_id, run_df.run_dir)); fields=load_fixed_fields(run_dirs.get(selected_run,"")) if selected_run else None
-    if not fields or check_required_arrays(fields,["t_eval","x_eval","log10_N"]): st.warning("Selected PINN run needs fixed_grid_fields.npz/csv with t_eval, x_eval, log10_N."); return
-    allm=pd.concat(mizers.values(), ignore_index=True); species=st.selectbox("Species", sorted(allm.species.astype(str).dropna().unique()))
-    times=parse_comparison_times(st.text_input("Comparison times", ", ".join(format_time_label(v) for v in fields["t_eval"][:1])))
-    xsel=st.number_input("Comparison log-weight x", value=float(fields["x_eval"][0])); srcs=st.multiselect("Mizer sources", list(mizers), default=list(mizers))
+    if not mizers:
+        st.info("Provide one or more mizer CSV files in the sidebar.")
+        return
+
+    run_dirs = dict(zip(run_df.run_id, run_df.run_dir))
+    fields = load_fixed_fields(run_dirs.get(selected_run, "")) if selected_run else None
+    if not fields or check_required_arrays(fields, ["t_eval","x_eval","log10_N"]):
+        st.warning("Selected PINN run needs fixed_grid_fields.npz/csv with t_eval, x_eval, log10_N.")
+        return
+
+    allm = pd.concat(mizers.values(), ignore_index=True)
+    species = st.selectbox("Species", sorted(allm.species.astype(str).dropna().unique()))
+
+    t_options = [float(v) for v in fields["t_eval"]]
+    default_times = [t_options[i] for i in sorted(set(np.linspace(0, len(t_options)-1, min(6, len(t_options)), dtype=int)))]
+    times = st.multiselect("Comparison times", t_options, default=default_times)
+    if not times:
+        st.info("Select at least one comparison time.")
+        return
+
+    xsel = st.number_input("Comparison log-weight x", value=float(fields["x_eval"][0]))
+    srcs = st.multiselect("Mizer sources", list(mizers), default=list(mizers))
+
     def prof():
-        rows=[]; used={"PINN": []}
+        rows = []
+        used = {"PINN": []}
+
         for tv in times:
-            i=nearest_index(fields["t_eval"],tv); used["PINN"].append(fields["t_eval"][i]); rows += [{"x":x,"log10_N":v,"source":f"PINN | t={format_time_label(fields['t_eval'][i])}"} for x,v in zip(fields["x_eval"],fields["log10_N"][i])]
+            i = nearest_index(fields["t_eval"], tv)
+            pinnt = fields["t_eval"][i]
+            used["PINN"].append(pinnt)
+            time_label = format_time_label(tv)
+
+            rows += [
+                {
+                    "x": x,
+                    "log10_N": v,
+                    "time": time_label,
+                    "source": "PINN",
+                    "series": f"PINN | t={format_time_label(pinnt)}",
+                }
+                for x, v in zip(fields["x_eval"], fields["log10_N"][i])
+            ]
+
         for name in srcs:
-            s=mizers[name][mizers[name].species.astype(str)==str(species)].dropna(subset=["t","x","log10_N"])
+            s = mizers[name][mizers[name].species.astype(str)==str(species)].dropna(subset=["t","x","log10_N"])
             for tv in times:
-                nt=nearest_value(s.t.to_numpy(),tv); used.setdefault(name, []).append(nt); ss=s[np.isclose(s.t,nt)]; rows += [{"x":r.x,"log10_N":r.log10_N,"source":f"{name} | t={format_time_label(nt)}"} for r in ss.itertuples()]
+                nt = nearest_value(s.t.to_numpy(), tv)
+                used.setdefault(name, []).append(nt)
+                time_label = format_time_label(tv)
+                ss = s[np.isclose(s.t, nt)]
+
+                rows += [
+                    {
+                        "x": r.x,
+                        "log10_N": r.log10_N,
+                        "time": time_label,
+                        "source": "mizer",
+                        "series": f"{name} | t={format_time_label(nt)}",
+                    }
+                    for r in ss.itertuples()
+                ]
+
+        if not rows:
+            st.info("No PINN/mizer profile rows to plot.")
+            return
+
         st.caption(format_nearest_times_message(times, used))
-        st.plotly_chart(px.line(pd.DataFrame(rows),x="x",y="log10_N",color="source",markers=markers,title="PINN and mizer abundance profile overlay"),use_container_width=True)
-    plot_with_desc(prof, "Compares PINN abundance to selected mizer profiles at nearest available times.", line_desc("fixed_grid_fields.npz/csv plus mizer CSV", ["t/x/log10_N or aliases"], "nearest time in each source; aliases normalised", False, False))
+        st.plotly_chart(
+            px.line(
+                pd.DataFrame(rows),
+                x="x",
+                y="log10_N",
+                color="time",
+                line_dash="source",
+                line_dash_map={"PINN":"solid", "mizer":"dash"},
+                line_group="series",
+                hover_name="series",
+                markers=markers,
+                title="PINN and mizer abundance profile overlay",
+            ),
+            use_container_width=True,
+        )
+
+    plot_with_desc(prof, "Compares PINN abundance to selected mizer profiles at nearest available times.", line_desc("fixed_grid_fields.npz/csv plus mizer CSV", ["t/x/log10_N or aliases"], "same selected time has same colour; PINN solid, mizer dashed", False, False))
+
     def ts():
-        rows=[]; j=nearest_index(fields["x_eval"],xsel); rows += [{"t":t,"log10_N":v,"source":"PINN"} for t,v in zip(fields["t_eval"],fields["log10_N"][:,j])]
+        rows = []
+        j = nearest_index(fields["x_eval"], xsel)
+        rows += [{"t":t,"log10_N":v,"source":"PINN"} for t,v in zip(fields["t_eval"],fields["log10_N"][:,j])]
+
         for name in srcs:
-            s=mizers[name][mizers[name].species.astype(str)==str(species)].dropna(subset=["t","x","log10_N"])
-            for tv,g in s.groupby("t"):
-                nx=nearest_value(g.x.to_numpy(),xsel); val=g.loc[np.isclose(g.x,nx),"log10_N"].iloc[0]; rows.append({"t":tv,"log10_N":val,"source":name})
-        st.plotly_chart(px.line(pd.DataFrame(rows),x="t",y="log10_N",color="source",markers=markers,title="Abundance time-series at selected weight"),use_container_width=True)
+            s = mizers[name][mizers[name].species.astype(str)==str(species)].dropna(subset=["t","x","log10_N"])
+            for tv, g in s.groupby("t"):
+                nx = nearest_value(g.x.to_numpy(), xsel)
+                val = g.loc[np.isclose(g.x, nx), "log10_N"].iloc[0]
+                rows.append({"t":tv,"log10_N":val,"source":name})
+
+        st.plotly_chart(px.line(pd.DataFrame(rows), x="t", y="log10_N", color="source", markers=markers, title="Abundance time-series at selected weight"), use_container_width=True)
+
     plot_with_desc(ts, "Compares temporal abundance at the nearest log-weight in each source.", line_desc("fixed_grid_fields.npz/csv plus mizer CSV", ["t","x","log10_N"], "nearest x per time/source", False, False))
-    one=st.selectbox("Mizer source for error", list(mizers)); interp=st.checkbox("Use linear-in-x interpolation", True)
-    miz_grid=interpolate_mizer_to_pinn(mizers[one], species, fields["t_eval"], fields["x_eval"])
+
+    one = st.selectbox("Mizer source for error", list(mizers))
+    interp = st.checkbox("Use linear-in-x interpolation", True)
+    miz_grid = interpolate_mizer_to_pinn(mizers[one], species, fields["t_eval"], fields["x_eval"])
+
     def delta_profile():
-        if miz_grid is None: st.warning("Interpolation impossible: mizer source needs t, x, log10_N for selected species."); return
-        rows=[]; used={"PINN": [], one: []}
-        sub=mizers[one][mizers[one].species.astype(str)==str(species)].dropna(subset=["t","x","log10_N"])
+        if miz_grid is None:
+            st.warning("Interpolation impossible: mizer source needs t, x, log10_N for selected species.")
+            return
+
+        rows = []
+        used = {"PINN": [], one: []}
+        sub = mizers[one][mizers[one].species.astype(str)==str(species)].dropna(subset=["t","x","log10_N"])
+
         for tv in times:
-            i=nearest_index(fields["t_eval"],tv); pinnt=fields["t_eval"][i]; mt=nearest_value(sub.t.to_numpy(), pinnt)
-            used["PINN"].append(pinnt); used[one].append(mt)
-            delta=fields["log10_N"][i]-miz_grid[i]
+            i = nearest_index(fields["t_eval"], tv)
+            pinnt = fields["t_eval"][i]
+            mt = nearest_value(sub.t.to_numpy(), pinnt)
+            used["PINN"].append(pinnt)
+            used[one].append(mt)
+            delta = fields["log10_N"][i] - miz_grid[i]
             rows += [{"x":x,"delta":v,"source":f"PINN - {one} | t={format_time_label(pinnt)}"} for x,v in zip(fields["x_eval"],delta)]
+
         st.warning("Mizer comparison used nearest-time selection and linear interpolation in log-weight x onto the PINN grid.")
         st.caption(format_nearest_times_message(times, used))
-        st.plotly_chart(px.line(pd.DataFrame(rows),x="x",y="delta",color="source",markers=markers,title="PINN minus mizer profile"),use_container_width=True)
+        st.plotly_chart(px.line(pd.DataFrame(rows), x="x", y="delta", color="source", markers=markers, title="PINN minus mizer profile"), use_container_width=True)
+
     plot_with_desc(delta_profile, "Shows signed abundance error along weight at the selected time.", line_desc("fixed_grid_fields.npz/csv plus one mizer CSV", ["t_eval","x_eval","log10_N","mizer t/x/log10_N"], f"nearest time and {'linear interpolation in x' if interp else 'nearest x selection'}; delta=PINN-mizer", False, False))
+
     def delta_heat():
-        if miz_grid is None: st.warning("Interpolation impossible: mizer source needs t, x, log10_N for selected species."); return
-        st.warning("Mizer values were interpolated using nearest time plus linear-in-x interpolation onto the PINN grid."); make_heatmap(fields["x_eval"],fields["t_eval"],fields["log10_N"]-miz_grid,"PINN minus mizer heatmap","delta_log10_N",mode,clip)
+        if miz_grid is None:
+            st.warning("Interpolation impossible: mizer source needs t, x, log10_N for selected species.")
+            return
+        st.warning("Mizer values were interpolated using nearest time plus linear-in-x interpolation onto the PINN grid.")
+        make_heatmap(fields["x_eval"], fields["t_eval"], fields["log10_N"]-miz_grid, "PINN minus mizer heatmap", "delta_log10_N", mode, clip)
+
     plot_with_desc(delta_heat, "Shows PINN minus mizer abundance error across the fixed PINN grid.", line_desc("fixed_grid_fields.npz/csv plus one mizer CSV", ["t_eval","x_eval","log10_N","mizer t/x/log10_N"], "nearest mizer time and linear interpolation in x onto PINN grid", False, False))
+
     def multi():
-        rows=[]
+        rows = []
+
         for rid in selected_runs:
-            f=load_fixed_fields(run_dirs[rid])
-            if f and not check_required_arrays(f,["t_eval","x_eval","log10_N"]):
-
+            f = load_fixed_fields(run_dirs[rid])
+            if f and not check_required_arrays(f, ["t_eval","x_eval","log10_N"]):
                 for tv in times:
-                    i=nearest_index(f["t_eval"],tv); rows += [{"x":x,"log10_N":v,"source":f"{rid} | t={format_time_label(f['t_eval'][i])}"} for x,v in zip(f["x_eval"],f["log10_N"][i])]
-        s=mizers[one][mizers[one].species.astype(str)==str(species)].dropna(subset=["t","x","log10_N"]);
-        for tv in times:
-            nt=nearest_value(s.t.to_numpy(),tv); rows += [{"x":r.x,"log10_N":r.log10_N,"source":f"{one} | t={format_time_label(nt)}"} for r in s[np.isclose(s.t,nt)].itertuples()]
-        st.plotly_chart(px.line(pd.DataFrame(rows),x="x",y="log10_N",color="source",markers=markers,title="Multiple PINN runs vs one mizer profile"),use_container_width=True)
-    plot_with_desc(multi, "Compares several PINN abundance profiles with one mizer source at nearest times.", line_desc("fixed_grid_fields.npz/csv plus mizer CSV", ["t/x/log10_N"], "nearest time per source; no cross-run grid assumption", False, False))
-    for by, axis, vals in [("time",1,fields["t_eval"]),("weight",0,fields["x_eval"] )]:
-        def err(by=by,axis=axis,vals=vals):
-            if miz_grid is None: st.warning("Interpolation impossible."); return
-            ad=np.abs(fields["log10_N"]-miz_grid); d=pd.DataFrame({by:vals,"mean_abs_delta_log10_N":np.nanmean(ad,axis=axis),"p95_abs_delta_log10_N":np.nanpercentile(ad,95,axis=axis)}).melt(by,var_name="stat",value_name="error")
-            st.plotly_chart(px.line(d,x=by,y="error",color="stat",markers=markers,title=f"Error summary by {by}"),use_container_width=True)
-        plot_with_desc(err, f"Summarises absolute PINN-mizer error by {by} after placing mizer data on the PINN grid.", line_desc("fixed_grid_fields.npz/csv plus mizer CSV", ["t/x/log10_N"], "nearest-time plus linear-x interpolation; mean and p95 abs delta", False, False))
+                    i = nearest_index(f["t_eval"], tv)
+                    rows += [{"x":x,"log10_N":v,"source":f"{rid} | t={format_time_label(f['t_eval'][i])}"} for x,v in zip(f["x_eval"],f["log10_N"][i])]
 
+        s = mizers[one][mizers[one].species.astype(str)==str(species)].dropna(subset=["t","x","log10_N"])
+        for tv in times:
+            nt = nearest_value(s.t.to_numpy(), tv)
+            rows += [{"x":r.x,"log10_N":r.log10_N,"source":f"{one} | t={format_time_label(nt)}"} for r in s[np.isclose(s.t,nt)].itertuples()]
+
+        if not rows:
+            st.info("No multi-run/mizer profile rows to plot.")
+            return
+
+        st.plotly_chart(px.line(pd.DataFrame(rows), x="x", y="log10_N", color="source", markers=markers, title="Multiple PINN runs vs one mizer profile"), use_container_width=True)
+
+    plot_with_desc(multi, "Compares several PINN abundance profiles with one mizer source at nearest times.", line_desc("fixed_grid_fields.npz/csv plus mizer CSV", ["t/x/log10_N"], "nearest time per source; no cross-run grid assumption", False, False))
+
+    for by, axis, vals in [("time",1,fields["t_eval"]),("weight",0,fields["x_eval"])]:
+        def err(by=by, axis=axis, vals=vals):
+            if miz_grid is None:
+                st.warning("Interpolation impossible.")
+                return
+            ad = np.abs(fields["log10_N"] - miz_grid)
+            d = pd.DataFrame({by:vals,"mean_abs_delta_log10_N":np.nanmean(ad,axis=axis),"p95_abs_delta_log10_N":np.nanpercentile(ad,95,axis=axis)}).melt(by,var_name="stat",value_name="error")
+            st.plotly_chart(px.line(d,x=by,y="error",color="stat",markers=markers,title=f"Error summary by {by}"), use_container_width=True)
+
+        plot_with_desc(err, f"Summarises absolute PINN-mizer error by {by} after placing mizer data on the PINN grid.", line_desc("fixed_grid_fields.npz plus mizer CSV", ["t/x/log10_N"], "nearest-time plus linear-x interpolation; mean and p95 abs delta", False, False))
 
 def file_view_page(run_dir: Path) -> None:
     st.header("File/config view")
@@ -607,9 +807,25 @@ def main() -> None:
     run_df=scan_runs(run_root)
     if run_df.empty: st.warning(f"No run folders found under {run_root}")
     run_ids=run_df.run_id.tolist()
+    
+    if run_ids:
+        if st.session_state.get("selected_run") not in run_ids:
+            st.session_state["selected_run"] = run_ids[0]
+    else:
+        st.session_state["selected_run"] = None
+    
     with st.sidebar:
-        selected_run=st.selectbox("Single selected run", run_ids, index=0 if run_ids else None) if run_ids else None
+        selected_run=st.selectbox(
+            "Single selected run",
+            run_ids,
+            index=run_ids.index(st.session_state["selected_run"]) if run_ids and st.session_state["selected_run"] in run_ids else 0,
+        ) if run_ids else None
+        if selected_run:
+            st.session_state["selected_run"] = selected_run
+    
         selected_runs=st.multiselect("Runs for comparison", run_ids, default=run_ids[:min(3,len(run_ids))])
+    
+    selected_run = st.session_state.get("selected_run")
     run_dir=Path(run_df.loc[run_df.run_id==selected_run,"run_dir"].iloc[0]) if selected_run else Path("")
     mizers=load_mizer_sources(mizer_paths, uploads)
     tabs=st.tabs(["Run browser","Single run: training","Single run: fixed diagnostics","Single run: fields","Compare runs","Mizer comparison","File/config view"])

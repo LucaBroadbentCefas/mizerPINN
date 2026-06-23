@@ -38,7 +38,9 @@ sp$constant_reproduction <- R_const
 species_params(params_1) <- sp
 params_1 <- setReproduction(params_1, RDD = "constantRDD")
 
-pro <- project(params_1, effort = 0, t_max = 40, dt = 0.1)
+params_1 <- newMultispeciesParams(NS_params@species_params[1,], kappa = 1.02e11, no_w = 400)
+
+pro <- project(params_1, effort = 0, t_max = 40, dt = 0.001)
 
 library(ggplot2)
 
@@ -64,12 +66,12 @@ ggplot(df, aes(x = x, y = log10_N, colour = time, group = time)) +
     colour = "time",
     title = "mizer log10(N) profiles through time"
   ) +
-  theme_bw
+  theme_bw()
 
 ##plotting the other stuff on it.
 
 library(readr)
-df_pinn_all <- read_csv("runs/pde_only_single_species/20260609_134736/fixed_grid_diagnostics/fixed_grid_fields.csv")
+df_pinn_all <- read_csv("runs/HPC_runs/single_other_archs/20260618_202425_592055_job3052741_task27/final_predictions_grid.csv")
 
 df_r <- data.frame(
   time_num = rep(tt[ii], each = length(w)),
@@ -114,4 +116,5 @@ ggplot(df_plot, aes(x = x, y = log10_N, colour = time_label, linetype = source))
     linetype = "source",
     title = "R/mizer and PINN log10(N) profiles through time"
   ) + theme_linedraw()
+#
 
