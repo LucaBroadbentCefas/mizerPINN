@@ -55,12 +55,6 @@ case "${SCHEME_ID}" in
     N_EVAL="30"
     ;;
 
-  27)
-    SCHEME_NAME="ntime_128_neval_60"
-    N_TIME="128"
-    N_EVAL="60"
-    ;;
-
   *)
     echo "Unknown SCHEME_ID: ${SCHEME_ID}"
     exit 2
@@ -111,6 +105,7 @@ python -m scripts.train_pde_only_single_species \
   --hidden-layers 5 \
   --lr-scheduler "${LR_SCHEDULER}" \
   --lr-min "${LR_MIN}" \
+  --lr-cosine-t-max 15000 \
   --seed 123 \
   --device cpu \
   --hpc

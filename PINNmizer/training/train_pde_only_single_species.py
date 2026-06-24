@@ -223,7 +223,7 @@ def build_lr_scheduler(*, optimizer: torch.optim.Optimizer, args: argparse.Names
     if args.lr_scheduler == "cosine":
         return torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=max(1, args.n_steps),
+            T_max=max(1, args.lr_cosine_t_max or args.n_steps),
             eta_min=args.lr_min,
         )
 
@@ -304,6 +304,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr-step-size", type=int, default=500)
     parser.add_argument("--lr-gamma", type=float, default=0.5)
     parser.add_argument("--lr-min", type=float, default=0.0)
+    parser.add_argument("--lr-cosine-t-max", type=int, default=None)
     parser.add_argument("--lr-plateau-patience", type=int, default=50)
     parser.add_argument("--model-arch", choices=["mlp", "fourier"], default="mlp")
     parser.add_argument("--fourier-num-features", type=int, default=64)
