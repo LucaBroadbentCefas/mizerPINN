@@ -221,10 +221,31 @@ def build_lr_scheduler(*, optimizer: torch.optim.Optimizer, args: argparse.Names
         return None
 
     if args.lr_scheduler == "cosine":
-        return torch.optim.lr_scheduler.CosineAnnealingLR(
+        cosine_t_max = getattr(args, "lr_cosine_t_max", None)
+    
+        if cosine_t_max is None:
+            return torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=max(1, args.n_steps),
+                eta_min=args.lr_min,
+            )
+    
+        t_max = max(1, int(cosine_t_max))
+    
+        if args.lr_min > args.lr:
+            raise ValueError("--lr-min must be <= --lr for cosine scheduling.")
+    
+        eta_ratio = args.lr_min / args.lr
+    
+        def lr_lambda(step: int) -> float:
+            s = min(max(step, 0), t_max)
+            return eta_ratio + 0.5 * (1.0 - eta_ratio) * (
+                1.0 + math.cos(math.pi * s / t_max)
+            )
+    
+        return torch.optim.lr_scheduler.LambdaLR(
             optimizer,
-            T_max=max(1, args.lr_cosine_t_max or args.n_steps),
-            eta_min=args.lr_min,
+            lr_lambda=lr_lambda,
         )
 
     if args.lr_scheduler == "step":
