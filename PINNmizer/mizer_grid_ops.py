@@ -2,6 +2,7 @@ import torch
 from .utils import pos
 
 from .params import MizerTorchParams, fish_start
+from .biology.fishing import compute_fishing_mortality_grid
 
 def as_complex(real: torch.Tensor, imag: torch.Tensor) -> torch.Tensor:
     return torch.complex(real, imag)
@@ -182,13 +183,13 @@ def resource_mortality(
 def total_mortality(
     pred_mort: torch.Tensor,
     params: MizerTorchParams,
+    effort=None,
 ) -> torch.Tensor:
     """
     TMB equivalent: Mort()
     """
-    if params.f_mort is None:
-        return pred_mort + params.mu_b
-    return pred_mort + params.mu_b + params.f_mort
+    f_mort = compute_fishing_mortality_grid(params, effort=effort)
+    return pred_mort + params.mu_b + f_mort
 
 
 def rdi(
@@ -309,6 +310,7 @@ def mizer_operators(
     n_pp: torch.Tensor,
     n: torch.Tensor,
     params: MizerTorchParams,
+    effort=None,
 ) -> dict[str, torch.Tensor]:
     """
     Operator-only layer. No timestep update.
@@ -328,7 +330,7 @@ def mizer_operators(
     pred_rate_full = get_pred_rate(n, feeding, params)
     pred_mort = pred_mortality(pred_rate_full, params)
     resource_mort = resource_mortality(pred_rate_full, params)
-    mort = total_mortality(pred_mort, params)
+    mort = total_mortality(pred_mort, params, effort=effort)
 
     rdi_value = rdi(e_repro_value, n, params)
     rdd_value = rdd(rdi_value, params.r_max)
@@ -353,11 +355,12 @@ def step(
     n: torch.Tensor,
     params: MizerTorchParams,
     dt: torch.Tensor | float,
+    effort=None,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
     """
     One timestep, AD-safe version.
     """
-    ops = mizer_operators(n_pp, n, params)
+    ops = mizer_operators(n_pp, n, params, effort=effort)
 
     n_pp_new = resource_semichemostat(
         n_pp=n_pp,

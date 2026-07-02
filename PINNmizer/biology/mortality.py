@@ -4,6 +4,7 @@ import torch
 
 from PINNmizer.biology.growth import compute_growth_direct_at_eval
 from PINNmizer.biology.kernels import compute_phi_and_dphi_dw
+from PINNmizer.biology.fishing import evaluate_fishing_mortality_direct
 from PINNmizer.params import MizerTorchParams, _eval_weight_vector, _params_dtype_device, _species_vector
 
 
@@ -45,8 +46,9 @@ def compute_pred_mortality_direct_at_eval(n_pp: torch.Tensor, N_pred_grid: torch
 def compute_total_mortality_direct_at_eval(n_pp: torch.Tensor, N_pred_grid: torch.Tensor, w_eval: torch.Tensor, params: MizerTorchParams) -> dict[str, torch.Tensor]:
     mu_b_eval = evaluate_mu_b_continuous(w_eval, params)
     pred_mort_eval = compute_pred_mortality_direct_at_eval(n_pp=n_pp, N_pred_grid=N_pred_grid, w_prey_eval=w_eval, params=params)
-    mu_eval = mu_b_eval + pred_mort_eval
-    return {"mu_b_eval": mu_b_eval, "pred_mort_eval": pred_mort_eval, "mu_eval": mu_eval}
+    f_mort_eval = evaluate_fishing_mortality_direct(w_eval, params)
+    mu_eval = mu_b_eval + pred_mort_eval + f_mort_eval
+    return {"mu_b_eval": mu_b_eval, "pred_mort_eval": pred_mort_eval, "f_mort_eval": f_mort_eval, "mu_eval": mu_eval}
 
 
 def compute_pred_mortality_direct_at_eval_from_growth_grid(N_pred_grid: torch.Tensor, w_prey_eval: torch.Tensor, params: MizerTorchParams, growth_grid: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -72,5 +74,6 @@ def compute_total_mortality_direct_at_eval_from_growth_grid(N_pred_grid: torch.T
     """Total mortality at physical weights, output terms shaped [species, n_eval]."""
     mu_b_eval = evaluate_mu_b_continuous(w_eval, params)
     pred_mort_eval = compute_pred_mortality_direct_at_eval_from_growth_grid(N_pred_grid=N_pred_grid, w_prey_eval=w_eval, params=params, growth_grid=growth_grid)
-    mu_eval = mu_b_eval + pred_mort_eval
-    return {"mu_b_eval": mu_b_eval, "pred_mort_eval": pred_mort_eval, "mu_eval": mu_eval}
+    f_mort_eval = evaluate_fishing_mortality_direct(w_eval, params)
+    mu_eval = mu_b_eval + pred_mort_eval + f_mort_eval
+    return {"mu_b_eval": mu_b_eval, "pred_mort_eval": pred_mort_eval, "f_mort_eval": f_mort_eval, "mu_eval": mu_eval}

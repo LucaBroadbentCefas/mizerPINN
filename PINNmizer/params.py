@@ -33,10 +33,15 @@ class MizerTorchParams:
     rr_pp: torch.Tensor                  # [k]
     cc_pp: torch.Tensor                  # [k]
 
-    # fishing mortality for one timestep, optional
-    f_mort: Optional[torch.Tensor] = None # [species, w]
+    # fishing mortality inputs
+    catchability: Optional[torch.Tensor] = None          # [gear, species]
+    selectivity: Optional[torch.Tensor] = None           # [gear, species, w], fallback/grid validation
+    initial_effort: Optional[torch.Tensor] = None        # [gear]
+    fishing_effort_time: Optional[torch.Tensor] = None   # [time], optional
+    fishing_effort: Optional[torch.Tensor] = None        # [time, gear], optional
+    f_mort: Optional[torch.Tensor] = None                # [species, w], fallback/validation only
     
-        # species metadata
+    # species metadata
     species: Optional[list[str]] = None
 
     # continuous search / encounter prefactor
@@ -201,4 +206,32 @@ def validate_params_shapes(params: MizerTorchParams) -> None:
     assert params.metab.shape == (n_species, n_w)
     assert params.psi.shape == (n_species, n_w)
     assert params.mu_b.shape == (n_species, n_w)
+
+    if params.f_mort is not None:
+        assert params.f_mort.shape == (n_species, n_w), f"f_mort has shape {params.f_mort.shape}"
+
+    n_gear = None
+    if params.catchability is not None:
+        assert params.catchability.ndim == 2, f"catchability has shape {params.catchability.shape}"
+        assert params.catchability.shape[1] == n_species, f"catchability has shape {params.catchability.shape}"
+        n_gear = params.catchability.shape[0]
+    if params.selectivity is not None:
+        assert params.selectivity.ndim == 3, f"selectivity has shape {params.selectivity.shape}"
+        assert params.selectivity.shape[1:] == (n_species, n_w), f"selectivity has shape {params.selectivity.shape}"
+        if n_gear is None:
+            n_gear = params.selectivity.shape[0]
+        assert params.selectivity.shape[0] == n_gear, f"selectivity has shape {params.selectivity.shape}"
+    if params.initial_effort is not None:
+        if n_gear is None:
+            n_gear = params.initial_effort.numel() if params.initial_effort.ndim > 0 else 1
+        assert params.initial_effort.reshape(-1).shape == (n_gear,), f"initial_effort has shape {params.initial_effort.shape}"
+    if params.fishing_effort is not None:
+        assert params.fishing_effort.ndim == 2, f"fishing_effort has shape {params.fishing_effort.shape}"
+        if n_gear is None:
+            n_gear = params.fishing_effort.shape[1]
+        assert params.fishing_effort.shape[1] == n_gear, f"fishing_effort has shape {params.fishing_effort.shape}"
+    if params.fishing_effort_time is not None:
+        assert params.fishing_effort_time.ndim == 1, f"fishing_effort_time has shape {params.fishing_effort_time.shape}"
+        if params.fishing_effort is not None:
+            assert params.fishing_effort_time.shape == (params.fishing_effort.shape[0],), f"fishing_effort_time has shape {params.fishing_effort_time.shape}"
   
