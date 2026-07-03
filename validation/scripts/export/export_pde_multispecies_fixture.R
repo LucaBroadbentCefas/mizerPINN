@@ -65,3 +65,6 @@ p_true <- ggplot(df_r, aes(x = x, y = log10_N, colour = time_label, group = time
   theme_bw()
 
 print(p_true)
+
+outdir <- "validation/fixtures/pde_multispecies"
+
