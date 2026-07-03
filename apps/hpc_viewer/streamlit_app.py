@@ -12,7 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-DEFAULT_RUN_ROOT = Path("runs/pde_only_single_species")
+DEFAULT_RUN_ROOT = Path("runs")
 TINY = np.finfo(float).tiny
 RUN_COLUMNS = [
     "run_id","run_dir","status","error_message","n_steps_completed","final_loss","final_loss_unweighted",
@@ -29,6 +29,9 @@ def _as_path(path: str | Path) -> Path:
     return Path(path).expanduser()
 
 def is_run_dir(path: Path) -> bool:
+    if path.name == "fixed_grid_diagnostics":
+        return False
+
     return any(
         (path / name).exists()
         for name in [
@@ -39,6 +42,8 @@ def is_run_dir(path: Path) -> bool:
             "fixed_diagnostic_history.csv",
             "fixed_grid_fields.npz",
             "fixed_grid_fields.csv",
+            "fixed_grid_diagnostics/fixed_grid_fields.npz",
+            "fixed_grid_diagnostics/fixed_grid_fields.csv",
         ]
     )
 
@@ -147,27 +152,255 @@ def load_final_predictions(run_dir: str | Path) -> pd.DataFrame | None:
     return safe_read_csv(_as_path(run_dir) / "final_predictions_grid.csv")
 
 
-@st.cache_data(show_spinner=False)
-def load_fixed_fields(run_dir: str | Path) -> dict[str, np.ndarray] | None:
-    run_dir = _as_path(run_dir)
-    npz = run_dir / "fixed_grid_fields.npz"
-    if npz.exists():
-        try:
-            with np.load(npz) as data:
-                return {k: np.asarray(data[k]) for k in data.files}
-        except Exception:
-            return None
-    csv = safe_read_csv(run_dir / "fixed_grid_fields.csv")
-    if csv is None or csv.empty or not {"t_eval", "x_eval"}.issubset(csv.columns):
+def _first_existing(paths: list[Path]) -> Path | None:
+    return next((p for p in paths if p.exists()), None)
+
+
+def _fixed_field_candidates(run_dir: Path, filename: str) -> list[Path]:
+    return [
+        run_dir / filename,
+        run_dir / "fixed_grid_diagnostics" / filename,
+    ]
+
+
+def _select_species_array(arr: np.ndarray, species_idx: int) -> np.ndarray:
+    arr = np.asarray(arr)
+
+    if arr.ndim == 3:
+        idx = int(np.clip(species_idx, 0, arr.shape[1] - 1))
+        return arr[:, idx, :]
+
+    return arr
+
+
+def _species_options_from_csv(path: Path | None) -> list[tuple[int, str]]:
+    if path is None or not path.exists():
+        return []
+
+    df = safe_read_csv(path)
+    if df is None or df.empty or "species_idx" not in df.columns:
+        return []
+
+    name_col = "species" if "species" in df.columns else None
+    opts = (
+        df[["species_idx"] + ([name_col] if name_col else [])]
+        .drop_duplicates()
+        .sort_values("species_idx")
+    )
+
+    out = []
+    for row in opts.itertuples(index=False):
+        idx = int(getattr(row, "species_idx"))
+        name = str(getattr(row, name_col)) if name_col else f"species_{idx}"
+        out.append((idx, name))
+
+    return out
+
+
+def _normalise_npz_fixed_fields(
+    raw: dict[str, np.ndarray],
+    *,
+    species_idx: int,
+    csv_path: Path | None,
+    source_file: Path,
+) -> dict[str, Any] | None:
+    t = raw.get("t_eval", raw.get("t"))
+    x = raw.get("x_eval", raw.get("x"))
+    w = raw.get("w_eval", raw.get("w"))
+
+    if t is None or x is None:
         return None
-    fields: dict[str, np.ndarray] = {"t_eval": np.sort(csv["t_eval"].dropna().unique()), "x_eval": np.sort(csv["x_eval"].dropna().unique())}
-    if "w_eval" in csv.columns:
-        fields["w_eval"] = np.array([csv.loc[csv["x_eval"].sub(x).abs().idxmin(), "w_eval"] for x in fields["x_eval"]])
-    for col in ["log10_N","residual_log","dlogN_dt","advective","mu","dg_dw","g_eval"]:
-        if col in csv.columns:
-            piv = csv.pivot_table(index="t_eval", columns="x_eval", values=col, aggfunc="mean").reindex(index=fields["t_eval"], columns=fields["x_eval"])
-            fields[col] = piv.to_numpy()
+
+    fields: dict[str, Any] = {
+        "t_eval": np.asarray(t),
+        "x_eval": np.asarray(x),
+        "source_file": str(source_file),
+    }
+
+    if w is not None:
+        fields["w_eval"] = np.asarray(w)
+
+    species_options = _species_options_from_csv(csv_path)
+
+    n_species = 1
+    for key in ["log10_N", "log_N_eval", "log_N", "residual_log"]:
+        arr = raw.get(key)
+        if arr is not None and np.asarray(arr).ndim == 3:
+            n_species = int(np.asarray(arr).shape[1])
+            break
+
+    if not species_options:
+        species_options = [(i, f"species_{i}") for i in range(n_species)]
+
+    species_idx = int(np.clip(species_idx, 0, max(0, n_species - 1)))
+    fields["species_options"] = species_options
+    fields["selected_species_idx"] = species_idx
+    fields["selected_species"] = next(
+        (name for idx, name in species_options if idx == species_idx),
+        f"species_{species_idx}",
+    )
+
+    if "log10_N" in raw:
+        fields["log10_N"] = _select_species_array(raw["log10_N"], species_idx)
+    elif "log_N_eval" in raw:
+        fields["log10_N"] = _select_species_array(raw["log_N_eval"], species_idx) / np.log(10.0)
+    elif "log_N" in raw:
+        fields["log10_N"] = _select_species_array(raw["log_N"], species_idx) / np.log(10.0)
+
+    direct_map = {
+        "residual_log": "residual_log",
+        "dlogN_dt": "dlogN_dt",
+        "dlogN_dw": "dlogN_dw",
+        "g_eval": "g_eval",
+        "dg_dw": "dg_dw",
+        "mu_eval": "mu",
+        "mu": "mu",
+        "advective": "advective",
+    }
+
+    for src, dst in direct_map.items():
+        if src in raw and dst not in fields:
+            fields[dst] = _select_species_array(raw[src], species_idx)
+
+    if "advective" not in fields and {"g_eval", "dlogN_dw"}.issubset(fields):
+        fields["advective"] = fields["g_eval"] * fields["dlogN_dw"]
+
     return fields
+
+
+def _normalise_csv_fixed_fields(
+    csv: pd.DataFrame,
+    *,
+    species_idx: int,
+    source_file: Path,
+) -> dict[str, Any] | None:
+    aliases = {
+        "t_eval": ["t_eval", "t"],
+        "x_eval": ["x_eval", "x"],
+        "w_eval": ["w_eval", "w"],
+    }
+
+    low = {c.lower(): c for c in csv.columns}
+
+    def pick(names: list[str]) -> str | None:
+        return next((low[n.lower()] for n in names if n.lower() in low), None)
+
+    t_col = pick(aliases["t_eval"])
+    x_col = pick(aliases["x_eval"])
+    w_col = pick(aliases["w_eval"])
+
+    if t_col is None or x_col is None:
+        return None
+
+    species_options = []
+    if "species_idx" in csv.columns:
+        name_col = "species" if "species" in csv.columns else None
+        opts = (
+            csv[["species_idx"] + ([name_col] if name_col else [])]
+            .drop_duplicates()
+            .sort_values("species_idx")
+        )
+        for row in opts.itertuples(index=False):
+            idx = int(getattr(row, "species_idx"))
+            name = str(getattr(row, name_col)) if name_col else f"species_{idx}"
+            species_options.append((idx, name))
+
+        csv = csv[csv["species_idx"] == species_idx].copy()
+    else:
+        species_options = [(0, "species_0")]
+
+    if csv.empty:
+        return None
+
+    t_vals = np.sort(pd.to_numeric(csv[t_col], errors="coerce").dropna().unique())
+    x_vals = np.sort(pd.to_numeric(csv[x_col], errors="coerce").dropna().unique())
+
+    fields: dict[str, Any] = {
+        "t_eval": t_vals,
+        "x_eval": x_vals,
+        "species_options": species_options,
+        "selected_species_idx": species_idx,
+        "selected_species": next(
+            (name for idx, name in species_options if idx == species_idx),
+            f"species_{species_idx}",
+        ),
+        "source_file": str(source_file),
+    }
+
+    if w_col is not None:
+        fields["w_eval"] = np.array([
+            csv.loc[csv[x_col].sub(x).abs().idxmin(), w_col]
+            for x in x_vals
+        ])
+
+    value_cols = {
+        "log10_N": ["log10_N", "log10N"],
+        "log_N": ["log_N", "logN", "ln_N"],
+        "residual_log": ["residual_log"],
+        "dlogN_dt": ["dlogN_dt"],
+        "dlogN_dw": ["dlogN_dw"],
+        "advective": ["advective"],
+        "mu": ["mu", "mu_eval"],
+        "dg_dw": ["dg_dw"],
+        "g_eval": ["g_eval"],
+    }
+
+    def pivot(col: str) -> np.ndarray:
+        return (
+            csv.pivot_table(index=t_col, columns=x_col, values=col, aggfunc="mean")
+            .reindex(index=t_vals, columns=x_vals)
+            .to_numpy()
+        )
+
+    for out_name, names in value_cols.items():
+        col = pick(names)
+        if col is not None:
+            fields[out_name] = pivot(col)
+
+    if "log10_N" not in fields and "log_N" in fields:
+        fields["log10_N"] = fields["log_N"] / np.log(10.0)
+
+    if "advective" not in fields and {"g_eval", "dlogN_dw"}.issubset(fields):
+        fields["advective"] = fields["g_eval"] * fields["dlogN_dw"]
+
+    return fields
+
+
+@st.cache_data(show_spinner=False)
+def load_fixed_fields(run_dir: str | Path, species_idx: int = 0) -> dict[str, Any] | None:
+    run_dir = _as_path(run_dir)
+
+    npz_path = _first_existing(_fixed_field_candidates(run_dir, "fixed_grid_fields.npz"))
+    csv_path = _first_existing(_fixed_field_candidates(run_dir, "fixed_grid_fields.csv"))
+
+    if npz_path is not None:
+        try:
+            with np.load(npz_path) as data:
+                raw = {k: np.asarray(data[k]) for k in data.files}
+
+            fields = _normalise_npz_fixed_fields(
+                raw,
+                species_idx=species_idx,
+                csv_path=csv_path,
+                source_file=npz_path,
+            )
+            if fields is not None:
+                return fields
+        except Exception:
+            pass
+
+    if csv_path is None:
+        return None
+
+    csv = safe_read_csv(csv_path)
+    if csv is None or csv.empty:
+        return None
+
+    return _normalise_csv_fixed_fields(
+        csv,
+        species_idx=species_idx,
+        source_file=csv_path,
+    )
 
 
 def check_required_columns(df: pd.DataFrame | None, columns: list[str]) -> list[str]:
@@ -483,8 +716,36 @@ def history_page(run_dir: Path, fixed: bool, log_y: bool, markers: bool) -> None
 
 def fields_page(run_dir: Path, clip: bool, mode: str, markers: bool) -> None:
     st.header("Single run: fields")
-    fields = load_fixed_fields(run_dir)
-    if fields is None: st.warning("fixed_grid_fields.npz not found for this run, and fixed_grid_fields.csv could not be used."); return
+    fields0 = load_fixed_fields(run_dir, species_idx=0)
+    
+    if fields0 is None:
+        st.warning(
+            "No usable fixed-grid fields found. Checked both run-root and "
+            "fixed_grid_diagnostics/ field outputs."
+        )
+        return
+    
+    species_options = fields0.get("species_options", [(0, "species_0")])
+    species_labels = [f"{idx}: {name}" for idx, name in species_options]
+    
+    selected_label = st.selectbox(
+        "PINN species",
+        species_labels,
+        index=0,
+    )
+    
+    selected_species_idx = int(selected_label.split(":", 1)[0])
+    fields = load_fixed_fields(run_dir, species_idx=selected_species_idx)
+    
+    if fields is None:
+        st.warning(f"Could not load fixed-grid fields for species_idx={selected_species_idx}.")
+        return
+    
+    st.caption(
+        f"Field source: `{fields.get('source_file', 'unknown')}`; "
+        f"species: `{fields.get('selected_species', selected_species_idx)}`."
+    )
+    
     missing = check_required_arrays(fields, ["t_eval","x_eval","log10_N","residual_log"])
     if missing: show_missing("Fields", missing, "fixed_grid_fields.npz/csv"); return
     t,x = fields["t_eval"], fields["x_eval"]
@@ -543,43 +804,167 @@ def normalise_mizer_dataframe(df: pd.DataFrame, source_name: str) -> pd.DataFram
 
 def compare_page(run_df, selected_runs, clip, mode, markers):
     st.header("Compare runs")
-    if len(selected_runs)<2: st.info("Select two or more runs in the sidebar."); return
-    run_dirs=dict(zip(run_df.run_id, run_df.run_dir))
-    for file, loader, metric_opts, title in [("fixed_diagnostic_history.csv",load_fixed_diagnostic_history,["fixed_residual_log_abs_p95","fixed_loss_pde","fixed_loss_ic","fixed_loss_bc","fixed_loss_unweighted"],"Fixed diagnostic overlay"),("loss_history.csv",load_loss_history,["loss","loss_unweighted","loss_pde","loss_ic","loss_bc","loss_timestep"],"Training loss overlay")]:
-        metric=st.selectbox(f"{title} metric", metric_opts, key=title)
-        def overlay(file=file,loader=loader,metric=metric,title=title):
-            frames=[]
+    if len(selected_runs) < 2:
+        st.info("Select two or more runs in the sidebar.")
+        return
+
+    run_dirs = dict(zip(run_df.run_id, run_df.run_dir))
+
+    first_fields = load_fixed_fields(run_dirs[selected_runs[0]], species_idx=0)
+    species_options = first_fields.get("species_options", [(0, "species_0")]) if first_fields else [(0, "species_0")]
+    species_labels = [f"{idx}: {name}" for idx, name in species_options]
+
+    selected_species_label = st.selectbox(
+        "PINN species for run comparison",
+        species_labels,
+        index=0,
+        key="compare_pinn_species",
+    )
+    selected_species_idx = int(selected_species_label.split(":", 1)[0])
+
+    for file, loader, metric_opts, title in [
+        (
+            "fixed_diagnostic_history.csv",
+            load_fixed_diagnostic_history,
+            ["fixed_residual_log_abs_p95","fixed_loss_pde","fixed_loss_ic","fixed_loss_bc","fixed_loss_unweighted"],
+            "Fixed diagnostic overlay",
+        ),
+        (
+            "loss_history.csv",
+            load_loss_history,
+            ["loss","loss_unweighted","loss_pde","loss_ic","loss_bc","loss_timestep"],
+            "Training loss overlay",
+        ),
+    ]:
+        metric = st.selectbox(f"{title} metric", metric_opts, key=title)
+
+        def overlay(file=file, loader=loader, metric=metric, title=title):
+            frames = []
             for rid in selected_runs:
-                d=loader(run_dirs[rid]);
-                if d is not None and not d.empty and {"step",metric}.issubset(d.columns): frames.append(d[["step",metric]].assign(run_id=rid))
-            if frames: st.plotly_chart(px.line(pd.concat(frames),x="step",y=metric,color="run_id",markers=markers,title=title),use_container_width=True)
-            else: st.warning(f"No selected runs contain step and {metric} in {file}.")
-        plot_with_desc(overlay, f"Overlays `{metric}` across selected runs to compare convergence histories.", line_desc(file, ["step",metric], "concatenate selected runs; no interpolation", False, False))
+                d = loader(run_dirs[rid])
+                if d is not None and not d.empty and {"step", metric}.issubset(d.columns):
+                    frames.append(d[["step", metric]].assign(run_id=rid))
+
+            if frames:
+                st.plotly_chart(
+                    px.line(
+                        pd.concat(frames),
+                        x="step",
+                        y=metric,
+                        color="run_id",
+                        markers=markers,
+                        title=title,
+                    ),
+                    use_container_width=True,
+                )
+            else:
+                st.warning(f"No selected runs contain step and {metric} in {file}.")
+
+        plot_with_desc(
+            overlay,
+            f"Overlays `{metric}` across selected runs to compare convergence histories.",
+            line_desc(file, ["step", metric], "concatenate selected runs; no interpolation", False, False),
+        )
+
     st.dataframe(run_df[run_df.run_id.isin(selected_runs)], use_container_width=True)
-    add_plot_description("One-row-per-run table of final metrics/config for selected runs.", line_desc("final_summary.csv/json, config.json, timing_summary.csv", RUN_COLUMNS, "scan immediate run folders", False, False))
+    add_plot_description(
+        "One-row-per-run table of final metrics/config for selected runs.",
+        line_desc("final_summary.csv/json, config.json, timing_summary.csv", RUN_COLUMNS, "scan immediate run folders", False, False),
+    )
+
     times = parse_comparison_times(st.text_input("Selected times for profile overlays", "0"))
+
     def profile(resid=False):
-        rows=[]; used={}
+        rows = []
+        used = {}
+
         for rid in selected_runs:
-            f=load_fixed_fields(run_dirs[rid]);
-            if f and not check_required_arrays(f,["t_eval","x_eval","log10_N","residual_log"]):
+            f = load_fixed_fields(run_dirs[rid], species_idx=selected_species_idx)
+
+            if f and not check_required_arrays(f, ["t_eval","x_eval","log10_N","residual_log"]):
+                species_name = f.get("selected_species", selected_species_idx)
 
                 for tv in times:
-                    i=nearest_index(f["t_eval"], tv); used.setdefault(rid, []).append(f["t_eval"][i]); arr=np.abs(f["residual_log"][i]) if resid else f["log10_N"][i]
-                    rows += [{"x":xx,"value":vv,"run_id":f"{rid} | t={format_time_label(f['t_eval'][i])}"} for xx,vv in zip(f["x_eval"],arr)]
-        st.caption(format_nearest_times_message(times, used))
-        if rows: st.plotly_chart(px.line(pd.DataFrame(rows),x="x",y="value",color="run_id",markers=markers,title="Residual profile overlay" if resid else "Abundance profile overlay"),use_container_width=True)
-    plot_with_desc(lambda: profile(False), "Overlays final abundance profiles at nearest time; different x grids are allowed because each line carries its own x coordinates.", line_desc("fixed_grid_fields.npz/csv", ["t_eval","x_eval","log10_N"], "nearest time per run; no interpolation", False, False))
-    plot_with_desc(lambda: profile(True), "Overlays residual profiles at nearest time to compare where selected runs violate the PDE most.", line_desc("fixed_grid_fields.npz/csv", ["t_eval","x_eval","residual_log"], "nearest time; absolute value", False, False))
-    ref=st.selectbox("Reference run", selected_runs); cmp=st.selectbox("Comparison run", [r for r in selected_runs if r!=ref])
-    def diff(field="log10_N"):
-        a,b=load_fixed_fields(run_dirs[ref]),load_fixed_fields(run_dirs[cmp])
-        if not a or not b or check_required_arrays(a,["t_eval","x_eval",field]) or check_required_arrays(b,["t_eval","x_eval",field]): st.warning("Required fixed fields missing."); return
-        if not (np.array_equal(a["t_eval"],b["t_eval"]) and np.array_equal(a["x_eval"],b["x_eval"])): st.warning("The fixed grids differ; difference heatmap is not plotted."); return
-        z=(np.abs(b[field])-np.abs(a[field])) if field=="residual_log" else (b[field]-a[field]); make_heatmap(a["x_eval"],a["t_eval"],z,f"Difference heatmap: {cmp} - {ref}","delta",mode,clip)
-    plot_with_desc(lambda: diff("log10_N"), "Shows abundance difference only when fixed t/x grids match exactly, avoiding invalid comparisons.", line_desc("fixed_grid_fields.npz/csv", ["t_eval","x_eval","log10_N"], "comparison minus reference; exact grid equality required", False, False))
-    plot_with_desc(lambda: diff("residual_log"), "Shows change in absolute residual versus reference only on identical grids.", line_desc("fixed_grid_fields.npz/csv", ["t_eval","x_eval","residual_log"], "abs(comparison)-abs(reference); exact grid equality required", False, False))
+                    i = nearest_index(f["t_eval"], tv)
+                    used.setdefault(rid, []).append(f["t_eval"][i])
+                    arr = np.abs(f["residual_log"][i]) if resid else f["log10_N"][i]
+                    rows += [
+                        {
+                            "x": xx,
+                            "value": vv,
+                            "run_id": f"{rid} | {species_name} | t={format_time_label(f['t_eval'][i])}",
+                        }
+                        for xx, vv in zip(f["x_eval"], arr)
+                    ]
 
+        st.caption(format_nearest_times_message(times, used))
+        if rows:
+            st.plotly_chart(
+                px.line(
+                    pd.DataFrame(rows),
+                    x="x",
+                    y="value",
+                    color="run_id",
+                    markers=markers,
+                    title="Residual profile overlay" if resid else "Abundance profile overlay",
+                ),
+                use_container_width=True,
+            )
+        else:
+            st.info("No selected runs contain usable fixed-field profiles for the selected species.")
+
+    plot_with_desc(
+        lambda: profile(False),
+        "Overlays final abundance profiles at nearest time for the selected PINN species; different x grids are allowed because each line carries its own x coordinates.",
+        line_desc("fixed_grid_fields.npz/csv", ["t_eval","x_eval","log10_N"], "nearest time per run; selected species slice; no interpolation", False, False),
+    )
+    plot_with_desc(
+        lambda: profile(True),
+        "Overlays residual profiles at nearest time for the selected PINN species to compare where selected runs violate the PDE most.",
+        line_desc("fixed_grid_fields.npz/csv", ["t_eval","x_eval","residual_log"], "nearest time; selected species slice; absolute value", False, False),
+    )
+
+    ref = st.selectbox("Reference run", selected_runs)
+    cmp = st.selectbox("Comparison run", [r for r in selected_runs if r != ref])
+
+    def diff(field="log10_N"):
+        a = load_fixed_fields(run_dirs[ref], species_idx=selected_species_idx)
+        b = load_fixed_fields(run_dirs[cmp], species_idx=selected_species_idx)
+
+        if (
+            not a
+            or not b
+            or check_required_arrays(a, ["t_eval","x_eval",field])
+            or check_required_arrays(b, ["t_eval","x_eval",field])
+        ):
+            st.warning("Required fixed fields missing for the selected species.")
+            return
+
+        if not (np.array_equal(a["t_eval"], b["t_eval"]) and np.array_equal(a["x_eval"], b["x_eval"])):
+            st.warning("The fixed grids differ; difference heatmap is not plotted.")
+            return
+
+        z = (np.abs(b[field]) - np.abs(a[field])) if field == "residual_log" else (b[field] - a[field])
+        make_heatmap(
+            a["x_eval"],
+            a["t_eval"],
+            z,
+            f"Difference heatmap: {cmp} - {ref}",
+            "delta",
+            mode,
+            clip,
+        )
+
+    plot_with_desc(
+        lambda: diff("log10_N"),
+        "Shows abundance difference for the selected species only when fixed t/x grids match exactly, avoiding invalid comparisons.",
+        line_desc("fixed_grid_fields.npz/csv", ["t_eval","x_eval","log10_N"], "comparison minus reference; selected species; exact grid equality required", False, False),
+    )
+    plot_with_desc(
+        lambda: diff("residual_log"),
+        "Shows change in absolute residual versus reference for the selected species only on identical grids.",
+        line_desc("fixed_grid_fields.npz/csv", ["t_eval","x_eval","residual_log"], "abs(comparison)-abs(reference); selected species; exact grid equality required", False, False),
+    )
 
 def load_mizer_sources(local_paths: str, uploads) -> dict[str,pd.DataFrame]:
     out={}
@@ -613,13 +998,44 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
         return
 
     run_dirs = dict(zip(run_df.run_id, run_df.run_dir))
-    fields = load_fixed_fields(run_dirs.get(selected_run, "")) if selected_run else None
-    if not fields or check_required_arrays(fields, ["t_eval","x_eval","log10_N"]):
+
+    fields0 = load_fixed_fields(run_dirs.get(selected_run, ""), species_idx=0) if selected_run else None
+    if not fields0 or check_required_arrays(fields0, ["t_eval","x_eval","log10_N"]):
         st.warning("Selected PINN run needs fixed_grid_fields.npz/csv with t_eval, x_eval, log10_N.")
         return
 
     allm = pd.concat(mizers.values(), ignore_index=True)
-    species = st.selectbox("Species", sorted(allm.species.astype(str).dropna().unique()))
+    mizer_species_options = sorted(allm.species.astype(str).dropna().unique())
+    species = st.selectbox("Mizer species", mizer_species_options)
+
+    species_options = fields0.get("species_options", [(0, "species_0")])
+    species_labels = [f"{idx}: {name}" for idx, name in species_options]
+
+    default_pinn_index = 0
+    for i, (_, name) in enumerate(species_options):
+        if str(name) == str(species):
+            default_pinn_index = i
+            break
+
+    pinn_species_label = st.selectbox(
+        "PINN species",
+        species_labels,
+        index=default_pinn_index,
+        key="mizer_pinn_species",
+    )
+    pinn_species_idx = int(pinn_species_label.split(":", 1)[0])
+
+    fields = load_fixed_fields(run_dirs.get(selected_run, ""), species_idx=pinn_species_idx)
+    if not fields or check_required_arrays(fields, ["t_eval","x_eval","log10_N"]):
+        st.warning(f"Could not load PINN fields for species_idx={pinn_species_idx}.")
+        return
+
+    pinn_species_name = fields.get("selected_species", f"species_{pinn_species_idx}")
+    if str(pinn_species_name) != str(species):
+        st.warning(
+            f"PINN species `{pinn_species_name}` is being compared with mizer species `{species}`. "
+            "Check that this is intentional."
+        )
 
     t_options = [float(v) for v in fields["t_eval"]]
     default_times = [t_options[i] for i in sorted(set(np.linspace(0, len(t_options)-1, min(6, len(t_options)), dtype=int)))]
@@ -647,7 +1063,7 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
                     "log10_N": v,
                     "time": time_label,
                     "source": "PINN",
-                    "series": f"PINN | t={format_time_label(pinnt)}",
+                    "series": f"PINN {pinn_species_name} | t={format_time_label(pinnt)}",
                 }
                 for x, v in zip(fields["x_eval"], fields["log10_N"][i])
             ]
@@ -666,7 +1082,7 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
                         "log10_N": r.log10_N,
                         "time": time_label,
                         "source": "mizer",
-                        "series": f"{name} | t={format_time_label(nt)}",
+                        "series": f"{name} {species} | t={format_time_label(nt)}",
                     }
                     for r in ss.itertuples()
                 ]
@@ -692,7 +1108,11 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
             use_container_width=True,
         )
 
-    plot_with_desc(prof, "Compares PINN abundance to selected mizer profiles at nearest available times.", line_desc("fixed_grid_fields.npz/csv plus mizer CSV", ["t/x/log10_N or aliases"], "same selected time has same colour; PINN solid, mizer dashed", False, False))
+    plot_with_desc(
+        prof,
+        "Compares the selected PINN species slice to selected mizer profiles at nearest available times.",
+        line_desc("fixed_grid_fields.npz/csv plus mizer CSV", ["t/x/log10_N or aliases"], "same selected time has same colour; PINN solid, mizer dashed; selected species slice", False, False),
+    )
 
     def ts():
         rows = []
@@ -706,9 +1126,23 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
                 val = g.loc[np.isclose(g.x, nx), "log10_N"].iloc[0]
                 rows.append({"t":tv,"log10_N":val,"source":name})
 
-        st.plotly_chart(px.line(pd.DataFrame(rows), x="t", y="log10_N", color="source", markers=markers, title="Abundance time-series at selected weight"), use_container_width=True)
+        st.plotly_chart(
+            px.line(
+                pd.DataFrame(rows),
+                x="t",
+                y="log10_N",
+                color="source",
+                markers=markers,
+                title="Abundance time-series at selected weight",
+            ),
+            use_container_width=True,
+        )
 
-    plot_with_desc(ts, "Compares temporal abundance at the nearest log-weight in each source.", line_desc("fixed_grid_fields.npz/csv plus mizer CSV", ["t","x","log10_N"], "nearest x per time/source", False, False))
+    plot_with_desc(
+        ts,
+        "Compares temporal abundance at the nearest log-weight in each source for the selected species.",
+        line_desc("fixed_grid_fields.npz/csv plus mizer CSV", ["t","x","log10_N"], "nearest x per time/source; selected species slice", False, False),
+    )
 
     one = st.selectbox("Mizer source for error", list(mizers))
     interp = st.checkbox("Use linear-in-x interpolation", True)
@@ -730,56 +1164,130 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
             used["PINN"].append(pinnt)
             used[one].append(mt)
             delta = fields["log10_N"][i] - miz_grid[i]
-            rows += [{"x":x,"delta":v,"source":f"PINN - {one} | t={format_time_label(pinnt)}"} for x,v in zip(fields["x_eval"],delta)]
+            rows += [
+                {"x":x,"delta":v,"source":f"PINN {pinn_species_name} - {one} {species} | t={format_time_label(pinnt)}"}
+                for x, v in zip(fields["x_eval"], delta)
+            ]
 
         st.warning("Mizer comparison used nearest-time selection and linear interpolation in log-weight x onto the PINN grid.")
         st.caption(format_nearest_times_message(times, used))
-        st.plotly_chart(px.line(pd.DataFrame(rows), x="x", y="delta", color="source", markers=markers, title="PINN minus mizer profile"), use_container_width=True)
+        st.plotly_chart(
+            px.line(
+                pd.DataFrame(rows),
+                x="x",
+                y="delta",
+                color="source",
+                markers=markers,
+                title="PINN minus mizer profile",
+            ),
+            use_container_width=True,
+        )
 
-    plot_with_desc(delta_profile, "Shows signed abundance error along weight at the selected time.", line_desc("fixed_grid_fields.npz/csv plus one mizer CSV", ["t_eval","x_eval","log10_N","mizer t/x/log10_N"], f"nearest time and {'linear interpolation in x' if interp else 'nearest x selection'}; delta=PINN-mizer", False, False))
+    plot_with_desc(
+        delta_profile,
+        "Shows signed abundance error along weight at the selected time.",
+        line_desc("fixed_grid_fields.npz/csv plus one mizer CSV", ["t_eval","x_eval","log10_N","mizer t/x/log10_N"], f"nearest time and {'linear interpolation in x' if interp else 'nearest x selection'}; selected species; delta=PINN-mizer", False, False),
+    )
 
     def delta_heat():
         if miz_grid is None:
             st.warning("Interpolation impossible: mizer source needs t, x, log10_N for selected species.")
             return
         st.warning("Mizer values were interpolated using nearest time plus linear-in-x interpolation onto the PINN grid.")
-        make_heatmap(fields["x_eval"], fields["t_eval"], fields["log10_N"]-miz_grid, "PINN minus mizer heatmap", "delta_log10_N", mode, clip)
+        make_heatmap(
+            fields["x_eval"],
+            fields["t_eval"],
+            fields["log10_N"] - miz_grid,
+            "PINN minus mizer heatmap",
+            "delta_log10_N",
+            mode,
+            clip,
+        )
 
-    plot_with_desc(delta_heat, "Shows PINN minus mizer abundance error across the fixed PINN grid.", line_desc("fixed_grid_fields.npz/csv plus one mizer CSV", ["t_eval","x_eval","log10_N","mizer t/x/log10_N"], "nearest mizer time and linear interpolation in x onto PINN grid", False, False))
+    plot_with_desc(
+        delta_heat,
+        "Shows PINN minus mizer abundance error across the fixed PINN grid.",
+        line_desc("fixed_grid_fields.npz/csv plus one mizer CSV", ["t_eval","x_eval","log10_N","mizer t/x/log10_N"], "nearest mizer time and linear interpolation in x onto PINN grid; selected species", False, False),
+    )
 
     def multi():
         rows = []
 
         for rid in selected_runs:
-            f = load_fixed_fields(run_dirs[rid])
+            f = load_fixed_fields(run_dirs[rid], species_idx=pinn_species_idx)
             if f and not check_required_arrays(f, ["t_eval","x_eval","log10_N"]):
+                species_name = f.get("selected_species", pinn_species_idx)
                 for tv in times:
                     i = nearest_index(f["t_eval"], tv)
-                    rows += [{"x":x,"log10_N":v,"source":f"{rid} | t={format_time_label(f['t_eval'][i])}"} for x,v in zip(f["x_eval"],f["log10_N"][i])]
+                    rows += [
+                        {
+                            "x": x,
+                            "log10_N": v,
+                            "source": f"{rid} {species_name} | t={format_time_label(f['t_eval'][i])}",
+                        }
+                        for x, v in zip(f["x_eval"], f["log10_N"][i])
+                    ]
 
         s = mizers[one][mizers[one].species.astype(str)==str(species)].dropna(subset=["t","x","log10_N"])
         for tv in times:
             nt = nearest_value(s.t.to_numpy(), tv)
-            rows += [{"x":r.x,"log10_N":r.log10_N,"source":f"{one} | t={format_time_label(nt)}"} for r in s[np.isclose(s.t,nt)].itertuples()]
+            rows += [
+                {"x":r.x,"log10_N":r.log10_N,"source":f"{one} {species} | t={format_time_label(nt)}"}
+                for r in s[np.isclose(s.t, nt)].itertuples()
+            ]
 
         if not rows:
             st.info("No multi-run/mizer profile rows to plot.")
             return
 
-        st.plotly_chart(px.line(pd.DataFrame(rows), x="x", y="log10_N", color="source", markers=markers, title="Multiple PINN runs vs one mizer profile"), use_container_width=True)
+        st.plotly_chart(
+            px.line(
+                pd.DataFrame(rows),
+                x="x",
+                y="log10_N",
+                color="source",
+                markers=markers,
+                title="Multiple PINN runs vs one mizer profile",
+            ),
+            use_container_width=True,
+        )
 
-    plot_with_desc(multi, "Compares several PINN abundance profiles with one mizer source at nearest times.", line_desc("fixed_grid_fields.npz/csv plus mizer CSV", ["t/x/log10_N"], "nearest time per source; no cross-run grid assumption", False, False))
+    plot_with_desc(
+        multi,
+        "Compares several PINN runs for the selected PINN species with one selected mizer species profile at nearest times.",
+        line_desc("fixed_grid_fields.npz/csv plus mizer CSV", ["t/x/log10_N"], "nearest time per source; selected species; no cross-run grid assumption", False, False),
+    )
 
     for by, axis, vals in [("time",1,fields["t_eval"]),("weight",0,fields["x_eval"])]:
         def err(by=by, axis=axis, vals=vals):
             if miz_grid is None:
                 st.warning("Interpolation impossible.")
                 return
-            ad = np.abs(fields["log10_N"] - miz_grid)
-            d = pd.DataFrame({by:vals,"mean_abs_delta_log10_N":np.nanmean(ad,axis=axis),"p95_abs_delta_log10_N":np.nanpercentile(ad,95,axis=axis)}).melt(by,var_name="stat",value_name="error")
-            st.plotly_chart(px.line(d,x=by,y="error",color="stat",markers=markers,title=f"Error summary by {by}"), use_container_width=True)
 
-        plot_with_desc(err, f"Summarises absolute PINN-mizer error by {by} after placing mizer data on the PINN grid.", line_desc("fixed_grid_fields.npz plus mizer CSV", ["t/x/log10_N"], "nearest-time plus linear-x interpolation; mean and p95 abs delta", False, False))
+            ad = np.abs(fields["log10_N"] - miz_grid)
+            d = pd.DataFrame({
+                by: vals,
+                "mean_abs_delta_log10_N": np.nanmean(ad, axis=axis),
+                "p95_abs_delta_log10_N": np.nanpercentile(ad, 95, axis=axis),
+            }).melt(by, var_name="stat", value_name="error")
+
+            st.plotly_chart(
+                px.line(
+                    d,
+                    x=by,
+                    y="error",
+                    color="stat",
+                    markers=markers,
+                    title=f"Error summary by {by}",
+                ),
+                use_container_width=True,
+            )
+
+        plot_with_desc(
+            err,
+            f"Summarises absolute PINN-mizer error by {by} after placing mizer data on the PINN grid.",
+            line_desc("fixed_grid_fields.npz plus mizer CSV", ["t/x/log10_N"], "nearest-time plus linear-x interpolation; selected species; mean and p95 abs delta", False, False),
+        )
 
 def file_view_page(run_dir: Path) -> None:
     st.header("File/config view")
