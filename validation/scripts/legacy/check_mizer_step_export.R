@@ -178,7 +178,36 @@ export_mizer_inputs_for_python <- function(params,
   write_vec(n_pp, "n_pp")
   write_vec(dt, "dt")
 
-  f_mort <- matrix(0, nrow = nrow(n), ncol = length(params@w))
+  if ("catchability" %in% slotNames(params) && !is.null(params@catchability)) {
+    write_mat(params@catchability, "catchability")
+  }
+
+  if ("selectivity" %in% slotNames(params) && !is.null(params@selectivity)) {
+    sel_dim <- dim(params@selectivity)
+    if (length(sel_dim) != 3) {
+      stop("params@selectivity must have dimensions [gear, species, w].")
+    }
+    selectivity_flat <- matrix(
+      as.numeric(params@selectivity),
+      nrow = sel_dim[1] * sel_dim[2],
+      ncol = sel_dim[3]
+    )
+    write_mat(selectivity_flat, "selectivity")
+  }
+
+  initial_effort <- NULL
+  if ("initial_effort" %in% slotNames(params)) {
+    initial_effort <- params@initial_effort
+  } else if ("initial_effort" %in% names(params)) {
+    initial_effort <- params$initial_effort
+  }
+
+  if (is.null(initial_effort)) {
+    stop("params has no initial_effort; refusing to export fake zero fishing mortality.")
+  }
+
+  write_vec(initial_effort, "initial_effort")
+  f_mort <- getFMort(params, effort = initial_effort)
   write_mat(f_mort, "f_mort")
 
   invisible(TRUE)

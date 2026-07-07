@@ -34,6 +34,22 @@ def maybe_mat(root: Path, name: str, dtype, device):
     return load_mat(root, name, dtype, device)
 
 
+def maybe_selectivity(root: Path, dtype, device, catchability, n_w: int):
+    raw = maybe_mat(root, "selectivity", dtype, device)
+    if raw is None:
+        return None
+    if raw.ndim == 3:
+        return raw
+    if catchability is None:
+        return raw
+    n_gear, n_species = catchability.shape
+    if raw.shape == (n_gear * n_species, n_w):
+        return raw.reshape(n_gear, n_species, n_w)
+    if raw.shape == (n_species * n_gear, n_w):
+        return raw.reshape(n_gear, n_species, n_w)
+    return raw
+
+
 def load_mizer_inputs(
     outdir: str | Path,
     dtype: torch.dtype = torch.float64,
@@ -49,6 +65,7 @@ def load_mizer_inputs(
     t_max = maybe_vec(root, "t_max", dtype, device)
 
     mu_b_allometric_vec = maybe_vec(root, "mu_b_allometric", torch.long, device)
+    catchability = maybe_mat(root, "catchability", dtype, device)
     mu_b_allometric = (
        bool(int(mu_b_allometric_vec[0].item()))
        if mu_b_allometric_vec is not None
@@ -102,6 +119,11 @@ def load_mizer_inputs(
         rr_pp=load_vec(root, "rr_pp", dtype, device),
         cc_pp=load_vec(root, "cc_pp", dtype, device),
 
+        catchability=catchability,
+        selectivity=maybe_selectivity(root, dtype, device, catchability, load_vec(root, "w", dtype, device).numel()),
+        initial_effort=maybe_vec(root, "initial_effort", dtype, device),
+        fishing_effort_time=maybe_vec(root, "fishing_effort_time", dtype, device),
+        fishing_effort=maybe_mat(root, "fishing_effort", dtype, device),
         f_mort=maybe_mat(root, "f_mort", dtype, device),
 
         t_min=float(t_min[0]) if t_min is not None else 0.0,
