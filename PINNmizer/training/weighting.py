@@ -93,7 +93,7 @@ def update_expert_gradient_norm_weights_(
     hard_set: bool = False,
 ) -> dict[str, float]:
     """Update loss weights using expert-guide inverse gradient-norm targets."""
-    known = ("pde", "ic", "bc", "timestep")
+    known = ("pde", "ic", "bc", "timestep", "data")
     stats = {f"grad_norm_{name}_for_weighting": math.nan for name in known}
     stats.update({f"target_w_{name}": math.nan for name in known})
     stats["expert_weight_total_grad_norm"] = math.nan

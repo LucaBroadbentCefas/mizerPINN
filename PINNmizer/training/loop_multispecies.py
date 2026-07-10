@@ -15,6 +15,10 @@ from PINNmizer.pinn.losses import (
 from PINNmizer.pinn.r3 import update_r3_population_
 from PINNmizer.training.weighting import update_expert_gradient_norm_weights_, update_wang_gradient_weights_
 from PINNmizer.pinn.timestep_consistency_multispecies import compute_timestep_consistency_loss_multispecies
+from PINNmizer.params import scale_x, scale_t
+from PINNmizer.pinn.model_eval import evaluate_log_model_on_points
+from PINNmizer.pinn.observation_operators import predict_observations
+from PINNmizer.pinn.data_losses import lognormal_nll
 
 
 def scalar_min(x: torch.Tensor) -> float:
@@ -98,6 +102,10 @@ def train_one_step_multispecies(
     expert_weight_min: float | None = None,
     expert_weight_max: float | None = None,
     expert_weight_batch: str = "fixed",
+    observation_batch: dict[str, object] | None = None,
+    lambda_data: float = 0.0,
+    data_loss_eps: float = 1e-30,
+    data_time_quadrature_points: int = 1,
 ) -> dict:
     if wang_weight_batch not in {"fixed", "training"}:
         raise ValueError("wang_weight_batch must be 'fixed' or 'training'.")
@@ -218,6 +226,34 @@ def train_one_step_multispecies(
           )
     out["loss_timestep"] = loss_timestep
 
+    loss_data = out["loss_pde"].new_zeros(())
+    data_out = {}
+    if lambda_data > 0.0 and observation_batch is not None:
+        obs_times = torch.cat([observation_batch["t_start"], observation_batch["t_end"]])
+        if data_time_quadrature_points > 1:
+            qs = []
+            for a, b in zip(observation_batch["t_start"], observation_batch["t_end"]):
+                qs.append(torch.linspace(a, b, data_time_quadrature_points, dtype=obs_times.dtype, device=obs_times.device))
+            obs_times = torch.cat([obs_times, torch.cat(qs)])
+        t_grid = torch.unique(obs_times).sort().values
+        grid_eval = evaluate_log_model_on_points(
+            model=model,
+            x_scaled=scale_x(torch.log(params.w), params),
+            t_scaled=scale_t(t_grid, params),
+            params=params,
+        )
+        pred = predict_observations({"N_grid": grid_eval["N"], "t_grid": t_grid}, observation_batch, params)
+        nll = lognormal_nll(pred, observation_batch["value"], observation_batch["sd_log"], eps=data_loss_eps)
+        loss_data = nll["loss_data"]
+        data_out = {
+            "loss_data": loss_data,
+            "data_prediction": pred,
+            "data_log_residual": nll["log_residual"],
+            "data_loss_contribution": nll["loss_contribution"],
+        }
+    out.update(data_out)
+    out["loss_data"] = loss_data
+
     loss_pde_for_weighting = out["loss_pde"] if loss_weighting == "expert-grad-norm" else out.get("loss_pde_ungated", out["loss_pde"])
     
     raw_losses = {
@@ -225,6 +261,7 @@ def train_one_step_multispecies(
         "ic": out["loss_ic"],
         "bc": out["loss_bc"],
         "timestep": out["loss_timestep"],
+        "data": out["loss_data"],
     }
     
     losses_for_weighting = {
@@ -232,6 +269,7 @@ def train_one_step_multispecies(
         "ic": lambda_ic * out["loss_ic"],
         "bc": lambda_bc * out["loss_bc"],
         "timestep": lambda_timestep * out["loss_timestep"],
+        "data": lambda_data * out["loss_data"],
     }
 
     weight_stats = {
@@ -239,18 +277,22 @@ def train_one_step_multispecies(
         "grad_ic_mean": math.nan,
         "grad_bc_mean": math.nan,
         "grad_timestep_mean": math.nan,
+        "grad_data_mean": math.nan,
         "target_ic": math.nan,
         "target_bc": math.nan,
         "target_timestep": math.nan,
+        "target_data": math.nan,
         "hard_set": 0.0,
         "grad_norm_pde_for_weighting": math.nan,
         "grad_norm_ic_for_weighting": math.nan,
         "grad_norm_bc_for_weighting": math.nan,
         "grad_norm_timestep_for_weighting": math.nan,
+        "grad_norm_data_for_weighting": math.nan,
         "target_w_pde": math.nan,
         "target_w_ic": math.nan,
         "target_w_bc": math.nan,
         "target_w_timestep": math.nan,
+        "target_w_data": math.nan,
         "expert_weight_total_grad_norm": math.nan,
         "expert_weight_hard_set": 0.0,
     }
@@ -306,6 +348,7 @@ def train_one_step_multispecies(
                 "ic": lambda_ic * calibration_out["loss_ic"],
                 "bc": lambda_bc * calibration_out["loss_bc"],
                 "timestep": lambda_timestep * calibration_loss_timestep,
+                "data": lambda_data * loss_data,
             }
             weight_update_used_fixed_batch = 1.0
         elif active_weight_batch == "training":
@@ -341,6 +384,7 @@ def train_one_step_multispecies(
         + out["loss_ic"]
         + out["loss_bc"]
         + out["loss_timestep"]
+        + out["loss_data"]
     )
 
 
@@ -350,6 +394,7 @@ def train_one_step_multispecies(
             + lambda_ic * out["loss_ic"]
             + lambda_bc * out["loss_bc"]
             + lambda_timestep * out["loss_timestep"]
+            + lambda_data * out["loss_data"]
         )
     else:
         loss = (
@@ -357,6 +402,7 @@ def train_one_step_multispecies(
             + lambda_ic * loss_weights["ic"] * out["loss_ic"]
             + lambda_bc * loss_weights["bc"] * out["loss_bc"]
             + lambda_timestep * loss_weights["timestep"] * out["loss_timestep"]
+            + lambda_data * loss_weights["data"] * out["loss_data"]
         )
 
 
@@ -443,6 +489,7 @@ def train_one_step_multispecies(
         "loss_pde": float(out["loss_pde"].detach().cpu()),
         "loss_ic": float(out["loss_ic"].detach().cpu()),
         "loss_bc": float(out["loss_bc"].detach().cpu()),
+        "loss_data": float(out["loss_data"].detach().cpu()),
         "grad_norm": grad_norm,
         "residual_log_mean": scalar_mean(residual_log),
         "residual_log_abs_mean": scalar_mean(torch.abs(residual_log)),
@@ -464,10 +511,12 @@ def train_one_step_multispecies(
         "w_ic": float(loss_weights["ic"]),
         "w_bc": float(loss_weights["bc"]),
         "w_timestep": float(loss_weights["timestep"]),
+        "w_data": float(loss_weights.get("data", 1.0)),
         "wang_scaled_loss_pde": float((loss_weights["pde"] * out["loss_pde"]).detach().cpu()),
         "wang_scaled_loss_ic": float((loss_weights["ic"] * out["loss_ic"]).detach().cpu()),
         "wang_scaled_loss_bc": float((loss_weights["bc"] * out["loss_bc"]).detach().cpu()),
         "wang_scaled_loss_timestep": float((loss_weights["timestep"] * out["loss_timestep"]).detach().cpu()),
+        "wang_scaled_loss_data": float((loss_weights.get("data", 1.0) * out["loss_data"]).detach().cpu()),
         "loss_pde_for_weighting": float(loss_pde_for_weighting.detach().cpu()),
         "loss_pde_ungated": float(out.get("loss_pde_ungated", out["loss_pde"]).detach().cpu()),
         "loss_pde_gated": float(out.get("loss_pde_gated", out["loss_pde"]).detach().cpu()),
@@ -496,12 +545,14 @@ def train_one_step_multispecies(
         "objective_loss_ic": float((lambda_ic * loss_weights["ic"] * out["loss_ic"]).detach().cpu()),
         "objective_loss_bc": float((lambda_bc * loss_weights["bc"] * out["loss_bc"]).detach().cpu()),
         "objective_loss_timestep": float((lambda_timestep * loss_weights["timestep"] * out["loss_timestep"]).detach().cpu()),
+        "objective_loss_data": float((lambda_data * loss_weights.get("data", 1.0) * out["loss_data"]).detach().cpu()),
         
         # Backward-compatible aliases for old plotting/history code.
         "weighted_loss_pde": float((lambda_pde * loss_weights["pde"] * out["loss_pde"]).detach().cpu()),
         "weighted_loss_ic": float((lambda_ic * loss_weights["ic"] * out["loss_ic"]).detach().cpu()),
         "weighted_loss_bc": float((lambda_bc * loss_weights["bc"] * out["loss_bc"]).detach().cpu()),
         "weighted_loss_timestep": float((lambda_timestep * loss_weights["timestep"] * out["loss_timestep"]).detach().cpu()),
+        "weighted_loss_data": float((lambda_data * loss_weights.get("data", 1.0) * out["loss_data"]).detach().cpu()),
         "grad_pde_max_for_weighting": weight_stats["grad_pde_max"],
         "grad_ic_mean_for_weighting": weight_stats["grad_ic_mean"],
         "grad_bc_mean_for_weighting": weight_stats["grad_bc_mean"],
@@ -509,10 +560,13 @@ def train_one_step_multispecies(
         "target_w_bc": weight_stats["target_bc"] if math.isfinite(weight_stats["target_bc"]) else weight_stats["target_w_bc"],
         "grad_timestep_mean_for_weighting": weight_stats["grad_timestep_mean"],
         "target_w_timestep": weight_stats["target_timestep"] if math.isfinite(weight_stats["target_timestep"]) else weight_stats["target_w_timestep"],
+        "grad_data_mean_for_weighting": weight_stats["grad_data_mean"],
+        "target_w_data": weight_stats["target_data"] if math.isfinite(weight_stats["target_data"]) else weight_stats["target_w_data"],
         "grad_norm_pde_for_weighting": weight_stats["grad_norm_pde_for_weighting"],
         "grad_norm_ic_for_weighting": weight_stats["grad_norm_ic_for_weighting"],
         "grad_norm_bc_for_weighting": weight_stats["grad_norm_bc_for_weighting"],
         "grad_norm_timestep_for_weighting": weight_stats["grad_norm_timestep_for_weighting"],
+        "grad_norm_data_for_weighting": weight_stats["grad_norm_data_for_weighting"],
         "target_w_pde": weight_stats["target_w_pde"],
         "expert_weight_total_grad_norm": weight_stats["expert_weight_total_grad_norm"],
         "loss_weighted": float(loss.detach().cpu()),
@@ -556,5 +610,12 @@ def train_one_step_multispecies(
         "timestep_relative_abs_max": float((timestep_out["relative_abs_max"] if timestep_out is not None else torch.tensor(float("nan"))).detach().cpu()),
         "bc_use_constant_r": 1.0 if bc_use_constant_r else 0.0,
         "bc_constant_r": float(bc_constant_r) if bc_constant_r is not None else math.nan,
+        "n_data_obs": float(observation_batch["value"].numel()) if observation_batch is not None and lambda_data > 0.0 else 0.0,
+        "data_pred_min": scalar_min(out["data_prediction"]) if "data_prediction" in out else math.nan,
+        "data_pred_max": scalar_max(out["data_prediction"]) if "data_prediction" in out else math.nan,
+        "data_obs_min": scalar_min(observation_batch["value"]) if observation_batch is not None and lambda_data > 0.0 else math.nan,
+        "data_obs_max": scalar_max(observation_batch["value"]) if observation_batch is not None and lambda_data > 0.0 else math.nan,
+        "data_log_residual_abs_mean": scalar_mean(torch.abs(out["data_log_residual"])) if "data_log_residual" in out else math.nan,
+        "data_log_residual_abs_max": scalar_max(torch.abs(out["data_log_residual"])) if "data_log_residual" in out else math.nan,
     }
     return base

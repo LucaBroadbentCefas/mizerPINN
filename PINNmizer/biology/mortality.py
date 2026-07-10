@@ -43,10 +43,10 @@ def compute_pred_mortality_direct_at_eval(n_pp: torch.Tensor, N_pred_grid: torch
     return pred_mort_eval
 
 
-def compute_total_mortality_direct_at_eval(n_pp: torch.Tensor, N_pred_grid: torch.Tensor, w_eval: torch.Tensor, params: MizerTorchParams) -> dict[str, torch.Tensor]:
+def compute_total_mortality_direct_at_eval(n_pp: torch.Tensor, N_pred_grid: torch.Tensor, w_eval: torch.Tensor, params: MizerTorchParams, t_eval=None) -> dict[str, torch.Tensor]:
     mu_b_eval = evaluate_mu_b_continuous(w_eval, params)
     pred_mort_eval = compute_pred_mortality_direct_at_eval(n_pp=n_pp, N_pred_grid=N_pred_grid, w_prey_eval=w_eval, params=params)
-    f_mort_eval = evaluate_fishing_mortality_direct(w_eval, params)
+    f_mort_eval = evaluate_fishing_mortality_direct(w_eval, params, t_eval=t_eval)
     mu_eval = mu_b_eval + pred_mort_eval + f_mort_eval
     return {"mu_b_eval": mu_b_eval, "pred_mort_eval": pred_mort_eval, "f_mort_eval": f_mort_eval, "mu_eval": mu_eval}
 
@@ -70,10 +70,10 @@ def compute_pred_mortality_direct_at_eval_from_growth_grid(N_pred_grid: torch.Te
     return pred_mort_eval
 
 
-def compute_total_mortality_direct_at_eval_from_growth_grid(N_pred_grid: torch.Tensor, w_eval: torch.Tensor, params: MizerTorchParams, growth_grid: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+def compute_total_mortality_direct_at_eval_from_growth_grid(N_pred_grid: torch.Tensor, w_eval: torch.Tensor, params: MizerTorchParams, growth_grid: dict[str, torch.Tensor], t_eval=None) -> dict[str, torch.Tensor]:
     """Total mortality at physical weights, output terms shaped [species, n_eval]."""
     mu_b_eval = evaluate_mu_b_continuous(w_eval, params)
     pred_mort_eval = compute_pred_mortality_direct_at_eval_from_growth_grid(N_pred_grid=N_pred_grid, w_prey_eval=w_eval, params=params, growth_grid=growth_grid)
-    f_mort_eval = evaluate_fishing_mortality_direct(w_eval, params)
+    f_mort_eval = evaluate_fishing_mortality_direct(w_eval, params, t_eval=t_eval)
     mu_eval = mu_b_eval + pred_mort_eval + f_mort_eval
     return {"mu_b_eval": mu_b_eval, "pred_mort_eval": pred_mort_eval, "f_mort_eval": f_mort_eval, "mu_eval": mu_eval}

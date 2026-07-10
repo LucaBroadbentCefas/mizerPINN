@@ -34,6 +34,10 @@ from PINNmizer.pinn.r3 import make_r3_population, CausalR3
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 from PINNmizer.io import load_mizer_inputs
+from PINNmizer.io_observations import load_observation_csv
+from PINNmizer.pinn.model_eval import evaluate_log_model_on_points
+from PINNmizer.pinn.observation_operators import predict_observations
+from PINNmizer.pinn.data_losses import lognormal_nll
 from PINNmizer.params import scale_x, scale_t, active_grid_mask
 from PINNmizer.diagnostics.fixed_grid import (
     make_fixed_pde_batch,
@@ -263,6 +267,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--initial-w-ic", type=float, default=1.0)
     parser.add_argument("--initial-w-bc", type=float, default=1e-3)
     parser.add_argument("--initial-w-timestep", type=float, default=1.0)
+    parser.add_argument("--initial-w-data", type=float, default=1.0)
     
     parser.add_argument(
         "--hard-set-first-weight-update",
@@ -304,6 +309,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lambda-bc", type=float, default=0.0)
     parser.add_argument("--disable-wang-weights", action="store_true") 
     parser.add_argument("--lambda-timestep", type=float, default=0.0)
+    parser.add_argument("--data-csv", default=None)
+    parser.add_argument("--lambda-data", type=float, default=0.0)
+    parser.add_argument("--data-default-cv", type=float, default=0.3)
+    parser.add_argument("--data-loss-eps", type=float, default=1e-30)
+    parser.add_argument("--data-time-quadrature-points", type=int, default=1)
     parser.add_argument("--timestep-loss-form", choices=["physical", "log", "relative"], default="physical")
     parser.add_argument("--detach-step-target", action="store_true", default=True)
     parser.add_argument("--no-detach-step-target", dest="detach_step_target", action="store_false")
@@ -376,6 +386,36 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+
+def save_data_predictions_final(*, run_dir: Path, model: nn.Module, params, observation_batch: dict[str, object], eps: float, data_time_quadrature_points: int) -> None:
+    obs_times = torch.cat([observation_batch["t_start"], observation_batch["t_end"]])
+    if data_time_quadrature_points > 1:
+        obs_times = torch.cat([obs_times, torch.cat([torch.linspace(a, b, data_time_quadrature_points, dtype=obs_times.dtype, device=obs_times.device) for a, b in zip(observation_batch["t_start"], observation_batch["t_end"])])])
+    t_grid = torch.unique(obs_times).sort().values
+    with torch.no_grad():
+        grid_eval = evaluate_log_model_on_points(model=model, x_scaled=scale_x(torch.log(params.w), params), t_scaled=scale_t(t_grid, params), params=params)
+        pred = predict_observations({"N_grid": grid_eval["N"], "t_grid": t_grid}, observation_batch, params)
+        nll = lognormal_nll(pred, observation_batch["value"], observation_batch["sd_log"], eps=eps)
+    rows = []
+    n = observation_batch["value"].numel()
+    for j in range(n):
+        rows.append({
+            "obs_type": observation_batch["obs_type"][j],
+            "dataset": observation_batch["dataset"][j],
+            "species_idx": int(observation_batch["species_idx"][j].cpu()),
+            "gear_idx": int(observation_batch["gear_idx"][j].cpu()),
+            "t_start": float(observation_batch["t_start"][j].cpu()),
+            "t_end": float(observation_batch["t_end"][j].cpu()),
+            "w_min": float(observation_batch["w_min"][j].cpu()),
+            "w_max": float(observation_batch["w_max"][j].cpu()),
+            "value": float(observation_batch["value"][j].cpu()),
+            "prediction": float(pred[j].cpu()),
+            "log_residual": float(nll["log_residual"][j].cpu()),
+            "sd_log": float(observation_batch["sd_log"][j].cpu()),
+            "loss_contribution": float(nll["loss_contribution"][j].cpu()),
+        })
+    pd.DataFrame(rows).to_csv(run_dir / "data_predictions_final.csv", index=False)
+
 def main() -> None:
     args = parse_args()
 
@@ -413,6 +453,10 @@ def main() -> None:
         )  
 
     n_species = params.interaction.shape[0]
+
+    observation_batch = None
+    if args.data_csv is not None and args.lambda_data != 0.0:
+        observation_batch = load_observation_csv(args.data_csv, params, default_cv=args.data_default_cv)
 
     if args.species_mode != "all":
         raise ValueError("Only --species-mode all is supported for multi-species training.")
@@ -487,6 +531,7 @@ def main() -> None:
         "ic": args.initial_w_ic,
         "bc": args.initial_w_bc,
         "timestep": args.initial_w_timestep,
+        "data": args.initial_w_data,
     }
     
     weight_state = {
@@ -578,6 +623,7 @@ def main() -> None:
         "initial_w_ic": args.initial_w_ic,
         "initial_w_bc": args.initial_w_bc,
         "initial_w_timestep": args.initial_w_timestep,
+        "initial_w_data": args.initial_w_data,
         "hard_set_first_weight_update": args.hard_set_first_weight_update,
         "init_final_bias_from_ic": args.init_final_bias_from_ic,
         "causal_curriculum": args.causal_curriculum,
@@ -589,6 +635,11 @@ def main() -> None:
         "lambda_bc": args.lambda_bc,
         "disable_wang_weights": args.disable_wang_weights,
         "lambda_timestep": args.lambda_timestep,
+        "data_csv": args.data_csv,
+        "lambda_data": args.lambda_data,
+        "data_default_cv": args.data_default_cv,
+        "data_loss_eps": args.data_loss_eps,
+        "data_time_quadrature_points": args.data_time_quadrature_points,
         "timestep_loss_form": args.timestep_loss_form,
         "detach_step_target": args.detach_step_target,
         "timestep_dt": args.timestep_dt,
@@ -716,6 +767,10 @@ def main() -> None:
                 expert_weight_min=args.expert_weight_min,
                 expert_weight_max=args.expert_weight_max,
                 expert_weight_batch=args.expert_weight_batch,
+                observation_batch=observation_batch,
+                lambda_data=args.lambda_data,
+                data_loss_eps=args.data_loss_eps,
+                data_time_quadrature_points=args.data_time_quadrature_points,
             )
 
             history.append(row)
@@ -854,6 +909,16 @@ def main() -> None:
             params=params,
             n_times=50,
         )
+
+        if observation_batch is not None and args.lambda_data != 0.0:
+            save_data_predictions_final(
+                run_dir=run_dir,
+                model=model,
+                params=params,
+                observation_batch=observation_batch,
+                eps=args.data_loss_eps,
+                data_time_quadrature_points=args.data_time_quadrature_points,
+            )
 
         save_final_residual_sample_multispecies(
             run_dir=run_dir,
