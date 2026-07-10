@@ -68,7 +68,7 @@ def load_observation_csv(path: str | Path, params: MizerTorchParams, *, default_
 
     def ten(col, kind=float):
         vals = pd.to_numeric(df[col], errors="coerce")
-        return torch.as_tensor(vals.to_numpy(), dtype=(torch.long if kind is int else dtype), device=device)
+        return torch.as_tensor(vals.to_numpy(copy=True), dtype=(torch.long if kind is int else dtype), device=device)
 
     gear = pd.to_numeric(df["gear_idx"], errors="coerce").fillna(-1).astype(int)
     return {

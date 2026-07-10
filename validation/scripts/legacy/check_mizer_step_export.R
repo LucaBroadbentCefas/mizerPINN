@@ -6,7 +6,7 @@ export_mizer_inputs_for_python <- function(params,
                                            dt = 0.1,
                                            outdir = "validation/fixtures/pde_single_species",
                                            t_min = 0,
-                                           t_max = 1,
+                                           t_max = 40,
                                            z0_pre = 0.6,
                                            mu_b_allometric = FALSE) {
   dir.create(outdir, showWarnings = FALSE)

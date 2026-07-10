@@ -784,22 +784,128 @@ def fields_page(run_dir: Path, clip: bool, mode: str, markers: bool) -> None:
 FIELD_INTERPRETATIONS={"log10_N":"`log10_N` is the neural-network predicted abundance on the fixed diagnostic grid, shown as log10(N). High or low regions show the learned size spectrum over time.","residual_log":"`residual_log` is the signed log PDE residual R_log. Positive/negative regions show which side of d_t log N + g d_w log N + mu + d_w g is imbalanced.","abs_residual_log":"`abs_residual_log` is the magnitude of the PDE mismatch; high values mark where the neural-network field least satisfies the PDE.","dlogN_dt":"`dlogN_dt` is the time derivative of network-predicted log abundance on the fixed grid.","advective":"`advective` is the growth/advection contribution g*d_w log N in the log residual.","mu":"`mu` is the mortality contribution in the log residual.","dg_dw":"`dg_dw` is the body-size derivative of growth rate in the log residual.","g_eval":"`g_eval` is the growth rate evaluated on the fixed grid; it is a biological PDE coefficient used by the residual, not a network output."}
 
 def normalise_mizer_dataframe(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
-    aliases={"t":["time","t","t_eval"],"species":["sp","species","species_id","species_name"],"w":["weight","w","w_eval"],"x":["x","log_weight","log_w","x_eval"],"N":["N","n","abundance","density"],"log_N":["log_N","logN","ln_N"],"log10_N":["log10_N","log10N"]}
-    out=pd.DataFrame(index=df.index); out["source_name"]=source_name
-    low={c.lower():c for c in df.columns}
-    for std,names in aliases.items():
-        col=next((low[n.lower()] for n in names if n.lower() in low), None); out[std]=df[col] if col else np.nan
-    if out["species"].isna().all(): out["species"]="species_0"
-    for c in ["t","w","x","N","log_N","log10_N"]: out[c]=pd.to_numeric(out[c], errors="coerce")
-    out.loc[out["x"].isna() & out["w"].notna(), "x"] = np.log(np.maximum(out.loc[out["x"].isna() & out["w"].notna(), "w"], TINY))
-    out.loc[out["log10_N"].isna() & out["N"].notna(), "log10_N"] = np.log10(np.maximum(out.loc[out["log10_N"].isna() & out["N"].notna(), "N"], TINY))
-    out.loc[out["log10_N"].isna() & out["log_N"].notna(), "log10_N"] = out["log_N"] / np.log(10)
-    out.loc[out["N"].isna() & out["log_N"].notna(), "N"] = np.exp(out["log_N"])
-    out.loc[out["N"].isna() & out["log10_N"].notna(), "N"] = 10 ** out["log10_N"]
-    required_ok = out["t"].notna().any() and out["species"].notna().any() and out["w"].notna().any() and out["N"].notna().any()
+    aliases = {
+        "t": ["time", "t", "t_eval"],
+        "species": ["sp", "species", "species_id", "species_name"],
+        "w": ["weight", "w", "w_eval"],
+        "x": ["x", "log_weight", "log_w", "x_eval"],
+        "N": ["N", "n", "abundance", "density"],
+        "log_N": ["log_N", "logN", "ln_N"],
+        "log10_N": ["log10_N", "log10N"],
+    }
+
+    out = pd.DataFrame(index=df.index)
+    out["source_name"] = source_name
+    low = {c.lower(): c for c in df.columns}
+
+    for std, names in aliases.items():
+        col = next((low[n.lower()] for n in names if n.lower() in low), None)
+        out[std] = df[col] if col else np.nan
+
+    if out["species"].isna().all():
+        out["species"] = "species_0"
+
+    for c in ["t", "w", "x", "N", "log_N", "log10_N"]:
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    # Weight support: only positive physical weights can be converted to x=log(w).
+    positive_w = out["w"] > 0
+    missing_x_with_positive_w = out["x"].isna() & positive_w
+    out.loc[missing_x_with_positive_w, "x"] = np.log(out.loc[missing_x_with_positive_w, "w"])
+
+    # Abundance support: structural zeros in mizer output are not tiny abundances.
+    # They should disappear from log-profile plots rather than become log10(TINY) ~= -308.
+    positive_N = out["N"] > 0
+    missing_log10_with_positive_N = out["log10_N"].isna() & positive_N
+    out.loc[missing_log10_with_positive_N, "log10_N"] = np.log10(
+        out.loc[missing_log10_with_positive_N, "N"]
+    )
+
+    missing_log10_with_log_N = out["log10_N"].isna() & out["log_N"].notna()
+    out.loc[missing_log10_with_log_N, "log10_N"] = out.loc[missing_log10_with_log_N, "log_N"] / np.log(10)
+
+    missing_N_with_log_N = out["N"].isna() & out["log_N"].notna()
+    out.loc[missing_N_with_log_N, "N"] = np.exp(out.loc[missing_N_with_log_N, "log_N"])
+
+    missing_N_with_log10_N = out["N"].isna() & out["log10_N"].notna()
+    out.loc[missing_N_with_log10_N, "N"] = 10 ** out.loc[missing_N_with_log10_N, "log10_N"]
+
+    required_ok = (
+        out["t"].notna().any()
+        and out["species"].notna().any()
+        and out["w"].notna().any()
+        and out["x"].notna().any()
+        and out["log10_N"].notna().any()
+    )
     if not required_ok:
-        raise ValueError("Could not use this mizer file.\n\nExpected long-format mizer data with columns equivalent to:\ntime, sp/species, w/weight, and N/abundance.\n\nThe mizer object appears to be a time × species × weight array, so export it to long CSV first: one row per time/species/weight.")
-    return out[["source_name","t","species","w","x","N","log_N","log10_N"]].dropna(subset=["t","species","w","x","N","log10_N"])
+        raise ValueError(
+            "Could not use this mizer file.\n\n"
+            "Expected long-format mizer data with columns equivalent to:\n"
+            "time, sp/species, w/weight, and N/abundance or log_N/log10_N.\n\n"
+            "The mizer object appears to be a time × species × weight array, so export it to long CSV first: "
+            "one row per time/species/weight. Structural zero abundances are treated as missing for log plots."
+        )
+
+    return out[["source_name", "t", "species", "w", "x", "N", "log_N", "log10_N"]].dropna(
+        subset=["t", "species", "w", "x", "log10_N"]
+    )
+
+
+def active_mizer_x_range(miz: pd.DataFrame, species: str) -> tuple[float, float] | None:
+    sub = miz[
+        (miz["species"].astype(str) == str(species))
+        & np.isfinite(miz["x"])
+        & np.isfinite(miz["log10_N"])
+    ]
+
+    if sub.empty:
+        return None
+
+    return float(sub["x"].min()), float(sub["x"].max())
+
+
+def combined_mizer_x_range(
+    mizers: dict[str, pd.DataFrame],
+    species: str,
+    source_names: list[str] | None = None,
+) -> tuple[float, float] | None:
+    names = list(mizers) if source_names is None else [name for name in source_names if name in mizers]
+    ranges = [active_mizer_x_range(mizers[name], species) for name in names]
+    ranges = [r for r in ranges if r is not None]
+
+    if not ranges:
+        return None
+
+    return min(r[0] for r in ranges), max(r[1] for r in ranges)
+
+
+def mask_to_x_support(
+    x_values,
+    y_values,
+    x_range: tuple[float, float] | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    x_arr = np.asarray(x_values, dtype=float)
+    y_arr = np.asarray(y_values, dtype=float)
+    mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+
+    if x_range is not None:
+        xmin, xmax = x_range
+        mask &= (x_arr >= xmin) & (x_arr <= xmax)
+
+    return x_arr[mask], y_arr[mask]
+
+
+def mask_matrix_to_x_support(z, x_values, x_range: tuple[float, float] | None) -> np.ndarray:
+    out = np.asarray(z, dtype=float).copy()
+    x_arr = np.asarray(x_values, dtype=float)
+    mask = np.isfinite(x_arr)
+
+    if x_range is not None:
+        xmin, xmax = x_range
+        mask &= (x_arr >= xmin) & (x_arr <= xmax)
+
+    out[:, ~mask] = np.nan
+    return out
 
 
 def compare_page(run_df, selected_runs, clip, mode, markers):
@@ -981,13 +1087,43 @@ def load_mizer_sources(local_paths: str, uploads) -> dict[str,pd.DataFrame]:
     return out
 
 
-def interpolate_mizer_to_pinn(miz, species, t_grid, x_grid):
-    sub=miz[miz.species.astype(str)==str(species)].dropna(subset=["t","x","log10_N"]); z=[]
-    if sub.empty: return None
+def interpolate_mizer_to_pinn(miz, species, t_grid, x_grid, *, method: str = "linear"):
+    sub = miz[
+        (miz.species.astype(str) == str(species))
+        & np.isfinite(miz["t"])
+        & np.isfinite(miz["x"])
+        & np.isfinite(miz["log10_N"])
+    ].copy()
+
+    if sub.empty:
+        return None
+
+    z = []
+    x_grid = np.asarray(x_grid, dtype=float)
+
     for tv in t_grid:
-        nt=nearest_value(sub.t.to_numpy(), tv); s=sub[np.isclose(sub.t,nt)].sort_values("x")
-        if s.empty: return None
-        z.append(np.interp(x_grid, s.x.to_numpy(), s.log10_N.to_numpy(), left=np.nan, right=np.nan))
+        nt = nearest_value(sub.t.to_numpy(), tv)
+        s = sub[np.isclose(sub.t, nt)].sort_values("x")
+        s = s[np.isfinite(s["x"]) & np.isfinite(s["log10_N"])]
+
+        if s.empty:
+            return None
+
+        s = s.groupby("x", as_index=False)["log10_N"].mean().sort_values("x")
+        sx = s["x"].to_numpy(dtype=float)
+        sy = s["log10_N"].to_numpy(dtype=float)
+
+        if method == "nearest":
+            vals = np.full_like(x_grid, np.nan, dtype=float)
+            for j, x in enumerate(x_grid):
+                if x < sx.min() or x > sx.max():
+                    continue
+                vals[j] = sy[int(np.nanargmin(np.abs(sx - x)))]
+        else:
+            vals = np.interp(x_grid, sx, sy, left=np.nan, right=np.nan)
+
+        z.append(vals)
+
     return np.asarray(z)
 
 
@@ -1003,27 +1139,15 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
     if not fields0 or check_required_arrays(fields0, ["t_eval","x_eval","log10_N"]):
         st.warning("Selected PINN run needs fixed_grid_fields.npz/csv with t_eval, x_eval, log10_N.")
         return
-
     allm = pd.concat(mizers.values(), ignore_index=True)
-    mizer_species_options = sorted(allm.species.astype(str).dropna().unique())
-    species = st.selectbox("Mizer species", mizer_species_options)
-
-    species_options = fields0.get("species_options", [(0, "species_0")])
-    species_labels = [f"{idx}: {name}" for idx, name in species_options]
-
-    default_pinn_index = 0
-    for i, (_, name) in enumerate(species_options):
-        if str(name) == str(species):
-            default_pinn_index = i
-            break
-
-    pinn_species_label = st.selectbox(
-        "PINN species",
-        species_labels,
-        index=default_pinn_index,
-        key="mizer_pinn_species",
-    )
-    pinn_species_idx = int(pinn_species_label.split(":", 1)[0])
+    
+    # Keep mizer species in the order they appear in the file.
+    mizer_species_options = pd.unique(allm["species"].dropna().astype(str)).tolist()
+    
+    species = st.selectbox("Species", mizer_species_options)
+    
+    # Same-order assumption: selected species position equals PINN species index.
+    pinn_species_idx = mizer_species_options.index(species)
 
     fields = load_fixed_fields(run_dirs.get(selected_run, ""), species_idx=pinn_species_idx)
     if not fields or check_required_arrays(fields, ["t_eval","x_eval","log10_N"]):
@@ -1031,11 +1155,7 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
         return
 
     pinn_species_name = fields.get("selected_species", f"species_{pinn_species_idx}")
-    if str(pinn_species_name) != str(species):
-        st.warning(
-            f"PINN species `{pinn_species_name}` is being compared with mizer species `{species}`. "
-            "Check that this is intentional."
-        )
+
 
     t_options = [float(v) for v in fields["t_eval"]]
     default_times = [t_options[i] for i in sorted(set(np.linspace(0, len(t_options)-1, min(6, len(t_options)), dtype=int)))]
@@ -1046,6 +1166,15 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
 
     xsel = st.number_input("Comparison log-weight x", value=float(fields["x_eval"][0]))
     srcs = st.multiselect("Mizer sources", list(mizers), default=list(mizers))
+    active_x_range = combined_mizer_x_range(mizers, species, srcs)
+
+    if active_x_range is not None:
+        st.caption(
+            "PINN profiles and PINN-mizer differences are masked to the selected mizer species' "
+            f"positive-abundance support: x in [{active_x_range[0]:.6g}, {active_x_range[1]:.6g}]."
+        )
+    else:
+        st.warning("Could not infer positive-abundance mizer support for the selected species; PINN support masking is not applied.")
 
     def prof():
         rows = []
@@ -1057,6 +1186,7 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
             used["PINN"].append(pinnt)
             time_label = format_time_label(tv)
 
+            x_plot, y_plot = mask_to_x_support(fields["x_eval"], fields["log10_N"][i], active_x_range)
             rows += [
                 {
                     "x": x,
@@ -1065,7 +1195,7 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
                     "source": "PINN",
                     "series": f"PINN {pinn_species_name} | t={format_time_label(pinnt)}",
                 }
-                for x, v in zip(fields["x_eval"], fields["log10_N"][i])
+                for x, v in zip(x_plot, y_plot)
             ]
 
         for name in srcs:
@@ -1117,7 +1247,18 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
     def ts():
         rows = []
         j = nearest_index(fields["x_eval"], xsel)
-        rows += [{"t":t,"log10_N":v,"source":"PINN"} for t,v in zip(fields["t_eval"],fields["log10_N"][:,j])]
+        selected_x = float(fields["x_eval"][j])
+        if (
+            active_x_range is None
+            or (active_x_range[0] <= selected_x <= active_x_range[1])
+        ):
+            rows += [
+                {"t": t, "log10_N": v, "source": "PINN"}
+                for t, v in zip(fields["t_eval"], fields["log10_N"][:, j])
+                if np.isfinite(v)
+            ]
+        else:
+            st.warning("Selected PINN log-weight is outside the positive-abundance mizer support; PINN time-series is hidden.")
 
         for name in srcs:
             s = mizers[name][mizers[name].species.astype(str)==str(species)].dropna(subset=["t","x","log10_N"])
@@ -1146,7 +1287,14 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
 
     one = st.selectbox("Mizer source for error", list(mizers))
     interp = st.checkbox("Use linear-in-x interpolation", True)
-    miz_grid = interpolate_mizer_to_pinn(mizers[one], species, fields["t_eval"], fields["x_eval"])
+    interp_method = "linear" if interp else "nearest"
+    miz_grid = interpolate_mizer_to_pinn(
+        mizers[one],
+        species,
+        fields["t_eval"],
+        fields["x_eval"],
+        method=interp_method,
+    )
 
     def delta_profile():
         if miz_grid is None:
@@ -1164,12 +1312,13 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
             used["PINN"].append(pinnt)
             used[one].append(mt)
             delta = fields["log10_N"][i] - miz_grid[i]
+            x_plot, delta_plot = mask_to_x_support(fields["x_eval"], delta, active_x_range)
             rows += [
-                {"x":x,"delta":v,"source":f"PINN {pinn_species_name} - {one} {species} | t={format_time_label(pinnt)}"}
-                for x, v in zip(fields["x_eval"], delta)
+                {"x": x, "delta": v, "source": f"PINN {pinn_species_name} - {one} {species} | t={format_time_label(pinnt)}"}
+                for x, v in zip(x_plot, delta_plot)
             ]
 
-        st.warning("Mizer comparison used nearest-time selection and linear interpolation in log-weight x onto the PINN grid.")
+        st.warning(f"Mizer comparison used nearest-time selection and {interp_method} matching in log-weight x onto the PINN grid.")
         st.caption(format_nearest_times_message(times, used))
         st.plotly_chart(
             px.line(
@@ -1193,11 +1342,12 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
         if miz_grid is None:
             st.warning("Interpolation impossible: mizer source needs t, x, log10_N for selected species.")
             return
-        st.warning("Mizer values were interpolated using nearest time plus linear-in-x interpolation onto the PINN grid.")
+        st.warning(f"Mizer values were matched using nearest time plus {interp_method} matching in log-weight x onto the PINN grid.")
+        delta = mask_matrix_to_x_support(fields["log10_N"] - miz_grid, fields["x_eval"], active_x_range)
         make_heatmap(
             fields["x_eval"],
             fields["t_eval"],
-            fields["log10_N"] - miz_grid,
+            delta,
             "PINN minus mizer heatmap",
             "delta_log10_N",
             mode,
@@ -1219,13 +1369,14 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
                 species_name = f.get("selected_species", pinn_species_idx)
                 for tv in times:
                     i = nearest_index(f["t_eval"], tv)
+                    x_plot, y_plot = mask_to_x_support(f["x_eval"], f["log10_N"][i], active_x_range)
                     rows += [
                         {
                             "x": x,
                             "log10_N": v,
                             "source": f"{rid} {species_name} | t={format_time_label(f['t_eval'][i])}",
                         }
-                        for x, v in zip(f["x_eval"], f["log10_N"][i])
+                        for x, v in zip(x_plot, y_plot)
                     ]
 
         s = mizers[one][mizers[one].species.astype(str)==str(species)].dropna(subset=["t","x","log10_N"])
@@ -1265,6 +1416,7 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
                 return
 
             ad = np.abs(fields["log10_N"] - miz_grid)
+            ad = mask_matrix_to_x_support(ad, fields["x_eval"], active_x_range)
             d = pd.DataFrame({
                 by: vals,
                 "mean_abs_delta_log10_N": np.nanmean(ad, axis=axis),

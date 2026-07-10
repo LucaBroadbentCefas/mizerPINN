@@ -228,32 +228,73 @@ def train_one_step_multispecies(
 
     loss_data = out["loss_pde"].new_zeros(())
     data_out = {}
+
     if lambda_data > 0.0 and observation_batch is not None:
-        obs_times = torch.cat([observation_batch["t_start"], observation_batch["t_end"]])
-        if data_time_quadrature_points > 1:
-            qs = []
-            for a, b in zip(observation_batch["t_start"], observation_batch["t_end"]):
-                qs.append(torch.linspace(a, b, data_time_quadrature_points, dtype=obs_times.dtype, device=obs_times.device))
-            obs_times = torch.cat([obs_times, torch.cat(qs)])
-        t_grid = torch.unique(obs_times).sort().values
-        grid_eval = evaluate_log_model_on_points(
-            model=model,
-            x_scaled=scale_x(torch.log(params.w), params),
-            t_scaled=scale_t(t_grid, params),
-            params=params,
+        keep = torch.maximum(
+            observation_batch["t_start"],
+            observation_batch["t_end"],
+        ) <= torch.as_tensor(
+            t_max_current,
+            dtype=observation_batch["t_start"].dtype,
+            device=observation_batch["t_start"].device,
         )
-        pred = predict_observations({"N_grid": grid_eval["N"], "t_grid": t_grid}, observation_batch, params)
-        nll = lognormal_nll(pred, observation_batch["value"], observation_batch["sd_log"], eps=data_loss_eps)
-        loss_data = nll["loss_data"]
-        data_out = {
-            "loss_data": loss_data,
-            "data_prediction": pred,
-            "data_log_residual": nll["log_residual"],
-            "data_loss_contribution": nll["loss_contribution"],
-        }
+
+        out["n_data_obs_active"] = torch.as_tensor(
+            keep.sum().item(),
+            dtype=loss_data.dtype,
+            device=loss_data.device,
+        )
+
+        if bool(keep.any().detach().cpu()):
+            idx = torch.nonzero(keep, as_tuple=False).reshape(-1)
+            idx_list = idx.detach().cpu().tolist()
+            n_obs = observation_batch["value"].numel()
+
+            observation_batch = {
+                k: (
+                    v[idx]
+                    if torch.is_tensor(v) and v.ndim > 0 and v.shape[0] == n_obs
+                    else [v[i] for i in idx_list]
+                    if isinstance(v, list) and len(v) == n_obs
+                    else v
+                )
+                for k, v in observation_batch.items()
+            }
+
+            obs_times = torch.cat([observation_batch["t_start"], observation_batch["t_end"]])
+
+            if data_time_quadrature_points > 1:
+                qs = []
+                for a, b in zip(observation_batch["t_start"], observation_batch["t_end"]):
+                    qs.append(torch.linspace(a, b, data_time_quadrature_points, dtype=obs_times.dtype, device=obs_times.device))
+                obs_times = torch.cat([obs_times, torch.cat(qs)])
+
+            t_grid = torch.unique(obs_times).sort().values
+
+            grid_eval = evaluate_log_model_on_points(
+                model=model,
+                x_scaled=scale_x(torch.log(params.w), params),
+                t_scaled=scale_t(t_grid, params),
+                params=params,
+            )
+
+            pred = predict_observations({"N_grid": grid_eval["N"], "t_grid": t_grid}, observation_batch, params)
+            nll = lognormal_nll(pred, observation_batch["value"], observation_batch["sd_log"], eps=data_loss_eps)
+
+            loss_data = nll["loss_data"]
+            data_out = {
+                "loss_data": loss_data,
+                "data_prediction": pred,
+                "data_value": observation_batch["value"],
+                "data_log_residual": nll["log_residual"],
+                "data_loss_contribution": nll["loss_contribution"],
+            }
+
     out.update(data_out)
     out["loss_data"] = loss_data
 
+    if "n_data_obs_active" not in out:
+        out["n_data_obs_active"] = loss_data.new_zeros(())
     loss_pde_for_weighting = out["loss_pde"] if loss_weighting == "expert-grad-norm" else out.get("loss_pde_ungated", out["loss_pde"])
     
     raw_losses = {
@@ -610,7 +651,7 @@ def train_one_step_multispecies(
         "timestep_relative_abs_max": float((timestep_out["relative_abs_max"] if timestep_out is not None else torch.tensor(float("nan"))).detach().cpu()),
         "bc_use_constant_r": 1.0 if bc_use_constant_r else 0.0,
         "bc_constant_r": float(bc_constant_r) if bc_constant_r is not None else math.nan,
-        "n_data_obs": float(observation_batch["value"].numel()) if observation_batch is not None and lambda_data > 0.0 else 0.0,
+        "n_data_obs": float(out.get("n_data_obs_active", torch.zeros_like(out["loss_data"])).detach().cpu()),
         "data_pred_min": scalar_min(out["data_prediction"]) if "data_prediction" in out else math.nan,
         "data_pred_max": scalar_max(out["data_prediction"]) if "data_prediction" in out else math.nan,
         "data_obs_min": scalar_min(observation_batch["value"]) if observation_batch is not None and lambda_data > 0.0 else math.nan,
