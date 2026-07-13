@@ -82,6 +82,13 @@ class MizerTorchParams:
     mu_b_allometric: bool = False
     dt: Optional[torch.Tensor] = None
 
+    # optional PINN state normalization N = S U
+    state_parameterization: str = "log-n"
+    state_scale_log: Optional[torch.Tensor] = None
+    state_scale_eps: float = 1e-30
+    state_scale_source: str = "initial_condition"
+    state_scale_interpolation: str = "linear_log_weight"
+
 def fish_start(params: MizerTorchParams) -> int:
     return params.w_full.numel() - params.w.numel()
 

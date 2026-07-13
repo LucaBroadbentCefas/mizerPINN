@@ -4,6 +4,7 @@ import torch
 
 from PINNmizer.params import MizerTorchParams, _n_species, _params_dtype_device, _t_limits, _x_limits
 from PINNmizer.pinn.model_eval import _make_model_inputs
+from PINNmizer.pinn.state_scale import reconstruct_from_model_output, state_parameterization
 
 
 def evaluate_log_model_with_derivatives_at_eval(model, x_eval_scaled: torch.Tensor, t_scaled: torch.Tensor, w_eval: torch.Tensor, params: MizerTorchParams) -> dict[str, torch.Tensor]:
@@ -18,38 +19,42 @@ def evaluate_log_model_with_derivatives_at_eval(model, x_eval_scaled: torch.Tens
 
     inputs = _make_model_inputs(x_eval_scaled, t_scaled)
     inputs.requires_grad_(True)
-    log_N_flat = model(inputs)
+    raw_flat = model(inputs)
 
     n_time = t_scaled.numel()
     n_eval = x_eval_scaled.numel()
     n_species = _n_species(params)
 
-    dlogN_dx_scaled_rows, dlogN_dt_scaled_rows = [], []
+    draw_dx_scaled_rows, draw_dt_scaled_rows = [], []
     for i in range(n_species):
         grad_i = torch.autograd.grad(
-            log_N_flat[:, i].sum(),
+            raw_flat[:, i].sum(),
             inputs,
             create_graph=True,
             retain_graph=True,
             allow_unused=False,
         )[0]
-        dlogN_dx_scaled_rows.append(grad_i[:, 0])
-        dlogN_dt_scaled_rows.append(grad_i[:, 1])
+        draw_dx_scaled_rows.append(grad_i[:, 0])
+        draw_dt_scaled_rows.append(grad_i[:, 1])
 
-    log_N = log_N_flat.reshape(n_time, n_eval, n_species).permute(0, 2, 1).contiguous()
-    N = torch.exp(log_N)
+    raw = raw_flat.reshape(n_time, n_eval, n_species).permute(0, 2, 1).contiguous()
+    rec = reconstruct_from_model_output(raw, params, w=w_eval)
+    log_N, N = rec["log_N"], rec["N"]
 
-    dlogN_dx_scaled = torch.stack(dlogN_dx_scaled_rows, dim=1).reshape(n_time, n_eval, n_species).permute(0, 2, 1).contiguous()
-    dlogN_dt_scaled = torch.stack(dlogN_dt_scaled_rows, dim=1).reshape(n_time, n_eval, n_species).permute(0, 2, 1).contiguous()
+    draw_dx_scaled = torch.stack(draw_dx_scaled_rows, dim=1).reshape(n_time, n_eval, n_species).permute(0, 2, 1).contiguous()
+    draw_dt_scaled = torch.stack(draw_dt_scaled_rows, dim=1).reshape(n_time, n_eval, n_species).permute(0, 2, 1).contiguous()
 
     x_min, x_max = _x_limits(params)
     t_min, t_max = _t_limits(params)
-    dlogN_dx = dlogN_dx_scaled / (x_max - x_min)
-    dlogN_dt = dlogN_dt_scaled / (t_max - t_min)
-    dlogN_dw = dlogN_dx / w_eval[None, None, :]
-    dN_dt = N * dlogN_dt
-    dN_dw = N * dlogN_dw
-    return {"log_N_eval": log_N, "N_eval": N, "dlogN_dt": dlogN_dt, "dlogN_dw": dlogN_dw, "dN_dt": dN_dt, "dN_dw": dN_dw}
+    draw_dx = draw_dx_scaled / (x_max - x_min)
+    draw_dt = draw_dt_scaled / (t_max - t_min)
+    draw_dw = draw_dx / w_eval[None, None, :]
+    dlogN_dt = draw_dt
+    dlogN_dw = draw_dw + rec.get("dlogS_dw", torch.zeros_like(draw_dw))
+    out = {"log_N_eval": log_N, "N_eval": N, "dlogN_dt": dlogN_dt, "dlogN_dw": dlogN_dw, "dN_dt": N * dlogN_dt, "dN_dw": N * dlogN_dw}
+    if state_parameterization(params) == "log-u":
+        out.update({"log_U_eval": rec["log_U"], "U_eval": rec["U"], "log_S_eval": rec["log_S"], "S_eval": rec["S"], "dlogU_dt": draw_dt, "dlogU_dw": draw_dw, "dU_dt": rec["U"] * draw_dt, "dU_dw": rec["U"] * draw_dw, "dlogS_dw": rec["dlogS_dw"]})
+    return out
 
 def evaluate_log_model_with_derivatives_at_pairs(
     model,
@@ -68,7 +73,7 @@ def evaluate_log_model_with_derivatives_at_pairs(
     inputs = torch.stack([x_scaled_pair, t_scaled_pair], dim=1)
     inputs.requires_grad_(True)
 
-    log_N_pair = model(inputs)
+    raw_pair = model(inputs)
 
     n_species = _n_species(params)
 
@@ -77,7 +82,7 @@ def evaluate_log_model_with_derivatives_at_pairs(
 
     for i in range(n_species):
         grad_i = torch.autograd.grad(
-            log_N_pair[:, i].sum(),
+            raw_pair[:, i].sum(),
             inputs,
             create_graph=True,
             retain_graph=True,
@@ -85,8 +90,9 @@ def evaluate_log_model_with_derivatives_at_pairs(
         dlogN_dx_scaled.append(grad_i[:, 0])
         dlogN_dt_scaled.append(grad_i[:, 1])
 
-    log_N = log_N_pair.T.contiguous()
-    N = torch.exp(log_N)
+    raw = raw_pair.T.contiguous()
+    rec = reconstruct_from_model_output(raw, params, w=w_pair)
+    log_N, N = rec["log_N"], rec["N"]
 
     dlogN_dx_scaled = torch.stack(dlogN_dx_scaled, dim=0)
     dlogN_dt_scaled = torch.stack(dlogN_dt_scaled, dim=0)
@@ -102,9 +108,10 @@ def evaluate_log_model_with_derivatives_at_pairs(
         "log_N_eval": log_N,
         "N_eval": N,
         "dlogN_dt": dlogN_dt,
-        "dlogN_dw": dlogN_dw,
+        "dlogN_dw": dlogN_dw + rec.get("dlogS_dw", torch.zeros_like(dlogN_dw)),
         "dN_dt": N * dlogN_dt,
-        "dN_dw": N * dlogN_dw,
+        "dN_dw": N * (dlogN_dw + rec.get("dlogS_dw", torch.zeros_like(dlogN_dw))),
+        **({"log_U_eval": rec["log_U"], "U_eval": rec["U"], "log_S_eval": rec["log_S"], "S_eval": rec["S"], "dlogU_dt": dlogN_dt, "dlogU_dw": dlogN_dw, "dU_dt": rec["U"] * dlogN_dt, "dU_dw": rec["U"] * dlogN_dw, "dlogS_dw": rec["dlogS_dw"]} if state_parameterization(params) == "log-u" else {}),
     }
 
 def evaluate_log_model_with_derivatives_at_slabs(
@@ -164,44 +171,45 @@ def evaluate_log_model_with_derivatives_at_slabs(
     )
     inputs.requires_grad_(True)
 
-    log_N_flat = model(inputs)
+    raw_flat = model(inputs)
 
-    if log_N_flat.shape != (k * m, n_species):
+    if raw_flat.shape != (k * m, n_species):
         raise ValueError(
-            f"Model returned {tuple(log_N_flat.shape)}, "
+            f"Model returned {tuple(raw_flat.shape)}, "
             f"expected {(k * m, n_species)}."
         )
 
-    dlogN_dx_scaled_rows = []
-    dlogN_dt_scaled_rows = []
+    draw_dx_scaled_rows = []
+    draw_dt_scaled_rows = []
 
     for i in range(n_species):
         grad_i = torch.autograd.grad(
-            log_N_flat[:, i].sum(),
+            raw_flat[:, i].sum(),
             inputs,
             create_graph=True,
             retain_graph=True,
             allow_unused=False,
         )[0]
-        dlogN_dx_scaled_rows.append(grad_i[:, 0])
-        dlogN_dt_scaled_rows.append(grad_i[:, 1])
+        draw_dx_scaled_rows.append(grad_i[:, 0])
+        draw_dt_scaled_rows.append(grad_i[:, 1])
 
-    log_N = (
-        log_N_flat
+    raw = (
+        raw_flat
         .reshape(k, m, n_species)
         .permute(0, 2, 1)
         .contiguous()
     )
-    N = torch.exp(log_N)
+    rec = reconstruct_from_model_output(raw, params, w=w_slab)
+    log_N, N = rec["log_N"], rec["N"]
 
     dlogN_dx_scaled = (
-        torch.stack(dlogN_dx_scaled_rows, dim=1)
+        torch.stack(draw_dx_scaled_rows, dim=1)
         .reshape(k, m, n_species)
         .permute(0, 2, 1)
         .contiguous()
     )
     dlogN_dt_scaled = (
-        torch.stack(dlogN_dt_scaled_rows, dim=1)
+        torch.stack(draw_dt_scaled_rows, dim=1)
         .reshape(k, m, n_species)
         .permute(0, 2, 1)
         .contiguous()
@@ -212,7 +220,8 @@ def evaluate_log_model_with_derivatives_at_slabs(
 
     dlogN_dx = dlogN_dx_scaled / (x_max - x_min)
     dlogN_dt = dlogN_dt_scaled / (t_max - t_min)
-    dlogN_dw = dlogN_dx / w_slab[:, None, :]
+    dlogU_dw_tmp = dlogN_dx / w_slab[:, None, :]
+    dlogN_dw = dlogU_dw_tmp + rec.get("dlogS_dw", torch.zeros_like(dlogU_dw_tmp))
 
     dN_dt = N * dlogN_dt
     dN_dw = N * dlogN_dw
@@ -224,4 +233,5 @@ def evaluate_log_model_with_derivatives_at_slabs(
         "dlogN_dw": dlogN_dw,
         "dN_dt": dN_dt,
         "dN_dw": dN_dw,
+        **({"log_U_eval": rec["log_U"], "U_eval": rec["U"], "log_S_eval": rec["log_S"], "S_eval": rec["S"], "dlogU_dt": dlogN_dt, "dlogU_dw": dlogU_dw_tmp, "dU_dt": rec["U"] * dlogN_dt, "dU_dw": rec["U"] * dlogU_dw_tmp, "dlogS_dw": rec["dlogS_dw"]} if state_parameterization(params) == "log-u" else {}),
     }

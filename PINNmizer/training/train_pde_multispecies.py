@@ -30,6 +30,7 @@ from PINNmizer.training.outputs_multispecies import (
     save_final_residual_sample_multispecies,
 )
 from PINNmizer.training.loop_multispecies import train_one_step_multispecies, total_grad_norm_and_check, scalar_min, scalar_max, scalar_mean
+from PINNmizer.pinn.state_scale import set_state_scale_from_initial_condition, DEFAULT_STATE_SCALE_EPS
 from PINNmizer.pinn.r3 import make_r3_population, CausalR3
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -81,6 +82,11 @@ def load_checkpoint_weights(
 
     if "model_state_dict" not in checkpoint:
         raise KeyError(f"Checkpoint has no 'model_state_dict': {checkpoint_path}")
+
+    checkpoint_param = (checkpoint.get("config") or {}).get("state_parameterization", "log-n")
+    requested_param = getattr(model, "state_parameterization", checkpoint_param)
+    if checkpoint_param != requested_param:
+        raise ValueError(f"Checkpoint state_parameterization={checkpoint_param!r} does not match requested {requested_param!r}.")
 
     model.load_state_dict(checkpoint["model_state_dict"])
 
@@ -141,6 +147,7 @@ def initialise_final_bias_from_ic(
     n_init: torch.Tensor,
     params,
     eps: float,
+    state_parameterization: str = "log-n",
 ) -> None:
     """
     Initialise the final layer bias so random predictions start near the
@@ -160,6 +167,8 @@ def initialise_final_bias_from_ic(
         n_init = n_init.reshape(1, -1)
 
     log_init = torch.log(torch.clamp(n_init, min=eps))
+    if state_parameterization == "log-u":
+        log_init = log_init - torch.log(torch.clamp(n_init, min=eps))
     mask = active_grid_mask(params).to(dtype=log_init.dtype, device=log_init.device)
     
     denom = mask.sum(dim=1)
@@ -210,7 +219,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rwf-base-init", choices=["pytorch", "xavier_uniform", "xavier_normal"], default="pytorch")
     parser.add_argument("--hidden-width", type=int, default=64)
     parser.add_argument("--hidden-layers", type=int, default=3)
-    parser.add_argument("--residual-form", choices=["log", "physical"], default="log")
+    parser.add_argument("--residual-form", choices=["log", "scaled", "physical"], default="log")
+    parser.add_argument("--state-parameterization", choices=["log-n", "log-u"], default="log-n")
+    parser.add_argument("--state-scale-eps", type=float, default=DEFAULT_STATE_SCALE_EPS)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--print-every", type=int, default=50)
     parser.add_argument("--checkpoint-every", type=int, default=250)
@@ -436,6 +447,9 @@ def main() -> None:
         device=args.device,
     )
 
+    params.state_parameterization = args.state_parameterization
+    set_state_scale_from_initial_condition(params, n_init, eps=args.state_scale_eps)
+
     diag_every = args.diag_every if args.diag_every > 0 else args.print_every
     diag_grad_every = args.diag_grad_every if args.diag_grad_every > 0 else diag_every
     
@@ -504,6 +518,7 @@ def main() -> None:
         rwf_apply_to=args.rwf_apply_to,
         rwf_base_init=args.rwf_base_init,
     ).to(dtype=torch.float64, device=params.w.device)
+    model.state_parameterization = args.state_parameterization
     
     if args.init_final_bias_from_ic:
         initialise_final_bias_from_ic(
@@ -572,6 +587,10 @@ def main() -> None:
         "expert_weight_max": args.weight_max if args.expert_weight_max is None else args.expert_weight_max,
         "expert_weight_batch": args.expert_weight_batch,
         "residual_form": args.residual_form,
+        "state_parameterization": args.state_parameterization,
+        "state_scale_source": "initial_condition",
+        "state_scale_eps": args.state_scale_eps,
+        "state_scale_interpolation": "linear_log_weight",
         "learning_rate": args.lr,
         "initial_lr": args.lr,
         "model_arch": args.model_arch,

@@ -139,12 +139,16 @@ def save_final_predictions(*, run_dir: Path, model: nn.Module, params, n_times: 
         out = evaluate_log_model_on_points(model=model, x_scaled=x_scaled, t_scaled=t_scaled, params=params)
     log_N = out["log_N"][:, 0, :].detach().cpu()
     N = out["N"][:, 0, :].detach().cpu()
+    log_U = out.get("log_U", torch.zeros_like(out["log_N"]))[:, 0, :].detach().cpu()
+    U = out.get("U", torch.ones_like(out["N"]))[:, 0, :].detach().cpu()
+    log_S = out.get("log_S", torch.zeros_like(out["log_N"]))[:, 0, :].detach().cpu()
+    S = out.get("S", torch.ones_like(out["N"]))[:, 0, :].detach().cpu()
     tt = t_grid.detach().cpu()[:, None].expand(-1, params.w.numel())
     ww = params.w.detach().cpu()[None, :].expand(n_times, -1)
     xx = x_grid.detach().cpu()[None, :].expand(n_times, -1)
     xs = x_scaled.detach().cpu()[None, :].expand(n_times, -1)
     ts = t_scaled.detach().cpu()[:, None].expand(-1, params.w.numel())
-    pd.DataFrame({"t": tt.reshape(-1).numpy(), "w": ww.reshape(-1).numpy(), "x": xx.reshape(-1).numpy(), "x_scaled": xs.reshape(-1).numpy(), "t_scaled": ts.reshape(-1).numpy(), "log_N": log_N.reshape(-1).numpy(), "N": N.reshape(-1).numpy()}).to_csv(run_dir / "final_predictions_grid.csv", index=False)
+    pd.DataFrame({"t": tt.reshape(-1).numpy(), "w": ww.reshape(-1).numpy(), "x": xx.reshape(-1).numpy(), "x_scaled": xs.reshape(-1).numpy(), "t_scaled": ts.reshape(-1).numpy(), "log_N": log_N.reshape(-1).numpy(), "N": N.reshape(-1).numpy(), "log_U": log_U.reshape(-1).numpy(), "U": U.reshape(-1).numpy(), "log_S": log_S.reshape(-1).numpy(), "S": S.reshape(-1).numpy()}).to_csv(run_dir / "final_predictions_grid.csv", index=False)
 
 
 def save_final_residual_sample(*, run_dir: Path, model: nn.Module, params, n_pp: torch.Tensor, n_time: int, n_eval: int) -> None:
@@ -155,4 +159,4 @@ def save_final_residual_sample(*, run_dir: Path, model: nn.Module, params, n_pp:
     ww = batch["w_eval"].detach().cpu()[None, :].expand(n_time, n_eval)
     def flat(name: str):
         return out[name][:, 0, :].detach().cpu().reshape(-1).numpy()
-    pd.DataFrame({"t_eval": tt.reshape(-1).numpy(), "w_eval": ww.reshape(-1).numpy(), "residual_log": flat("residual_log"), "residual": flat("residual"), "log_N_eval": flat("log_N_eval"), "N_eval": flat("N_eval"), "g_eval": flat("g_eval"), "dg_dw": flat("dg_dw"), "mu_eval": flat("mu_eval")}).to_csv(run_dir / "final_residual_sample.csv", index=False)
+    pd.DataFrame({"t_eval": tt.reshape(-1).numpy(), "w_eval": ww.reshape(-1).numpy(), "residual_log": flat("residual_log"), "residual": flat("residual"), "residual_scaled": flat("residual_scaled"), "log_N_eval": flat("log_N_eval"), "N_eval": flat("N_eval"), "g_eval": flat("g_eval"), "dg_dw": flat("dg_dw"), "mu_eval": flat("mu_eval")}).to_csv(run_dir / "final_residual_sample.csv", index=False)
