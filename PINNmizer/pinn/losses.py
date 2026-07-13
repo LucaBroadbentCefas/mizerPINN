@@ -46,15 +46,41 @@ def _fraction_leq(x: torch.Tensor, threshold: torch.Tensor) -> torch.Tensor: ret
 def _abs_quantile(x: torch.Tensor, q: float) -> torch.Tensor: return torch.quantile(torch.abs(x.detach()).reshape(-1), q)
 def _fraction_true(mask: torch.Tensor, *, like: torch.Tensor) -> torch.Tensor:
     return mask.detach().to(dtype=like.dtype, device=like.device).mean()
-def _masked_square_mean(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    mask = mask.to(dtype=x.dtype, device=x.device)
-    mask = mask.expand_as(x)
+def _pointwise_penalty(
+    residual: torch.Tensor,
+    *,
+    penalty: str,
+    delta: float,
+) -> torch.Tensor:
+    if penalty == "squared":
+        return residual.square()
+    if penalty == "pseudo-huber":
+        if delta <= 0.0:
+            raise ValueError("pseudo-Huber delta must be strictly positive.")
+        delta_t = torch.as_tensor(delta, dtype=residual.dtype, device=residual.device)
+        return delta_t.square() * (torch.sqrt(1.0 + (residual / delta_t).square()) - 1.0)
+    raise ValueError("penalty must be 'squared' or 'pseudo-huber'.")
+
+
+def _masked_penalty_mean(
+    residual: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    penalty: str = "squared",
+    delta: float = 1.0,
+) -> torch.Tensor:
+    mask = mask.to(dtype=residual.dtype, device=residual.device)
+    mask = mask.expand_as(residual)
 
     denom = mask.sum()
     if not bool((denom > 0).detach().cpu()):
         raise ValueError("Masked loss has zero active entries.")
 
-    return ((x ** 2) * mask).sum() / denom
+    return (_pointwise_penalty(residual, penalty=penalty, delta=delta) * mask).sum() / denom
+
+
+def _masked_square_mean(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    return _masked_penalty_mean(x, mask, penalty="squared", delta=1.0)
 
 
 def compute_expert_causal_pde_loss(
@@ -64,6 +90,8 @@ def compute_expert_causal_pde_loss(
     t_chunk_idx: torch.Tensor,
     n_chunks: int,
     epsilon: float,
+    pde_penalty: str = "squared",
+    pde_pseudo_huber_delta: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute expert-guide causal temporal weighting for PDE residuals."""
     if residual.ndim < 1:
@@ -79,7 +107,11 @@ def compute_expert_causal_pde_loss(
         )
 
     mask = active_mask.to(dtype=residual.dtype, device=residual.device).expand_as(residual)
-    sq = residual ** 2
+    pointwise = _pointwise_penalty(
+        residual,
+        penalty=pde_penalty,
+        delta=pde_pseudo_huber_delta,
+    )
     chunk_losses = []
     for i in range(n_chunks):
         time_mask = t_chunk_idx == i
@@ -89,7 +121,7 @@ def compute_expert_causal_pde_loss(
         denom = chunk_mask.sum()
         if not bool((denom > 0).detach().cpu()):
             raise ValueError(f"Expert causal PDE loss chunk {i} has zero active residual entries.")
-        chunk_losses.append((sq[time_mask] * chunk_mask).sum() / denom)
+        chunk_losses.append((pointwise[time_mask] * chunk_mask).sum() / denom)
 
     chunk_losses_t = torch.stack(chunk_losses)
     previous_cumulative = torch.cat([
@@ -98,7 +130,12 @@ def compute_expert_causal_pde_loss(
     ])
     causal_weights = torch.exp(-float(epsilon) * previous_cumulative).detach()
     loss_pde = (causal_weights * chunk_losses_t).mean()
-    loss_ungated = _masked_square_mean(residual, active_mask)
+    loss_ungated = _masked_penalty_mean(
+        residual,
+        active_mask,
+        penalty=pde_penalty,
+        delta=pde_pseudo_huber_delta,
+    )
 
     diagnostics = {
         "loss_pde_ungated": loss_ungated,
@@ -178,6 +215,8 @@ def compute_recruitment_boundary_loss_from_state(
     bc_g_min: float = 1e-12,
     use_constant_recruitment_r: bool = False,
     constant_recruitment_r: float | None = None,
+    bc_penalty: str = "squared",
+    bc_pseudo_huber_delta: float = 1.0,
 ) -> dict[str, torch.Tensor]:
     """
     Recruitment boundary condition.
@@ -290,7 +329,11 @@ def compute_recruitment_boundary_loss_from_state(
                (N_left[valid_mask]  * g_left[valid_mask]) / recruitment_flux[valid_mask]
             ) 
 
-        loss_bc = (residual_valid ** 2).mean()
+        loss_bc = _pointwise_penalty(
+            residual_valid,
+            penalty=bc_penalty,
+            delta=bc_pseudo_huber_delta,
+        ).mean()
 
         boundary_residual = torch.full_like(log_N_left.detach(), float("nan"))
         boundary_residual[valid_mask.detach()] = residual_valid.detach()
@@ -368,7 +411,7 @@ def compute_recruitment_boundary_loss_from_state(
         ),
     }
 
-def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchParams, n_pp: torch.Tensor, residual_form: str = "log", *, n_init: torch.Tensor | None = None, lambda_pde: float = 1.0, lambda_ic: float = 0.0, lambda_bc: float = 0.0, boundary_loss_form: str = "log", species_idx: int | None = None, eps: float = 1e-30, bc_eps: float | None = None, bc_g_min: float = 1e-12, use_constant_recruitment_r: bool = False, constant_recruitment_r: float | None = None, causal_loss: str = "off", causal_n_chunks: int = 32, causal_epsilon: float = 1.0,) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchParams, n_pp: torch.Tensor, residual_form: str = "log", *, n_init: torch.Tensor | None = None, lambda_pde: float = 1.0, lambda_ic: float = 0.0, lambda_bc: float = 0.0, boundary_loss_form: str = "log", species_idx: int | None = None, eps: float = 1e-30, bc_eps: float | None = None, bc_g_min: float = 1e-12, use_constant_recruitment_r: bool = False, constant_recruitment_r: float | None = None, causal_loss: str = "off", causal_n_chunks: int = 32, causal_epsilon: float = 1.0, pde_penalty: str = "squared", pde_pseudo_huber_delta: float = 1.0, bc_penalty: str = "squared", bc_pseudo_huber_delta: float = 1.0,) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     include_ic = lambda_ic != 0.0
     state = compute_pde_state(model=model, batch=batch, params=params, n_pp=n_pp, include_ic=include_ic)
     residual_out = compute_pde_residual_from_state(state)
@@ -379,7 +422,12 @@ def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchPa
     pde_mask = active_eval_mask(batch["w_eval"], params)[None, :, :]
     causal_out = {}
     if causal_loss == "off":
-        loss_pde = _masked_square_mean(residual, pde_mask)
+        loss_pde = _masked_penalty_mean(
+            residual,
+            pde_mask,
+            penalty=pde_penalty,
+            delta=pde_pseudo_huber_delta,
+        )
     elif causal_loss == "expert":
         if "t_chunk_idx" not in batch:
             raise ValueError("causal_loss='expert' requires batch['t_chunk_idx']; use time_sampling='stratified'.")
@@ -389,6 +437,8 @@ def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchPa
             t_chunk_idx=batch["t_chunk_idx"],
             n_chunks=causal_n_chunks,
             epsilon=causal_epsilon,
+            pde_penalty=pde_penalty,
+            pde_pseudo_huber_delta=pde_pseudo_huber_delta,
         )
     else:
         raise ValueError("causal_loss must be 'off' or 'expert'.")
@@ -411,6 +461,8 @@ def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchPa
             bc_g_min=bc_g_min,
             use_constant_recruitment_r=use_constant_recruitment_r,
             constant_recruitment_r=constant_recruitment_r,
+            bc_penalty=bc_penalty,
+            bc_pseudo_huber_delta=bc_pseudo_huber_delta,
         )
         loss_bc = bc_out["loss_bc"]
     else:
@@ -438,6 +490,10 @@ def compute_pde_loss_paired(
     pde_weights: torch.Tensor | None = None,
     use_constant_recruitment_r: bool = False,
     constant_recruitment_r: float | None = None,
+    pde_penalty: str = "squared",
+    pde_pseudo_huber_delta: float = 1.0,
+    bc_penalty: str = "squared",
+    bc_pseudo_huber_delta: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     include_ic = lambda_ic != 0.0
 
@@ -477,7 +533,11 @@ def compute_pde_loss_paired(
     if not bool((denom > 0).detach().cpu()):
         raise ValueError("Paired PDE loss has zero active entries.")
 
-    loss_pde = ((residual ** 2) * weighted_mask).sum() / denom
+    loss_pde = (_pointwise_penalty(
+        residual,
+        penalty=pde_penalty,
+        delta=pde_pseudo_huber_delta,
+    ) * weighted_mask).sum() / denom
 
     dtype, device = _params_dtype_device(params)
     zero = torch.zeros((), dtype=dtype, device=device)
@@ -507,6 +567,8 @@ def compute_pde_loss_paired(
             bc_g_min=bc_g_min,
             use_constant_recruitment_r=use_constant_recruitment_r,
             constant_recruitment_r=constant_recruitment_r,
+            bc_penalty=bc_penalty,
+            bc_pseudo_huber_delta=bc_pseudo_huber_delta,
         )
         loss_bc = bc_out["loss_bc"]
     else:
@@ -549,6 +611,10 @@ def compute_pde_loss_r3_slabbed(
     causal_loss: str = "off",
     causal_n_chunks: int = 32,
     causal_epsilon: float = 1.0,
+    pde_penalty: str = "squared",
+    pde_pseudo_huber_delta: float = 1.0,
+    bc_penalty: str = "squared",
+    bc_pseudo_huber_delta: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     if causal_loss != "off":
         raise ValueError(
@@ -599,7 +665,12 @@ def compute_pde_loss_r3_slabbed(
     if not bool((denom > 0).detach().cpu()):
         raise ValueError("Slabbed R3 PDE loss has zero active entries.")
     
-    loss_pde_ungated = ((residual ** 2) * mask).sum() / denom
+    pointwise_pde = _pointwise_penalty(
+        residual,
+        penalty=pde_penalty,
+        delta=pde_pseudo_huber_delta,
+    )
+    loss_pde_ungated = (pointwise_pde * mask).sum() / denom
     
     if pde_weights is None:
         loss_pde = loss_pde_ungated
@@ -616,7 +687,7 @@ def compute_pde_loss_r3_slabbed(
             )
     
         weighted_mask = mask * pde_weights[:, None, None]
-        loss_pde = ((residual ** 2) * weighted_mask).sum() / denom
+        loss_pde = (pointwise_pde * weighted_mask).sum() / denom
     
         pde_gate_mean = pde_weights.detach().mean()
         pde_gate_min = pde_weights.detach().min()
@@ -650,6 +721,8 @@ def compute_pde_loss_r3_slabbed(
             bc_g_min=bc_g_min,
             use_constant_recruitment_r=use_constant_recruitment_r,
             constant_recruitment_r=constant_recruitment_r,
+            bc_penalty=bc_penalty,
+            bc_pseudo_huber_delta=bc_pseudo_huber_delta,
         )
         loss_bc = bc_out["loss_bc"]
     else:
