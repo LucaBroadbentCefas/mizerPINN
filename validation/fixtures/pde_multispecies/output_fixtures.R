@@ -31,6 +31,7 @@ survey_gears <- data.frame(
 gear_params(NS_params) <- rbind(gears, survey_gears)
 effort <- initial_effort(NS_params)
 effort[5] <- 0.02
+initial_effort(NS_params) <- effort
 
 sim <- project(NS_params, t_max = 40, t_save = 0.1, effort  = effort)
 
@@ -99,7 +100,7 @@ make_observation_data <- function(sim, survey_gear_name = "survey") {
 
 write.csv(
   observation_data,
-  "observation_data_python.csv",
+  "observations.csv",
   row.names = FALSE
 )
 
@@ -107,4 +108,4 @@ observation_data <- make_observation_data(
   sim = sim
 )
 
-export_mizer_inputs_for_python(NS_params,outdir = "validation/fixtures/pde_multispecies")
+export_mizer_inputs_for_python(NS_params,  outdir = "validation/fixtures/pde_multispecies")

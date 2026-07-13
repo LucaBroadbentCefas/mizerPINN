@@ -636,6 +636,7 @@ def main() -> None:
             n_init=n_init,
             params=params,
             eps=args.loss_eps,
+            state_parameterization=args.state_parameterization,
         )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
