@@ -220,6 +220,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-width", type=int, default=64)
     parser.add_argument("--hidden-layers", type=int, default=3)
     parser.add_argument("--residual-form", choices=["log", "scaled", "physical"], default="log")
+    parser.add_argument("--pde-penalty", choices=["squared", "pseudo-huber"], default="squared")
+    parser.add_argument("--pde-pseudo-huber-delta", type=float, default=1.0)
     parser.add_argument("--state-parameterization", choices=["log-n", "log-u"], default="log-n")
     parser.add_argument("--state-scale-eps", type=float, default=DEFAULT_STATE_SCALE_EPS)
     parser.add_argument("--device", default="cpu")
@@ -264,6 +266,8 @@ def parse_args() -> argparse.Namespace:
         choices=["log", "physical", "relative"],
         default="log",
     )
+    parser.add_argument("--bc-penalty", choices=["squared", "pseudo-huber"], default="squared")
+    parser.add_argument("--bc-pseudo-huber-delta", type=float, default=1.0)
     
     parser.add_argument("--loss-eps", type=float, default=1e-30)
     
@@ -429,6 +433,10 @@ def save_data_predictions_final(*, run_dir: Path, model: nn.Module, params, obse
 
 def main() -> None:
     args = parse_args()
+    if args.pde_penalty == "pseudo-huber" and args.pde_pseudo_huber_delta <= 0.0:
+        raise ValueError("--pde-pseudo-huber-delta must be strictly positive when --pde-penalty=pseudo-huber.")
+    if args.bc_penalty == "pseudo-huber" and args.bc_pseudo_huber_delta <= 0.0:
+        raise ValueError("--bc-pseudo-huber-delta must be strictly positive when --bc-penalty=pseudo-huber.")
 
     if args.causal_loss == "expert" and args.time_sampling != "stratified":
         raise ValueError("--causal-loss expert requires --time-sampling stratified.")
@@ -588,6 +596,10 @@ def main() -> None:
         "expert_weight_max": args.weight_max if args.expert_weight_max is None else args.expert_weight_max,
         "expert_weight_batch": args.expert_weight_batch,
         "residual_form": args.residual_form,
+        "pde_penalty": args.pde_penalty,
+        "pde_pseudo_huber_delta": args.pde_pseudo_huber_delta,
+        "bc_penalty": args.bc_penalty,
+        "bc_pseudo_huber_delta": args.bc_pseudo_huber_delta,
         "state_parameterization": args.state_parameterization,
         "state_scale_source": "initial_condition",
         "state_scale_eps": args.state_scale_eps,
@@ -747,6 +759,10 @@ def main() -> None:
                 weight_min=args.weight_min,
                 weight_max=args.weight_max,  
                 boundary_loss_form=args.boundary_loss_form,
+                pde_penalty=args.pde_penalty,
+                pde_pseudo_huber_delta=args.pde_pseudo_huber_delta,
+                bc_penalty=args.bc_penalty,
+                bc_pseudo_huber_delta=args.bc_pseudo_huber_delta,
                 eps=args.loss_eps,
                 bc_eps=args.bc_eps,
                 bc_g_min=args.bc_g_min,                

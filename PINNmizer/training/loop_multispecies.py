@@ -54,7 +54,11 @@ def train_one_step_multispecies(
     n_eval: int,
     residual_form: str,
     boundary_loss_form: str,
-    eps: float,
+    pde_penalty: str = "squared",
+    pde_pseudo_huber_delta: float = 1.0,
+    bc_penalty: str = "squared",
+    bc_pseudo_huber_delta: float = 1.0,
+    eps: float = 1e-30,
     bc_eps: float | None,
     bc_g_min: float,
     bc_use_constant_r: bool = False,
@@ -148,6 +152,10 @@ def train_one_step_multispecies(
             causal_loss=causal_loss,
             causal_n_chunks=causal_n_chunks,
             causal_epsilon=causal_epsilon,
+            pde_penalty=pde_penalty,
+            pde_pseudo_huber_delta=pde_pseudo_huber_delta,
+            bc_penalty=bc_penalty,
+            bc_pseudo_huber_delta=bc_pseudo_huber_delta,
         )
 
     elif collocation_strategy in {"r3", "causal-r3"}:
@@ -188,6 +196,10 @@ def train_one_step_multispecies(
             causal_loss=causal_loss,
             causal_n_chunks=causal_n_chunks,
             causal_epsilon=causal_epsilon,
+            pde_penalty=pde_penalty,
+            pde_pseudo_huber_delta=pde_pseudo_huber_delta,
+            bc_penalty=bc_penalty,
+            bc_pseudo_huber_delta=bc_pseudo_huber_delta,
         )
 
     else:
@@ -378,6 +390,10 @@ def train_one_step_multispecies(
                 causal_loss=causal_loss,
                 causal_n_chunks=causal_n_chunks,
                 causal_epsilon=causal_epsilon,
+                pde_penalty=pde_penalty,
+                pde_pseudo_huber_delta=pde_pseudo_huber_delta,
+                bc_penalty=bc_penalty,
+                bc_pseudo_huber_delta=bc_pseudo_huber_delta,
             )
             calibration_loss_pde_for_weighting = calibration_out["loss_pde"] if loss_weighting == "expert-grad-norm" else calibration_out.get(
                 "loss_pde_ungated",
@@ -528,6 +544,10 @@ def train_one_step_multispecies(
         "loss": float(out["loss"].detach().cpu()),
         "lr": lr,
         "loss_pde": float(out["loss_pde"].detach().cpu()),
+        "pde_penalty": pde_penalty,
+        "pde_pseudo_huber_delta": float(pde_pseudo_huber_delta),
+        "bc_penalty": bc_penalty,
+        "bc_pseudo_huber_delta": float(bc_pseudo_huber_delta),
         "loss_ic": float(out["loss_ic"].detach().cpu()),
         "loss_bc": float(out["loss_bc"].detach().cpu()),
         "loss_data": float(out["loss_data"].detach().cpu()),
