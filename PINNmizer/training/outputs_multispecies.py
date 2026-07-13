@@ -34,6 +34,10 @@ def save_final_predictions_multispecies(*, run_dir: Path, model: nn.Module, para
 
     log_N = out["log_N"].detach().cpu()
     N = out["N"].detach().cpu()
+    log_U = out.get("log_U", torch.zeros_like(out["log_N"])).detach().cpu()
+    U = out.get("U", torch.ones_like(out["N"])).detach().cpu()
+    log_S = out.get("log_S", torch.zeros_like(out["log_N"])).detach().cpu()
+    S = out.get("S", torch.ones_like(out["N"])).detach().cpu()
     n_species = log_N.shape[1]
     n_w = params.w.numel()
 
@@ -54,6 +58,10 @@ def save_final_predictions_multispecies(*, run_dir: Path, model: nn.Module, para
             "t_scaled": ts.reshape(-1).numpy(),
             "log_N": log_N[:, s, :].reshape(-1).numpy(),
             "N": N[:, s, :].reshape(-1).numpy(),
+            "log_U": log_U[:, s, :].reshape(-1).numpy(),
+            "U": U[:, s, :].reshape(-1).numpy(),
+            "log_S": log_S[:, s, :].reshape(-1).numpy(),
+            "S": S[:, s, :].reshape(-1).numpy(),
         }))
     pd.concat(rows, ignore_index=True).to_csv(run_dir / "final_predictions_grid.csv", index=False)
 
@@ -77,6 +85,7 @@ def save_final_residual_sample_multispecies(*, run_dir: Path, model: nn.Module, 
             "w_eval": ww.reshape(-1).numpy(),
             "residual_log": flat("residual_log"),
             "residual": flat("residual"),
+            "residual_scaled": flat("residual_scaled"),
             "log_N_eval": flat("log_N_eval"),
             "N_eval": flat("N_eval"),
             "g_eval": flat("g_eval"),

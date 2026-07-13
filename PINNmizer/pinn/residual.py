@@ -27,8 +27,10 @@ def compute_pde_residual_from_state(state: dict[str, object]) -> dict[str, torch
     g_eval, dg_dw, mu_eval = growth["e_growth_eval"], growth["dg_dw"], mortality["mu_eval"]
     residual_log = dlogN_dt + g_eval * dlogN_dw + mu_eval + dg_dw
     residual = N_eval * residual_log
+    S_eval = eval_derivs.get("S_eval", torch.ones_like(N_eval))
+    residual_scaled = residual / S_eval
     residual_physical_check = dN_dt + g_eval * dN_dw + (mu_eval + dg_dw) * N_eval
-    out = {"residual": residual, "residual_log": residual_log, "residual_physical_check": residual_physical_check, "log_N_eval": log_N_eval, "log_N_grid": state["log_N_grid"], "N_eval": N_eval, "N_grid": state["N_grid"], "dlogN_dt": dlogN_dt, "dlogN_dw": dlogN_dw, "dN_dt": dN_dt, "dN_dw": dN_dw, "g_eval": g_eval, "dg_dw": dg_dw, "mu_eval": mu_eval}
+    out = {"residual": residual, "residual_log": residual_log, "residual_physical_check": residual_physical_check, "residual_scaled": residual_scaled, "log_N_eval": log_N_eval, "log_N_grid": state["log_N_grid"], "N_eval": N_eval, "N_grid": state["N_grid"], "dlogN_dt": dlogN_dt, "dlogN_dw": dlogN_dw, "dN_dt": dN_dt, "dN_dw": dN_dw, "g_eval": g_eval, "dg_dw": dg_dw, "mu_eval": mu_eval}
     out.update({f"growth_eval_{k}": v for k, v in growth.items()})
     out.update({f"growth_grid_{k}": v for k, v in state["growth_grid"].items()})
     out.update({f"mortality_{k}": v for k, v in mortality.items()})

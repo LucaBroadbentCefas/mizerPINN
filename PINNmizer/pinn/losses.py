@@ -16,6 +16,7 @@ from PINNmizer.pinn.pde_state import (
     compute_pde_state_r3_slabbed,
 )
 from PINNmizer.pinn.residual import compute_pde_residual_from_state
+from PINNmizer.pinn.state_scale import grid_state_scale, state_parameterization
 
 
 def _as_species_w_matrix(x: torch.Tensor, *, n_species: int, n_w: int, name: str) -> torch.Tensor:
@@ -140,6 +141,8 @@ def compute_initial_condition_loss_from_state(state: dict[str, object], params: 
     n_init = _as_species_w_matrix(torch.as_tensor(n_init, dtype=dtype, device=device), n_species=n_species, n_w=n_w, name="n_init")
     log_N_pred, N_pred = state["log_N_ic"][0], state["N_ic"][0]
     log_N_target = torch.log(torch.clamp(n_init, min=eps))
+    log_S_target, S_target = grid_state_scale(params)
+    log_U_target = log_N_target - log_S_target
     if species_idx is not None:
         log_N_pred = log_N_pred[species_idx: species_idx + 1]
         N_pred = N_pred[species_idx: species_idx + 1]
@@ -150,8 +153,20 @@ def compute_initial_condition_loss_from_state(state: dict[str, object], params: 
     if species_idx is not None:
        ic_mask = ic_mask[species_idx: species_idx + 1]
 
-    loss_ic = _masked_square_mean(log_N_pred - log_N_target, ic_mask)
-    return {"loss_ic": loss_ic, "log_N_ic_pred": log_N_pred, "N_ic_pred": N_pred, "log_N_ic_target": log_N_target, "N_ic_target": n_init}
+    if state_parameterization(params) == "log-u":
+        log_state_pred = state.get("log_U_ic", state.get("log_U_grid"))[0]
+        U_pred = state.get("U_ic", state.get("U_grid"))[0]
+        if species_idx is not None:
+            log_state_pred = log_state_pred[species_idx: species_idx + 1]
+            U_pred = U_pred[species_idx: species_idx + 1]
+            log_U_target = log_U_target[species_idx: species_idx + 1]
+            S_target = S_target[species_idx: species_idx + 1]
+        loss_ic = _masked_square_mean(log_state_pred - log_U_target, ic_mask)
+    else:
+        log_state_pred = log_N_pred
+        U_pred = torch.ones_like(N_pred)
+        loss_ic = _masked_square_mean(log_N_pred - log_N_target, ic_mask)
+    return {"loss_ic": loss_ic, "log_N_ic_pred": log_N_pred, "N_ic_pred": N_pred, "log_N_ic_target": log_N_target, "N_ic_target": n_init, "log_U_ic_pred": log_state_pred, "U_ic_pred": U_pred, "log_U_ic_target": log_U_target, "U_ic_target": torch.exp(log_U_target)}
 
 def compute_recruitment_boundary_loss_from_state(
     state: dict[str, object],
@@ -359,7 +374,8 @@ def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchPa
     residual_out = compute_pde_residual_from_state(state)
     if residual_form == "log": residual = residual_out["residual_log"]
     elif residual_form == "physical": residual = residual_out["residual"]
-    else: raise ValueError("residual_form must be either 'log' or 'physical'.")
+    elif residual_form == "scaled": residual = residual_out["residual_scaled"]
+    else: raise ValueError("residual_form must be either 'log', 'scaled' or 'physical'.")
     pde_mask = active_eval_mask(batch["w_eval"], params)[None, :, :]
     causal_out = {}
     if causal_loss == "off":
@@ -439,8 +455,10 @@ def compute_pde_loss_paired(
         residual = residual_out["residual_log"]
     elif residual_form == "physical":
         residual = residual_out["residual"]
+    elif residual_form == "scaled":
+        residual = residual_out["residual_scaled"]
     else:
-        raise ValueError("residual_form must be 'log' or 'physical'.")
+        raise ValueError("residual_form must be 'log', 'scaled' or 'physical'.")
 
     mask = active_eval_mask(batch["w_pair"], params).to(
         dtype=residual.dtype,
@@ -554,8 +572,10 @@ def compute_pde_loss_r3_slabbed(
         residual = residual_out["residual_log"]
     elif residual_form == "physical":
         residual = residual_out["residual"]
+    elif residual_form == "scaled":
+        residual = residual_out["residual_scaled"]
     else:
-        raise ValueError("residual_form must be 'log' or 'physical'.")
+        raise ValueError("residual_form must be 'log', 'scaled' or 'physical'.")
 
     if residual.ndim != 3:
         raise ValueError(
