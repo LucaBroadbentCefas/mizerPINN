@@ -53,16 +53,28 @@ HPC_HISTORY_COLUMNS = [
     "loss_ic",
     "loss_bc",
     "loss_timestep",
+    "loss_data",
     "loss_pde_ungated",
     "loss_pde_gated",
     "objective_loss_pde",
     "objective_loss_ic",
     "objective_loss_bc",
     "objective_loss_timestep",
+    "objective_loss_data",
+    "weighted_loss_data",
     "w_pde",
     "w_ic",
     "w_bc",
     "w_timestep",
+    "w_data",
+    "wang_scaled_loss_data",
+    "n_data_obs",
+    "data_pred_min",
+    "data_pred_max",
+    "data_obs_min",
+    "data_obs_max",
+    "data_log_residual_abs_mean",
+    "data_log_residual_abs_max",
     "grad_norm",
     "causal_fraction",
     "t_max_current",
@@ -144,4 +156,3 @@ def save_final_residual_sample(*, run_dir: Path, model: nn.Module, params, n_pp:
     def flat(name: str):
         return out[name][:, 0, :].detach().cpu().reshape(-1).numpy()
     pd.DataFrame({"t_eval": tt.reshape(-1).numpy(), "w_eval": ww.reshape(-1).numpy(), "residual_log": flat("residual_log"), "residual": flat("residual"), "log_N_eval": flat("log_N_eval"), "N_eval": flat("N_eval"), "g_eval": flat("g_eval"), "dg_dw": flat("dg_dw"), "mu_eval": flat("mu_eval")}).to_csv(run_dir / "final_residual_sample.csv", index=False)
-
