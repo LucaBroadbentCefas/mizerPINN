@@ -14,6 +14,7 @@ def load_mat(root: Path, name: str, dtype, device) -> torch.Tensor:
 def load_vec(root: Path, name: str, dtype, device) -> torch.Tensor:
     return load_mat(root, name, dtype, device).reshape(-1)
 
+
 def load_complex_mat(root: Path, name: str, dtype, device) -> torch.Tensor:
     real = load_mat(root, f"{name}_real", dtype, device)
     imag = load_mat(root, f"{name}_imag", dtype, device)
@@ -42,12 +43,23 @@ def maybe_selectivity(root: Path, dtype, device, catchability, n_w: int):
         return raw
     if catchability is None:
         return raw
+
     n_gear, n_species = catchability.shape
-    if raw.shape == (n_gear * n_species, n_w):
-        return raw.reshape(n_gear, n_species, n_w)
-    if raw.shape == (n_species * n_gear, n_w):
-        return raw.reshape(n_gear, n_species, n_w)
-    return raw
+    expected_shape = (n_species * n_gear, n_w)
+    if raw.shape == expected_shape:
+        # The CSV exporter writes rows in [species, gear] order. Convert that
+        # flattened layout to the internal [gear, species, weight] convention.
+        return (
+            raw.reshape(n_species, n_gear, n_w)
+            .permute(1, 0, 2)
+            .contiguous()
+        )
+
+    raise ValueError(
+        "Unexpected selectivity shape: "
+        f"{tuple(raw.shape)}. Expected {expected_shape} for "
+        "[species * gear, weight] export order."
+    )
 
 
 def load_mizer_inputs(
