@@ -89,6 +89,13 @@ class MizerTorchParams:
     state_scale_source: str = "initial_condition"
     state_scale_interpolation: str = "linear_log_weight"
 
+    # fixed reference scale used only to normalize PDE residuals
+    residual_scale_log: Optional[torch.Tensor] = None
+    residual_scale_floor_fraction: float = 1e-12
+    residual_scale_source: str = "initial_condition"
+    residual_scale_interpolation: str = "linear_log_weight"
+    residual_scale_extrapolation: str = "constant_last_active"
+
 def fish_start(params: MizerTorchParams) -> int:
     return params.w_full.numel() - params.w.numel()
 
