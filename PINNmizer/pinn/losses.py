@@ -414,11 +414,12 @@ def compute_recruitment_boundary_loss_from_state(
 def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchParams, n_pp: torch.Tensor, residual_form: str = "log", *, n_init: torch.Tensor | None = None, lambda_pde: float = 1.0, lambda_ic: float = 0.0, lambda_bc: float = 0.0, boundary_loss_form: str = "log", species_idx: int | None = None, eps: float = 1e-30, bc_eps: float | None = None, bc_g_min: float = 1e-12, use_constant_recruitment_r: bool = False, constant_recruitment_r: float | None = None, causal_loss: str = "off", causal_n_chunks: int = 32, causal_epsilon: float = 1.0, pde_penalty: str = "squared", pde_pseudo_huber_delta: float = 1.0, bc_penalty: str = "squared", bc_pseudo_huber_delta: float = 1.0,) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     include_ic = lambda_ic != 0.0
     state = compute_pde_state(model=model, batch=batch, params=params, n_pp=n_pp, include_ic=include_ic)
-    residual_out = compute_pde_residual_from_state(state)
+    residual_out = compute_pde_residual_from_state(state, params)
     if residual_form == "log": residual = residual_out["residual_log"]
     elif residual_form == "physical": residual = residual_out["residual"]
     elif residual_form == "scaled": residual = residual_out["residual_scaled"]
-    else: raise ValueError("residual_form must be either 'log', 'scaled' or 'physical'.")
+    elif residual_form == "reference-scaled": residual = residual_out["residual_reference_scaled"]
+    else: raise ValueError("residual_form must be either 'log', 'scaled', 'physical', or 'reference-scaled'.")
     pde_mask = active_eval_mask(batch["w_eval"], params)[None, :, :]
     causal_out = {}
     if causal_loss == "off":
@@ -505,7 +506,7 @@ def compute_pde_loss_paired(
         include_ic=include_ic,
     )
 
-    residual_out = compute_pde_residual_from_state(state)
+    residual_out = compute_pde_residual_from_state(state, params)
 
     if residual_form == "log":
         residual = residual_out["residual_log"]
@@ -513,8 +514,10 @@ def compute_pde_loss_paired(
         residual = residual_out["residual"]
     elif residual_form == "scaled":
         residual = residual_out["residual_scaled"]
+    elif residual_form == "reference-scaled":
+        residual = residual_out["residual_reference_scaled"]
     else:
-        raise ValueError("residual_form must be 'log', 'scaled' or 'physical'.")
+        raise ValueError("residual_form must be 'log', 'scaled', 'physical', or 'reference-scaled'.")
 
     mask = active_eval_mask(batch["w_pair"], params).to(
         dtype=residual.dtype,
@@ -632,7 +635,7 @@ def compute_pde_loss_r3_slabbed(
         include_ic=include_ic,
     )
 
-    residual_out = compute_pde_residual_from_state(state)
+    residual_out = compute_pde_residual_from_state(state, params)
 
     if residual_form == "log":
         residual = residual_out["residual_log"]
@@ -640,8 +643,10 @@ def compute_pde_loss_r3_slabbed(
         residual = residual_out["residual"]
     elif residual_form == "scaled":
         residual = residual_out["residual_scaled"]
+    elif residual_form == "reference-scaled":
+        residual = residual_out["residual_reference_scaled"]
     else:
-        raise ValueError("residual_form must be 'log', 'scaled' or 'physical'.")
+        raise ValueError("residual_form must be 'log', 'scaled', 'physical', or 'reference-scaled'.")
 
     if residual.ndim != 3:
         raise ValueError(
