@@ -1,9 +1,9 @@
 name: Apply inactive-bin plotting fix
 
 on:
-  push:
+  pull_request:
     branches:
-      - fix/mask-inactive-weight-bins
+      - main
 
 permissions:
   contents: write
