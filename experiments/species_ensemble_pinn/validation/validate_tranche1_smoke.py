@@ -23,10 +23,10 @@ def main(argv=None):
         ])
         run_dir = run(run_args)
         required = [
-            "checkpoint_final.pt", "loss_history.csv", "fixed_diagnostics.csv",
-            "predictions_final.csv", "residuals_final.csv", "biology_sample_final.csv",
-            "config.json", "run_command.txt", "run_status.json",
-            "parameter_fixture_identity.json", "known_state_file_identity.json",
+            "config.json", "run_command.txt", "status.json", "final_summary.csv",
+            "final_summary.json", "loss_history.csv", "fixed_diagnostic_history.csv",
+            "checkpoint_latest.pt", "model_final.pt", "predictions_final.csv",
+            "residuals_final.csv", "biology_sample_final.csv",
         ]
         missing = [name for name in required if not (run_dir / name).exists()]
         assert not missing, missing
