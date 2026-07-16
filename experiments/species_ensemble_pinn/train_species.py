@@ -110,7 +110,10 @@ def _run_directory(args, species_name: str) -> Path:
     label = f"{args.biology_label}_{args.environment_state}"
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     slurm = os.environ.get("SLURM_JOB_ID")
+    task = os.environ.get("SLURM_ARRAY_TASK_ID")
     suffix = f"_job{slurm}" if slurm else ""
+    if task is not None:
+        suffix += f"_task{task}"
     safe_name = "".join(char if char.isalnum() or char in "-_" else "_" for char in species_name)
     path = root / label / f"species_{args.species_idx:02d}_{safe_name}" / f"{stamp}{suffix}"
     path.mkdir(parents=True, exist_ok=False)
@@ -181,15 +184,16 @@ def run(args: argparse.Namespace) -> Path:
     weights = {"pde": 1.0, "ic": 1.0, "bc": 0.1}
     start_step = 0
     if args.load_weights:
-        payload = load_checkpoint(args.load_weights, model=model, optimizer=optimizer, scheduler=scheduler,
-            params=params, species_idx=args.species_idx, species_name=species_name,
-            configuration=configuration, load_optimizer_state=args.load_optimizer_state)
+        payload = load_checkpoint(args.load_weights, model=model, optimizer=optimizer,
+            scheduler=scheduler, params=params, species_idx=args.species_idx,
+            species_name=species_name, configuration=configuration,
+            load_optimizer_state=args.load_optimizer_state)
         weights.update(payload.get("loss_weights", {}))
         start_step = int(payload["step"])
     history, diagnostics = [], []
     status = {"status": "running", "error_message": "", "species_idx": args.species_idx,
               "species_name": species_name}
-    save_json(status, run_dir / "run_status.json")
+    save_json(status, run_dir / "status.json")
     started = time.perf_counter()
     try:
         for step in range(start_step + 1, args.n_steps + 1):
@@ -207,24 +211,27 @@ def run(args: argparse.Namespace) -> Path:
                 _, fixed_losses = _fixed_loss_bundle(model, fixed_batch, context, weights)
                 diagnostics.append({"step": step, **fixed_diagnostics(fixed_losses)})
             if args.checkpoint_every and step % args.checkpoint_every == 0:
-                save_checkpoint(run_dir / f"checkpoint_step_{step}.pt", step=step,
+                save_checkpoint(run_dir / "checkpoint_latest.pt", step=step,
                     species_idx=args.species_idx, species_name=species_name, model=model,
                     optimizer=optimizer, scheduler=scheduler, loss_weights=weights,
                     configuration=configuration, latest_history_row=row,
                     parameter_fixture_identity=parameter_identity,
                     known_state_file_identity=known_identity, params=params)
         final_step = args.n_steps
-        save_checkpoint(run_dir / "checkpoint_final.pt", step=final_step,
+        save_checkpoint(run_dir / "checkpoint_latest.pt", step=final_step,
             species_idx=args.species_idx, species_name=species_name, model=model,
             optimizer=optimizer, scheduler=scheduler, loss_weights=weights,
             configuration=configuration, latest_history_row=history[-1] if history else None,
             parameter_fixture_identity=parameter_identity,
             known_state_file_identity=known_identity, params=params)
         save_history(history, run_dir / "loss_history.csv")
-        pd.DataFrame(diagnostics).to_csv(run_dir / "fixed_diagnostics.csv", index=False)
+        pd.DataFrame(diagnostics).to_csv(run_dir / "fixed_diagnostic_history.csv", index=False)
         save_final_outputs(run_dir=run_dir, model=model, params=params, n_init=n_init,
             n_pp=n_pp, known_state=known, species_idx=args.species_idx,
             species_name=species_name, batch=fixed_batch)
+        torch.save({"model_state_dict": model.state_dict(), "species_idx": args.species_idx,
+                    "species_name": species_name, "configuration": configuration},
+                   run_dir / "model_final.pt")
         log_scale, _ = grid_residual_scale(params)
         status.update({"status": "success", "steps_completed": final_step,
             "target_residual_scale_min": float(torch.exp(log_scale[args.species_idx]).min().cpu()),
@@ -235,10 +242,41 @@ def run(args: argparse.Namespace) -> Path:
         status.update({"status": "failed", "error_message": f"{type(exc).__name__}: {exc}",
                        "steps_completed": len(history)})
         save_history(history, run_dir / "loss_history.csv")
-        pd.DataFrame(diagnostics).to_csv(run_dir / "fixed_diagnostics.csv", index=False)
-        save_json(status, run_dir / "run_status.json")
+        pd.DataFrame(diagnostics).to_csv(run_dir / "fixed_diagnostic_history.csv", index=False)
+        try:
+            save_checkpoint(run_dir / "checkpoint_latest.pt", step=start_step + len(history),
+                species_idx=args.species_idx, species_name=species_name, model=model,
+                optimizer=optimizer, scheduler=scheduler, loss_weights=weights,
+                configuration=configuration, latest_history_row=history[-1] if history else None,
+                parameter_fixture_identity=parameter_identity,
+                known_state_file_identity=known_identity, params=params)
+        except Exception:
+            pass
+        torch.save({"model_state_dict": model.state_dict(), "species_idx": args.species_idx,
+                    "species_name": species_name, "configuration": configuration},
+                   run_dir / "model_final.pt")
+        for filename in ("predictions_final.csv", "residuals_final.csv", "biology_sample_final.csv"):
+            if not (run_dir / filename).exists():
+                pd.DataFrame().to_csv(run_dir / filename, index=False)
+        summary = {**status,
+            "final_loss": history[-1]["loss"] if history else float("nan"),
+            "final_loss_pde": history[-1]["loss_pde"] if history else float("nan"),
+            "final_loss_ic": history[-1]["loss_ic"] if history else float("nan"),
+            "final_loss_bc": history[-1]["loss_bc"] if history else float("nan"),
+            "seconds_elapsed": time.perf_counter() - started}
+        save_json(summary, run_dir / "final_summary.json")
+        pd.DataFrame([summary]).to_csv(run_dir / "final_summary.csv", index=False)
+        save_json(status, run_dir / "status.json")
         raise
-    save_json(status, run_dir / "run_status.json")
+    summary = {**status,
+        "final_loss": history[-1]["loss"] if history else float("nan"),
+        "final_loss_pde": history[-1]["loss_pde"] if history else float("nan"),
+        "final_loss_ic": history[-1]["loss_ic"] if history else float("nan"),
+        "final_loss_bc": history[-1]["loss_bc"] if history else float("nan"),
+        "seconds_elapsed": time.perf_counter() - started}
+    save_json(summary, run_dir / "final_summary.json")
+    pd.DataFrame([summary]).to_csv(run_dir / "final_summary.csv", index=False)
+    save_json(status, run_dir / "status.json")
     return run_dir
 
 
