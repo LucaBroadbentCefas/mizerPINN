@@ -1,0 +1,1 @@
+python -m experiments.species_ensemble_pinn.scripts.run_all_species --input-dir validation/fixtures/pde_multispecies --known-state-csv /path/to/detailed_known_state.csv --biology-label detailed -- --environment-state frozen-initial
