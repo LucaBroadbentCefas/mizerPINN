@@ -168,7 +168,7 @@ if [[ "${LOSS_WEIGHTING}" == "expert-grad-norm" ]]; then
   )
 fi
 
-python -m PINNmizer.training.train_pde_multispecies "${ARGS[@]}"
+python -m scripts.train_pde_multispecies "${ARGS[@]}"
 
 echo "Finished ${RUN_NAME}"
 echo "End time: $(date)"

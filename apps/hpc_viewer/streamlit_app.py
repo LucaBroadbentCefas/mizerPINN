@@ -1187,6 +1187,9 @@ def mizer_page(run_df, selected_run, selected_runs, mizers, clip, mode, markers)
             time_label = format_time_label(tv)
 
             x_plot, y_plot = mask_to_x_support(fields["x_eval"], fields["log10_N"][i], active_x_range)
+            if x_plot.size > 1:
+                x_plot = x_plot[:-1]
+                y_plot = y_plot[:-1]
             rows += [
                 {
                     "x": x,
