@@ -31,6 +31,8 @@ survey_gears <- data.frame(
 gear_params(NS_params) <- rbind(gears, survey_gears)
 effort <- initial_effort(NS_params)
 effort[5] <- 0.02
+effort[2] <- 0.6
+effort[4] <- 3
 initial_effort(NS_params) <- effort
 
 sim <- project(NS_params, t_max = 40, t_save = 0.1, effort  = effort)
