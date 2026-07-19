@@ -56,7 +56,7 @@ def test_ordinary_pde_pathway_uses_pseudo_huber(monkeypatch):
     residual = torch.tensor([[[1.0, 10.0]]], dtype=torch.float64)
     state = {"dummy": torch.tensor(0.0)}
     monkeypatch.setattr(losses, "compute_pde_state", lambda **kwargs: state)
-    monkeypatch.setattr(losses, "compute_pde_residual_from_state", lambda s, params=None: {"residual_log": residual, "residual": residual, "residual_scaled": residual})
+    monkeypatch.setattr(losses, "compute_pde_residual_from_state", lambda s: {"residual_log": residual, "residual": residual, "residual_scaled": residual})
     monkeypatch.setattr(losses, "active_eval_mask", lambda w, params: torch.ones(1, 2, dtype=torch.bool))
     params = SimpleNamespace()
     batch = {"w_eval": torch.ones(2, dtype=torch.float64)}
@@ -73,7 +73,7 @@ def test_paired_and_r3_pde_pathways_accept_pseudo_huber(monkeypatch):
     residual_r3 = torch.tensor([[[1.0, 10.0]]], dtype=torch.float64)
     monkeypatch.setattr(losses, "compute_pde_state_paired", lambda **kwargs: {})
     monkeypatch.setattr(losses, "compute_pde_state_r3_slabbed", lambda **kwargs: {})
-    monkeypatch.setattr(losses, "compute_pde_residual_from_state", lambda s, params=None: {"residual_log": residual_pair if s.get('paired') else residual_r3, "residual": residual_pair if s.get('paired') else residual_r3, "residual_scaled": residual_pair if s.get('paired') else residual_r3})
+    monkeypatch.setattr(losses, "compute_pde_residual_from_state", lambda s: {"residual_log": residual_pair if s.get('paired') else residual_r3, "residual": residual_pair if s.get('paired') else residual_r3, "residual_scaled": residual_pair if s.get('paired') else residual_r3})
     monkeypatch.setattr(losses, "compute_pde_state_paired", lambda **kwargs: {"paired": True})
     monkeypatch.setattr(losses, "active_eval_mask", lambda w, params: torch.ones(1, 2, dtype=torch.bool))
     monkeypatch.setattr(losses, "_active_eval_mask_for_slab", lambda w, params: torch.ones(1, 1, 2, dtype=torch.bool))

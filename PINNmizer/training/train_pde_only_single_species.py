@@ -34,7 +34,6 @@ from PINNmizer.training.outputs import (
 )
 from PINNmizer.training.loop import train_one_step, total_grad_norm_and_check, scalar_min, scalar_max, scalar_mean
 from PINNmizer.pinn.state_scale import set_state_scale_from_initial_condition, DEFAULT_STATE_SCALE_EPS
-from PINNmizer.pinn.residual_scale import set_residual_scale_from_initial_condition
 from PINNmizer.pinn.r3 import make_r3_population, CausalR3
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -349,8 +348,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rwf-base-init", choices=["pytorch", "xavier_uniform", "xavier_normal"], default="pytorch")
     parser.add_argument("--hidden-width", type=int, default=64)
     parser.add_argument("--hidden-layers", type=int, default=3)
-    parser.add_argument("--residual-form", choices=["log", "scaled", "physical", "reference-scaled"], default="log", help="PDE residual form. reference-scaled divides the physical residual by a fixed initial-condition reference scale that is not part of the model state and is not differentiated.")
-    parser.add_argument("--residual-scale-floor-fraction", type=float, default=1e-12, help="Strictly positive species-relative floor fraction for the fixed initial-condition residual reference scale.")
+    parser.add_argument("--residual-form", choices=["log", "scaled", "physical"], default="log")
     parser.add_argument("--pde-penalty", choices=["squared", "pseudo-huber"], default="squared")
     parser.add_argument("--pde-pseudo-huber-delta", type=float, default=1.0)
     parser.add_argument("--state-parameterization", choices=["log-n", "log-u"], default="log-n")
@@ -542,10 +540,6 @@ def main() -> None:
     hpc_history_every = 2000
     hpc_checkpoint_every = 4000
 
-    if args.residual_scale_floor_fraction <= 0.0:
-        raise ValueError("--residual-scale-floor-fraction must be strictly positive.")
-    if args.residual_form == "reference-scaled" and args.state_parameterization != "log-n":
-        raise ValueError("--residual-form reference-scaled currently requires --state-parameterization log-n.")
     if args.causal_loss == "expert" and args.time_sampling != "stratified":
         raise ValueError("--causal-loss expert requires --time-sampling stratified.")
     if args.causal_loss == "expert" and args.collocation_strategy != "uniform":
@@ -564,9 +558,7 @@ def main() -> None:
     )
 
     params.state_parameterization = args.state_parameterization
-    if args.state_parameterization == "log-u":
-        set_state_scale_from_initial_condition(params, n_init, eps=args.state_scale_eps)
-    set_residual_scale_from_initial_condition(params, n_init, floor_fraction=args.residual_scale_floor_fraction)
+    set_state_scale_from_initial_condition(params, n_init, eps=args.state_scale_eps)
 
     if args.hpc:
         diag_every = hpc_history_every
@@ -718,11 +710,6 @@ def main() -> None:
         "state_scale_source": "initial_condition",
         "state_scale_eps": args.state_scale_eps,
         "state_scale_interpolation": "linear_log_weight",
-        "residual_scale_source": "initial_condition",
-        "residual_scale_floor_fraction": args.residual_scale_floor_fraction,
-        "residual_scale_interpolation": "linear_log_weight",
-        "residual_scale_extrapolation": "constant_last_active",
-        "residual_scale_is_differentiated": False,
         "learning_rate": args.lr,
         "initial_lr": args.lr,
         "model_arch": args.model_arch,

@@ -10,7 +10,6 @@ from PINNmizer.params import scale_t, scale_x
 from PINNmizer.pinn.residual import compute_pde_residual
 from PINNmizer.pinn.model_eval import evaluate_log_model_on_points
 from PINNmizer.pinn.sampling import sample_pde_batch
-from PINNmizer.pinn.residual_scale import grid_residual_scale
 
 
 def _species_name(params, idx: int) -> str:
@@ -41,9 +40,6 @@ def save_final_predictions_multispecies(*, run_dir: Path, model: nn.Module, para
     S = out.get("S", torch.ones_like(out["N"])).detach().cpu()
     n_species = log_N.shape[1]
     n_w = params.w.numel()
-    log_S_ref_grid, S_ref_grid = grid_residual_scale(params)
-    log_S_ref_grid = log_S_ref_grid.detach().cpu()
-    S_ref_grid = S_ref_grid.detach().cpu()
 
     rows = []
     tt = t_grid.detach().cpu()[:, None].expand(-1, n_w)
@@ -66,9 +62,6 @@ def save_final_predictions_multispecies(*, run_dir: Path, model: nn.Module, para
             "U": U[:, s, :].reshape(-1).numpy(),
             "log_S": log_S[:, s, :].reshape(-1).numpy(),
             "S": S[:, s, :].reshape(-1).numpy(),
-            "log_S_reference": log_S_ref_grid[s][None, :].expand(n_times, -1).reshape(-1).numpy(),
-            "S_reference": S_ref_grid[s][None, :].expand(n_times, -1).reshape(-1).numpy(),
-            "N_over_S_reference": (N[:, s, :] / S_ref_grid[s][None, :]).reshape(-1).numpy(),
         }))
     pd.concat(rows, ignore_index=True).to_csv(run_dir / "final_predictions_grid.csv", index=False)
 
@@ -93,10 +86,6 @@ def save_final_residual_sample_multispecies(*, run_dir: Path, model: nn.Module, 
             "residual_log": flat("residual_log"),
             "residual": flat("residual"),
             "residual_scaled": flat("residual_scaled"),
-            "residual_reference_scaled": flat("residual_reference_scaled"),
-            "log_S_reference": flat("log_reference_scale_eval"),
-            "S_reference": flat("reference_scale_eval"),
-            "N_over_S_reference": flat("N_over_reference_scale"),
             "log_N_eval": flat("log_N_eval"),
             "N_eval": flat("N_eval"),
             "g_eval": flat("g_eval"),
