@@ -41,7 +41,13 @@ Y_i(t)     = sum_g Y_{g,i}(t)
 F_{g,i}(w,t) = E_g(t) q_{g,i} S_{g,i}(w).
 ```
 
-For intervals, catch is approximated by simple quadrature over the available observation time grid and multiplied by interval length.
+Catch interval rows are intended to represent annual catches. Their prediction is the mean of the catch rates at the two year boundaries multiplied by the interval length:
+
+```text
+C_{g,i,y} = 0.5 * [Y_{g,i}(y) + Y_{g,i}(y + 1)] * 1 year.
+```
+
+This is the annual mean-rate approximation used by the current observation workflow. Instantaneous catch rows, where `t_start == t_end`, return the catch rate at that time.
 
 ## Lognormal likelihood
 
@@ -55,6 +61,7 @@ If `sd_log` is missing and `cv` is present, `sd_log = sqrt(log(1 + cv^2))`. Othe
 
 ## Current limitations
 
+- Catch intervals are annual mean-rate approximations, not subannual integrations.
 - No learned catchability.
 - No learned selectivity.
 - No gamma likelihood.
