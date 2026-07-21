@@ -65,7 +65,11 @@ def test_expert_weighting_uses_mean_gradient_norm():
 
 
 def test_fixed_calibration_batch_rescales_to_current_horizon():
-    params = SimpleNamespace(t_min=0.0, t_max=30.0)
+    params = SimpleNamespace(
+        t_min=0.0,
+        t_max=30.0,
+        w=torch.tensor([1.0], dtype=torch.float64),
+    )
     batch = {
         "t_eval": torch.tensor([0.0, 15.0, 30.0], dtype=torch.float64),
         "t_scaled": torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64),
