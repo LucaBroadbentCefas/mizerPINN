@@ -115,7 +115,6 @@ ARGS=(
   --initial-w-data 1.0
   --data-default-cv 0.3
   --data-loss-eps 1e-30
-  --data-time-quadrature-points 1
 
   --lambda-timestep 0.0
   --collocation-strategy uniform
