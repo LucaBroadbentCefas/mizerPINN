@@ -13,7 +13,11 @@ from PINNmizer.pinn.losses import (
     compute_pde_loss_r3_slabbed,
 )
 from PINNmizer.pinn.r3 import update_r3_population_
-from PINNmizer.training.weighting import update_expert_gradient_norm_weights_, update_wang_gradient_weights_
+from PINNmizer.training.weighting import (
+    rescale_fixed_calibration_batch,
+    update_expert_gradient_norm_weights_,
+    update_wang_gradient_weights_,
+)
 from PINNmizer.pinn.timestep_consistency_multispecies import compute_timestep_consistency_loss_multispecies
 from PINNmizer.params import scale_x, scale_t
 from PINNmizer.pinn.model_eval import evaluate_log_model_on_points
@@ -370,9 +374,15 @@ def train_one_step_multispecies(
                     "fixed adaptive weighting requires weight_calibration_batch."
                 )
 
+            calibration_batch = rescale_fixed_calibration_batch(
+                weight_calibration_batch,
+                params=params,
+                t_max_current=t_max_current,
+            )
+
             _, calibration_out = compute_pde_loss(
                 model=model,
-                batch=weight_calibration_batch,
+                batch=calibration_batch,
                 params=params,
                 n_pp=n_pp,
                 residual_form=residual_form,
