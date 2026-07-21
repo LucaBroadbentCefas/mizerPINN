@@ -1,3 +1,4 @@
+# retrigger
 name: Finalise annual catch cleanup
 on:
   push:
@@ -20,7 +21,6 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-
           train = Path('PINNmizer/training/train_pde_multispecies.py')
           s = train.read_text()
           s = s.replace('    parser.add_argument("--data-time-quadrature-points", type=int, default=1)\n', '')
@@ -29,22 +29,18 @@ jobs:
           s = s.replace('        "data_time_quadrature_points": args.data_time_quadrature_points,\n', '')
           s = s.replace('                data_time_quadrature_points=args.data_time_quadrature_points,\n', '')
           train.write_text(s)
-
           loop = Path('PINNmizer/training/loop_multispecies.py')
           s = loop.read_text()
           s = s.replace('    data_time_quadrature_points: int = 1,\n', '')
           s = s.replace('            if data_time_quadrature_points > 1:\n                qs = []\n                for a, b in zip(observation_batch["t_start"], observation_batch["t_end"]):\n                    qs.append(torch.linspace(a, b, data_time_quadrature_points, dtype=obs_times.dtype, device=obs_times.device))\n                obs_times = torch.cat([obs_times, torch.cat(qs)])\n\n', '')
           loop.write_text(s)
-
           for path in Path('.').rglob('*'):
-              if path.is_file() and path.suffix in {'.py', '.sh', '.md', '.yml', '.yaml'} and '.git' not in path.parts:
+              if path.is_file() and path.suffix in {'.py', '.sh', '.md'} and '.git' not in path.parts:
                   text = path.read_text(errors='ignore')
                   if 'data-time-quadrature-points' in text:
                       path.write_text('\n'.join(line for line in text.splitlines() if 'data-time-quadrature-points' not in line) + '\n')
-
-          for path in [train, loop]:
-              text = path.read_text()
-              assert 'data_time_quadrature_points' not in text, path
+          assert 'data_time_quadrature_points' not in train.read_text()
+          assert 'data_time_quadrature_points' not in loop.read_text()
           PY
       - name: Validate source and observation operator
         run: |
