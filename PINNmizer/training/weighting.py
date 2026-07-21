@@ -5,6 +5,36 @@ import math
 import torch
 import torch.nn as nn
 
+from PINNmizer.params import scale_t
+
+
+def rescale_fixed_calibration_batch(
+    batch: dict[str, torch.Tensor],
+    *,
+    params,
+    t_max_current: float,
+) -> dict[str, torch.Tensor]:
+    """Rescale fixed calibration times to the current causal horizon."""
+    if "t_eval" not in batch:
+        raise ValueError("Fixed calibration batch must contain t_eval.")
+
+    t_eval = batch["t_eval"]
+    t_min = torch.as_tensor(params.t_min, dtype=t_eval.dtype, device=t_eval.device)
+    t_max = torch.as_tensor(params.t_max, dtype=t_eval.dtype, device=t_eval.device)
+    t_upper = torch.as_tensor(t_max_current, dtype=t_eval.dtype, device=t_eval.device)
+    t_upper = torch.minimum(torch.maximum(t_upper, t_min), t_max)
+
+    if not bool((t_max > t_min).detach().cpu()):
+        raise ValueError("Calibration time domain requires t_max > t_min.")
+
+    unit_time = (t_eval - t_min) / (t_max - t_min)
+    rescaled_time = t_min + unit_time * (t_upper - t_min)
+
+    rescaled = dict(batch)
+    rescaled["t_eval"] = rescaled_time
+    rescaled["t_scaled"] = scale_t(rescaled_time, params)
+    return rescaled
+
 
 def _flat_loss_grad(
     loss: torch.Tensor,
@@ -118,11 +148,13 @@ def update_expert_gradient_norm_weights_(
     if not grad_norms:
         return stats
 
-    total = torch.stack(list(grad_norms.values())).sum()
+    stacked_norms = torch.stack(list(grad_norms.values()))
+    total = stacked_norms.sum()
+    mean = stacked_norms.mean()
     stats["expert_weight_total_grad_norm"] = float(total.cpu())
 
     for name, norm in grad_norms.items():
-        target = float((total / norm.clamp_min(eps)).cpu())
+        target = float((mean / norm.clamp_min(eps)).cpu())
         target = max(min_weight, min(max_weight, target))
         if name not in weights:
             weights[name] = 1.0
