@@ -1,3 +1,4 @@
+# trigger PR synchronize
 name: Finalise annual catch cleanup
 on:
   pull_request:
