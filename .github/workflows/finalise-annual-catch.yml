@@ -1,0 +1,21 @@
+name: Finalise annual catch cleanup
+
+on:
+  push:
+    branches:
+      - fix/annual-catch-observation
+
+permissions:
+  contents: write
+
+jobs:
+  finalise:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/annual-catch-observation
+          fetch-depth: 0
+
+      -
