@@ -69,6 +69,10 @@ make_observation_data <- function(sim, survey_gear_name = "survey") {
       value = mean(yield_rate, na.rm = TRUE) * 1,
       .groups = "drop"
     ) |>
+    dplyr::filter(
+      is.finite(value),
+      value > 0
+    ) |>
     dplyr::rename(species = sp) |>
     dplyr::mutate(
       observation = "catch_biomass"
@@ -100,14 +104,15 @@ make_observation_data <- function(sim, survey_gear_name = "survey") {
   )
 }
 
+observation_data <- make_observation_data(
+  sim = sim
+)
+
 write.csv(
   observation_data,
   "observations.csv",
   row.names = FALSE
 )
 
-observation_data <- make_observation_data(
-  sim = sim
-)
 
 export_mizer_inputs_for_python(NS_params,  outdir = "validation/fixtures/pde_multispecies")

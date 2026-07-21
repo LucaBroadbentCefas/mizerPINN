@@ -61,9 +61,13 @@ def interpolate_log_state_scale(params: MizerTorchParams, w_eval: torch.Tensor) 
     idx = torch.searchsorted(x_grid, x).clamp(1, x_grid.numel() - 1)
     x0 = x_grid[idx - 1]; x1 = x_grid[idx]
     y0 = log_s_grid[:, idx - 1]; y1 = log_s_grid[:, idx]
-    slope = (y1 - y0) / (x1 - x0)[None, :]
-    frac = (x - x0) / (x1 - x0)
-    log_s = y0 + slope * frac[None, :]
+    dx = x1 - x0
+    delta_log_s = y1 - y0
+    
+    frac = (x - x0) / dx
+    log_s = y0 + delta_log_s * frac[None, :]
+    
+    slope = delta_log_s / dx[None, :]
     dlogS_dw = slope / w_flat[None, :]
     log_s = log_s.reshape((_n_species(params),) + orig_shape)
     dlogS_dw = dlogS_dw.reshape((_n_species(params),) + orig_shape)
