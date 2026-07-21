@@ -205,6 +205,7 @@ def compute_initial_condition_loss_from_state(state: dict[str, object], params: 
         loss_ic = _masked_square_mean(log_N_pred - log_N_target, ic_mask)
     return {"loss_ic": loss_ic, "log_N_ic_pred": log_N_pred, "N_ic_pred": N_pred, "log_N_ic_target": log_N_target, "N_ic_target": n_init, "log_U_ic_pred": log_state_pred, "U_ic_pred": U_pred, "log_U_ic_target": log_U_target, "U_ic_target": torch.exp(log_U_target)}
 
+
 def compute_recruitment_boundary_loss_from_state(
     state: dict[str, object],
     params: MizerTorchParams,
@@ -325,9 +326,10 @@ def compute_recruitment_boundary_loss_from_state(
         elif loss_form == "physical":
             residual_valid = N_left[valid_mask] - target_N_valid
         else:
-            residual_valid = 1 - (
-               (N_left[valid_mask]  * g_left[valid_mask]) / recruitment_flux[valid_mask]
-            ) 
+            relative_scale = (
+                g_left[valid_mask] / recruitment_flux[valid_mask]
+            ).detach()
+            residual_valid = N_left[valid_mask] * relative_scale - 1.0
 
         loss_bc = _pointwise_penalty(
             residual_valid,
@@ -411,6 +413,7 @@ def compute_recruitment_boundary_loss_from_state(
         ),
     }
 
+
 def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchParams, n_pp: torch.Tensor, residual_form: str = "log", *, n_init: torch.Tensor | None = None, lambda_pde: float = 1.0, lambda_ic: float = 0.0, lambda_bc: float = 0.0, boundary_loss_form: str = "log", species_idx: int | None = None, eps: float = 1e-30, bc_eps: float | None = None, bc_g_min: float = 1e-12, use_constant_recruitment_r: bool = False, constant_recruitment_r: float | None = None, causal_loss: str = "off", causal_n_chunks: int = 32, causal_epsilon: float = 1.0, pde_penalty: str = "squared", pde_pseudo_huber_delta: float = 1.0, bc_penalty: str = "squared", bc_pseudo_huber_delta: float = 1.0,) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     include_ic = lambda_ic != 0.0
     state = compute_pde_state(model=model, batch=batch, params=params, n_pp=n_pp, include_ic=include_ic)
@@ -470,6 +473,7 @@ def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchPa
     loss = lambda_pde * loss_pde + lambda_ic * loss_ic + lambda_bc * loss_bc
     out = {**residual_out, **ic_out, **bc_out, **causal_out, "loss": loss, "loss_pde": loss_pde, "loss_ic": loss_ic, "loss_bc": loss_bc}
     return loss, out
+
 
 def compute_pde_loss_paired(
     model,
@@ -588,6 +592,7 @@ def compute_pde_loss_paired(
     }
 
     return loss, out
+
 
 def compute_pde_loss_r3_slabbed(
     model,
