@@ -61,17 +61,28 @@ def main():
     manual_y = (F * N_grid[1, 0] * params.w * params.dw).sum()
     assert torch.allclose(y, manual_y.reshape(1))
 
+    annual = catch_prediction(N_grid, t_grid, params, torch.tensor([0]), torch.tensor([0]), torch.tensor([0.0]), torch.tensor([1.0]), torch.tensor([1.0]), torch.tensor([4.0]), gear_specific=True)
+    F0 = torch.tensor([1.0 * 2.0 * 1.0, 1.0 * 2.0 * 0.5, 1.0 * 2.0 * 0.25], dtype=torch.float64)
+    rate0 = (F0 * N_grid[0, 0] * params.w * params.dw).sum()
+    rate1 = (F * N_grid[1, 0] * params.w * params.dw).sum()
+    assert torch.allclose(annual, (0.5 * (rate0 + rate1)).reshape(1))
+
+    N_with_midpoint = torch.stack([N_grid[0], torch.full_like(N_grid[0], 1e6), N_grid[1]])
+    annual_with_midpoint = catch_prediction(N_with_midpoint, torch.tensor([0.0, 0.5, 1.0]), params, torch.tensor([0]), torch.tensor([0]), torch.tensor([0.0]), torch.tensor([1.0]), torch.tensor([1.0]), torch.tensor([4.0]), gear_specific=True)
+    assert torch.allclose(annual_with_midpoint, annual)
+
     equal = lognormal_nll(torch.tensor([2.0]), torch.tensor([2.0]), torch.tensor([0.5]))
     assert torch.allclose(equal["loss_data"], torch.log(torch.tensor(0.5)))
     twice = lognormal_nll(torch.tensor([4.0]), torch.tensor([2.0]), torch.tensor([1.0]))
     assert torch.allclose(torch.abs(twice["log_residual"]), torch.log(torch.tensor([2.0])))
 
-    F0 = evaluate_fishing_mortality_direct(params.w, params, t_eval=torch.tensor(0.0))
-    F1 = evaluate_fishing_mortality_direct(params.w, params, t_eval=torch.tensor(1.0))
-    assert not torch.allclose(F0, F1)
+    F0_direct = evaluate_fishing_mortality_direct(params.w, params, t_eval=torch.tensor(0.0))
+    F1_direct = evaluate_fishing_mortality_direct(params.w, params, t_eval=torch.tensor(1.0))
+    assert not torch.allclose(F0_direct, F1_direct)
     fixed = make_params(time_varying=False)
     assert torch.allclose(evaluate_fishing_mortality_direct(fixed.w, fixed, t_eval=torch.tensor(0.0)), evaluate_fishing_mortality_direct(fixed.w, fixed, t_eval=torch.tensor(1.0)))
     print("data likelihood smoke checks passed")
+
 
 if __name__ == "__main__":
     main()
