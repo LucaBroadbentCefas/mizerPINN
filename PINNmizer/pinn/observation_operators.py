@@ -14,6 +14,15 @@ def _time_indices(t_grid: torch.Tensor, t0: torch.Tensor, t1: torch.Tensor) -> t
     return torch.argmin(torch.abs(t_grid - mid)).reshape(1)
 
 
+def _endpoint_indices(t_grid: torch.Tensor, t0: torch.Tensor, t1: torch.Tensor) -> torch.Tensor:
+    """Return the grid indices for an instantaneous time or interval endpoints."""
+    i0 = torch.argmin(torch.abs(t_grid - t0)).reshape(1)
+    i1 = torch.argmin(torch.abs(t_grid - t1)).reshape(1)
+    if bool((i0 == i1).all().detach().cpu()):
+        return i0
+    return torch.cat([i0, i1])
+
+
 def biomass_prediction(N_grid: torch.Tensor, t_grid: torch.Tensor, params: MizerTorchParams, species_idx: torch.Tensor, t_start: torch.Tensor, t_end: torch.Tensor, w_min: torch.Tensor, w_max: torch.Tensor, *, abundance: bool = False) -> torch.Tensor:
     """Predict biomass/abundance observations.
 
@@ -51,10 +60,12 @@ def _gear_fishing(params: MizerTorchParams, gear_idx: int | None, species_idx: i
 
 
 def catch_prediction(N_grid: torch.Tensor, t_grid: torch.Tensor, params: MizerTorchParams, species_idx: torch.Tensor, gear_idx: torch.Tensor, t_start: torch.Tensor, t_end: torch.Tensor, w_min: torch.Tensor, w_max: torch.Tensor, *, gear_specific: bool) -> torch.Tensor:
-    """Predict catch/yield for total or gear-specific observations.
+    """Predict instantaneous or annual catch/yield observations.
 
-    Instantaneous observations return Y(t). Intervals with t_start != t_end return a
-    simple trapezoid/mean-rate quadrature over available t_grid points times interval length.
+    Instantaneous observations return Y(t). Interval observations use the mean
+    of the catch rates at the interval endpoints multiplied by interval length.
+    For the intended annual data this is the annual mean-rate approximation
+    C_y = 0.5 * [Y(y) + Y(y + 1)] * 1 year.
     Output shape [n_obs].
     """
     w = params.w.to(dtype=N_grid.dtype, device=N_grid.device)
@@ -63,15 +74,15 @@ def catch_prediction(N_grid: torch.Tensor, t_grid: torch.Tensor, params: MizerTo
     for j in range(species_idx.numel()):
         sp = int(species_idx[j].detach().cpu())
         gear = int(gear_idx[j].detach().cpu()) if gear_specific else None
-        tidx = _time_indices(t_grid, t_start[j], t_end[j])
+        tidx = _endpoint_indices(t_grid, t_start[j], t_end[j])
         wmask = (w >= w_min[j]) & (w <= w_max[j])
         rates = []
         for ti in tidx:
             F = _gear_fishing(params, gear, sp, t_grid[ti]).to(dtype=N_grid.dtype, device=N_grid.device)
             rates.append((F[wmask] * N_grid[ti, sp, wmask] * w[wmask] * dw[wmask]).sum())
-        rate = torch.stack(rates).mean()
+        mean_rate = torch.stack(rates).mean()
         duration = torch.abs(t_end[j] - t_start[j])
-        out.append(torch.where(duration > 0, rate * duration, rate))
+        out.append(torch.where(duration > 0, mean_rate * duration, mean_rate))
     return torch.stack(out)
 
 
