@@ -1,8 +1,7 @@
-# retrigger
 name: Finalise annual catch cleanup
 on:
-  push:
-    branches: [fix/annual-catch-observation]
+  pull_request:
+    branches: [main]
 permissions:
   contents: write
 jobs:
