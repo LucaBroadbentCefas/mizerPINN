@@ -17,6 +17,7 @@ def save_checkpoint(
     latest_history_row: dict | None = None,
     latest_fixed_diagnostic_row: dict | None = None,
     subdir: str | None = None,
+    inverse_rmax=None,
 ) -> Path:
     outdir = run_dir if subdir is None else run_dir / subdir
     outdir.mkdir(parents=True, exist_ok=True)
@@ -26,6 +27,15 @@ def save_checkpoint(
         "optimizer_state_dict": optimizer.state_dict(),
         "config": config,
     }
+    if inverse_rmax is not None:
+        checkpoint.update({
+            "inverse_parameter_state_dict": inverse_rmax.state_dict(),
+            "inverse_parameter_config": inverse_rmax.config(),
+            "initial_r_max": inverse_rmax.initial_r_max.detach().cpu(),
+            "initial_log_r_max": inverse_rmax.initial_log_r_max.detach().cpu(),
+            "current_r_max": inverse_rmax.current_r_max().detach().cpu(),
+            "current_log_r_max": inverse_rmax.current_log_r_max().detach().cpu(),
+        })
     if scheduler is not None:
         checkpoint["scheduler_state_dict"] = scheduler.state_dict()
     if latest_history_row is not None:
