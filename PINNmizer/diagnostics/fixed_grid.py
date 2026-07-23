@@ -125,6 +125,7 @@ def compute_fixed_diagnostics(
     bc_g_min: float = 1e-12,    
     bc_use_constant_r: bool = False,
     bc_constant_r: float | None = None,
+    boundary_target_gradient_mode: str = "detached",
 ) -> dict[str, float]:
     """
     Deterministic diagnostics on a fixed grid.
@@ -152,6 +153,7 @@ def compute_fixed_diagnostics(
         bc_g_min=bc_g_min,
         use_constant_recruitment_r=bc_use_constant_r,
         constant_recruitment_r=bc_constant_r,
+        boundary_target_gradient_mode=boundary_target_gradient_mode,
         )
 
     advective = out["g_eval"] * out["dlogN_dw"]

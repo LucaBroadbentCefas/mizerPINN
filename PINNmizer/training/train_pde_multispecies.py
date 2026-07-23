@@ -32,6 +32,7 @@ from PINNmizer.training.outputs_multispecies import (
 from PINNmizer.training.loop_multispecies import train_one_step_multispecies, total_grad_norm_and_check, scalar_min, scalar_max, scalar_mean
 from PINNmizer.pinn.state_scale import set_state_scale_from_initial_condition, DEFAULT_STATE_SCALE_EPS
 from PINNmizer.pinn.r3 import make_r3_population, CausalR3
+from PINNmizer.inverse_parameters import BoundedLogRMax
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 from PINNmizer.io import load_mizer_inputs
@@ -72,6 +73,7 @@ def load_checkpoint_weights(
     checkpoint_path: str | Path,
     device,
     load_optimizer_state: bool = False,
+    inverse_rmax=None,
 ) -> dict:
     checkpoint_path = Path(checkpoint_path)
 
@@ -89,6 +91,10 @@ def load_checkpoint_weights(
         raise ValueError(f"Checkpoint state_parameterization={checkpoint_param!r} does not match requested {requested_param!r}.")
 
     model.load_state_dict(checkpoint["model_state_dict"])
+    inverse_loaded = False
+    if inverse_rmax is not None and "inverse_parameter_state_dict" in checkpoint:
+        inverse_rmax.load_state_dict(checkpoint["inverse_parameter_state_dict"])
+        inverse_loaded = True
 
     optimizer_loaded = False
     if load_optimizer_state:
@@ -96,6 +102,11 @@ def load_checkpoint_weights(
             raise ValueError("optimizer must be provided when load_optimizer_state=True.")
         if "optimizer_state_dict" not in checkpoint:
             raise KeyError(f"Checkpoint has no 'optimizer_state_dict': {checkpoint_path}")
+        ck_groups = checkpoint["optimizer_state_dict"].get("param_groups", [])
+        cur_names = [g.get("name") for g in optimizer.param_groups]
+        ck_names = [g.get("name") for g in ck_groups]
+        if cur_names != ck_names:
+            raise ValueError(f"Incompatible optimizer parameter groups in checkpoint: {ck_names} vs current {cur_names}.")
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         optimizer_loaded = True
 
@@ -103,6 +114,7 @@ def load_checkpoint_weights(
         "path": str(checkpoint_path),
         "checkpoint_step": checkpoint.get("step", None),
         "optimizer_loaded": optimizer_loaded,
+        "inverse_parameter_loaded": inverse_loaded,
         "checkpoint_config": checkpoint.get("config", None),
     }
 
@@ -324,6 +336,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lambda-bc", type=float, default=0.0)
     parser.add_argument("--disable-wang-weights", action="store_true") 
     parser.add_argument("--lambda-timestep", type=float, default=0.0)
+    parser.add_argument("--estimate-rmax", action="store_true", default=False)
+    parser.add_argument("--rmax-lr", type=float, default=1e-3)
+    parser.add_argument("--rmax-log-lower", type=float, default=0.0)
+    parser.add_argument("--rmax-log-upper", type=float, default=50.0)
     parser.add_argument("--data-csv", default=None)
     parser.add_argument("--lambda-data", type=float, default=0.0)
     parser.add_argument("--data-default-cv", type=float, default=0.3)
@@ -431,6 +447,41 @@ def save_data_predictions_final(*, run_dir: Path, model: nn.Module, params, obse
         })
     pd.DataFrame(rows).to_csv(run_dir / "data_predictions_final.csv", index=False)
 
+
+def rmax_rows(inverse_rmax, params, step: int) -> list[dict]:
+    if inverse_rmax is None:
+        return []
+    with torch.no_grad():
+        cur = inverse_rmax.current_r_max().detach().cpu()
+        log = inverse_rmax.current_log_r_max().detach().cpu()
+        init = inverse_rmax.initial_r_max.detach().cpu()
+        init_log = inverse_rmax.initial_log_r_max.detach().cpu()
+        ratio = (cur / init).detach().cpu()
+        raw = inverse_rmax.raw_logit.detach().cpu()
+        grad = inverse_rmax.raw_logit.grad.detach().cpu() if inverse_rmax.raw_logit.grad is not None else torch.full_like(raw, float("nan"))
+    species = getattr(params, "species", None)
+    rows=[]
+    for i in range(cur.numel()):
+        rows.append({"step": step, "species_idx": i, "species": str(species[i]) if species is not None and i < len(species) else "", "initial_r_max": float(init[i]), "initial_log_r_max": float(init_log[i]), "r_max": float(cur[i]), "log_r_max": float(log[i]), "ratio_to_initial": float(ratio[i]), "raw_parameter": float(raw[i]), "raw_gradient": float(grad[i])})
+    return rows
+
+def save_rmax_history(rows: list[dict], run_dir: Path) -> None:
+    if rows:
+        pd.DataFrame(rows).to_csv(run_dir / "rmax_history.csv", index=False)
+
+def save_estimated_rmax(inverse_rmax, params, run_dir: Path) -> str | None:
+    if inverse_rmax is None:
+        return None
+    rows = rmax_rows(inverse_rmax, params, step=-1)
+    for row in rows:
+        row["estimated_r_max"] = row.pop("r_max")
+        row["estimated_log_r_max"] = row.pop("log_r_max")
+        row.pop("step", None); row.pop("raw_parameter", None); row.pop("raw_gradient", None)
+        row["lower_log_bound"] = inverse_rmax.lower; row["upper_log_bound"] = inverse_rmax.upper
+    path = run_dir / "estimated_rmax.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return str(path)
+
 def main() -> None:
     args = parse_args()
     if args.pde_penalty == "pseudo-huber" and args.pde_pseudo_huber_delta <= 0.0:
@@ -537,7 +588,16 @@ def main() -> None:
             state_parameterization=args.state_parameterization,
         )
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    inverse_rmax = None
+    if args.estimate_rmax:
+        inverse_rmax = BoundedLogRMax(params.r_max, lower=args.rmax_log_lower, upper=args.rmax_log_upper).to(dtype=params.r_max.dtype, device=params.r_max.device)
+        params.r_max = inverse_rmax.current_r_max()
+        optimizer = torch.optim.Adam([
+            {"params": model.parameters(), "lr": args.lr, "name": "network"},
+            {"params": inverse_rmax.parameters(), "lr": args.rmax_lr, "name": "rmax"},
+        ])
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scheduler = build_lr_scheduler(optimizer=optimizer, args=args)
     
     loaded_checkpoint = None
@@ -548,7 +608,10 @@ def main() -> None:
             checkpoint_path=args.load_weights,
             device=params.w.device,
             load_optimizer_state=args.load_optimizer_state,
+            inverse_rmax=inverse_rmax,
         )
+        if inverse_rmax is not None:
+            params.r_max = inverse_rmax.current_r_max()
     
     loss_weights = {
         "pde": args.initial_w_pde,
@@ -667,6 +730,13 @@ def main() -> None:
         "lambda_bc": args.lambda_bc,
         "disable_wang_weights": args.disable_wang_weights,
         "lambda_timestep": args.lambda_timestep,
+        "estimate_rmax": args.estimate_rmax,
+        "rmax_lr": args.rmax_lr,
+        "rmax_log_lower": args.rmax_log_lower,
+        "rmax_log_upper": args.rmax_log_upper,
+        "boundary_target_gradient_mode": "rmax-only" if args.estimate_rmax else "detached",
+        "initial_r_max": inverse_rmax.initial_r_max.detach().cpu().tolist() if inverse_rmax is not None else None,
+        "initial_log_r_max": inverse_rmax.initial_log_r_max.detach().cpu().tolist() if inverse_rmax is not None else None,
         "data_csv": args.data_csv,
         "lambda_data": args.lambda_data,
         "data_default_cv": args.data_default_cv,
@@ -720,6 +790,7 @@ def main() -> None:
     save_json(config, run_dir / "config.json")
 
     history = []
+    rmax_history = []
     timing = {
         "warmup_steps": args.warmup_steps,
         "seconds_per_step": math.nan,
@@ -807,9 +878,13 @@ def main() -> None:
                 lambda_data=args.lambda_data,
                 data_loss_eps=args.data_loss_eps,
                 data_time_quadrature_points=args.data_time_quadrature_points,
+                inverse_rmax=inverse_rmax,
+                boundary_target_gradient_mode="rmax-only" if args.estimate_rmax else "detached",
             )
 
             history.append(row)
+            if inverse_rmax is not None:
+                rmax_history.extend(rmax_rows(inverse_rmax, params, step))
 
             if step == 1 or step % diag_every == 0:
                 diag_row = compute_fixed_diagnostics(
@@ -825,6 +900,7 @@ def main() -> None:
                     compute_grad_norms=(step == 1 or step % diag_grad_every == 0),
                     bc_use_constant_r=args.bc_use_constant_r,
                     bc_constant_r=args.bc_constant_r,
+                    boundary_target_gradient_mode="rmax-only" if args.estimate_rmax else "detached",
                 )
             
                 diag_row = {
@@ -907,6 +983,7 @@ def main() -> None:
                 )
 
                 save_history(history, run_dir)
+                save_rmax_history(rmax_history, run_dir)
 
             if step % args.checkpoint_every == 0:
                 save_checkpoint(
@@ -915,6 +992,7 @@ def main() -> None:
                     model=model,
                     optimizer=optimizer,
                     config=config,
+                    inverse_rmax=inverse_rmax,
                 )
 
         timing["actual_total_seconds"] = time.perf_counter() - start_time
@@ -928,6 +1006,10 @@ def main() -> None:
         )
 
         save_history(history, run_dir)
+        save_rmax_history(rmax_history, run_dir)
+        estimated_rmax_path = save_estimated_rmax(inverse_rmax, params, run_dir)
+        config["estimated_rmax_csv"] = estimated_rmax_path
+        save_json(config, run_dir / "config.json")
 
         torch.save(
             {
@@ -935,6 +1017,7 @@ def main() -> None:
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "config": config,
+                **({"inverse_parameter_state_dict": inverse_rmax.state_dict(), "inverse_parameter_config": inverse_rmax.config(), "initial_r_max": inverse_rmax.initial_r_max.detach().cpu(), "initial_log_r_max": inverse_rmax.initial_log_r_max.detach().cpu(), "current_r_max": inverse_rmax.current_r_max().detach().cpu(), "current_log_r_max": inverse_rmax.current_log_r_max().detach().cpu()} if inverse_rmax is not None else {}),
             },
             run_dir / "model_final.pt",
         )
@@ -980,10 +1063,12 @@ def main() -> None:
             bc_g_min=args.bc_g_min,
             bc_use_constant_r=args.bc_use_constant_r,
             bc_constant_r=args.bc_constant_r,
+            boundary_target_gradient_mode="rmax-only" if args.estimate_rmax else "detached",
         )
 
     except Exception:
         save_history(history, run_dir)
+        save_rmax_history(rmax_history, run_dir)
         pd.DataFrame([timing]).to_csv(
             run_dir / "timing_summary.csv",
             index=False,

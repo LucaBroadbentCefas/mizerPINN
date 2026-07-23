@@ -274,3 +274,11 @@ When R3/Causal R3 is active, training rows may include:
 - `pde_gate_max`
 
 Do not save large retained-point snapshots unless debugging requires it. If snapshots are saved, place them under the run directory, not repository root.
+
+## Optional per-species inverse `r_max` mode
+
+The multispecies training entry point can optionally estimate one `r_max` per species with `--estimate-rmax`. The inverse parameter is represented as a raw trainable logit whose sigmoid maps `log(r_max)` into configured hard bounds (defaults `[0, 50]`), then exponentiates back to physical `r_max`.
+
+In this mode, data and initial-condition losses constrain the PINN abundance surface but do not directly differentiate with respect to `r_max`. The direct `r_max` gradient is intentionally restricted to the recruitment boundary condition: `R_DI` and boundary growth `g_left` are detached, while `R_DD = R_DI / (1 + R_DI / r_max)` is recomputed from detached `R_DI` and live `r_max`. Full target-side gradients remain disabled.
+
+The reference inverse run keeps `--lambda-timestep 0.0`; timestep consistency is not used to estimate `r_max`.

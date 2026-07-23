@@ -35,6 +35,7 @@ def save_fixed_grid_fields_and_plots_multispecies(
     fixed_batch: dict[str, torch.Tensor] | None = None,
     bc_use_constant_r: bool = False,
     bc_constant_r: float | None = None,
+    boundary_target_gradient_mode: str = "detached",
 ) -> None:
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -62,6 +63,7 @@ def save_fixed_grid_fields_and_plots_multispecies(
         bc_g_min=bc_g_min,
         use_constant_recruitment_r=bc_use_constant_r,
         constant_recruitment_r=bc_constant_r,
+        boundary_target_gradient_mode=boundary_target_gradient_mode,
     )
 
     t = fixed_batch["t_eval"].detach().cpu().numpy()

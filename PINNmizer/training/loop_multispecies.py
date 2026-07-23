@@ -47,6 +47,25 @@ def total_grad_norm_and_check(model: nn.Module) -> float:
         return 0.0
     return float(torch.sqrt(total).cpu())
 
+
+def inverse_rmax_grad_stats(inverse_rmax, *, require_nonzero: bool = False) -> dict:
+    if inverse_rmax is None:
+        return {"rmax_raw_grad_norm": math.nan, "rmax_raw_grad_min": math.nan, "rmax_raw_grad_max": math.nan, "rmax_grad_finite": math.nan}
+    grad = inverse_rmax.raw_logit.grad
+    if grad is None:
+        raise RuntimeError("Missing r_max raw gradient; boundary graph is disconnected from inverse r_max.")
+    if not torch.isfinite(grad).all():
+        raise FloatingPointError("Non-finite gradient in inverse r_max raw_logit.")
+    norm = float(torch.linalg.vector_norm(grad.detach()).cpu())
+    if require_nonzero and norm == 0.0:
+        raise RuntimeError("Zero r_max gradient on first active step; recruitment boundary graph is disconnected from inverse r_max.")
+    return {
+        "rmax_raw_grad_norm": norm,
+        "rmax_raw_grad_min": float(grad.detach().min().cpu()),
+        "rmax_raw_grad_max": float(grad.detach().max().cpu()),
+        "rmax_grad_finite": 1.0,
+    }
+
 def train_one_step_multispecies(
     *,
     model: nn.Module,
@@ -114,6 +133,8 @@ def train_one_step_multispecies(
     lambda_data: float = 0.0,
     data_loss_eps: float = 1e-30,
     data_time_quadrature_points: int = 1,
+    inverse_rmax=None,
+    boundary_target_gradient_mode: str = "detached",
 ) -> dict:
     if wang_weight_batch not in {"fixed", "training"}:
         raise ValueError("wang_weight_batch must be 'fixed' or 'training'.")
@@ -125,6 +146,8 @@ def train_one_step_multispecies(
     expert_weight_max = weight_max if expert_weight_max is None else expert_weight_max
 
     optimizer.zero_grad(set_to_none=True)
+    if inverse_rmax is not None:
+        params.r_max = inverse_rmax.current_r_max()
 
     if collocation_strategy == "uniform":
         batch = sample_pde_batch(
@@ -160,6 +183,7 @@ def train_one_step_multispecies(
             pde_pseudo_huber_delta=pde_pseudo_huber_delta,
             bc_penalty=bc_penalty,
             bc_pseudo_huber_delta=bc_pseudo_huber_delta,
+            boundary_target_gradient_mode=boundary_target_gradient_mode,
         )
 
     elif collocation_strategy in {"r3", "causal-r3"}:
@@ -204,6 +228,7 @@ def train_one_step_multispecies(
             pde_pseudo_huber_delta=pde_pseudo_huber_delta,
             bc_penalty=bc_penalty,
             bc_pseudo_huber_delta=bc_pseudo_huber_delta,
+            boundary_target_gradient_mode=boundary_target_gradient_mode,
         )
 
     else:
@@ -404,6 +429,7 @@ def train_one_step_multispecies(
                 pde_pseudo_huber_delta=pde_pseudo_huber_delta,
                 bc_penalty=bc_penalty,
                 bc_pseudo_huber_delta=bc_pseudo_huber_delta,
+                boundary_target_gradient_mode=boundary_target_gradient_mode,
             )
             calibration_loss_pde_for_weighting = calibration_out["loss_pde"] if loss_weighting == "expert-grad-norm" else calibration_out.get(
                 "loss_pde_ungated",
@@ -481,8 +507,11 @@ def train_one_step_multispecies(
     loss.backward()
 
     grad_norm = total_grad_norm_and_check(model)
+    rmax_grad_stats = inverse_rmax_grad_stats(inverse_rmax, require_nonzero=(inverse_rmax is not None and lambda_bc != 0.0 and step == 1))
 
     optimizer.step()
+    if inverse_rmax is not None:
+        params.r_max = inverse_rmax.current_r_max()
 
     if lr_scheduler is not None:
         if lr_scheduler_name == "plateau":
@@ -491,6 +520,7 @@ def train_one_step_multispecies(
             lr_scheduler.step()
 
     lr = float(optimizer.param_groups[0]["lr"])
+    rmax_lr = next((float(g["lr"]) for g in optimizer.param_groups if g.get("name") == "rmax"), math.nan)
 
     r3_diag = {
         "r3_population_size": math.nan,
@@ -553,6 +583,7 @@ def train_one_step_multispecies(
         "step": step,
         "loss": float(out["loss"].detach().cpu()),
         "lr": lr,
+        "rmax_lr": rmax_lr,
         "loss_pde": float(out["loss_pde"].detach().cpu()),
         "pde_penalty": pde_penalty,
         "pde_pseudo_huber_delta": float(pde_pseudo_huber_delta),
@@ -689,4 +720,19 @@ def train_one_step_multispecies(
         "data_log_residual_abs_mean": scalar_mean(torch.abs(out["data_log_residual"])) if "data_log_residual" in out else math.nan,
         "data_log_residual_abs_max": scalar_max(torch.abs(out["data_log_residual"])) if "data_log_residual" in out else math.nan,
     }
+
+    if inverse_rmax is not None:
+        with torch.no_grad():
+            cur_r = inverse_rmax.current_r_max().detach()
+            cur_log = inverse_rmax.current_log_r_max().detach()
+            ratio = cur_r / inverse_rmax.initial_r_max
+        base.update(rmax_grad_stats)
+        base.update({
+            "rmax_min": scalar_min(cur_r), "rmax_mean": scalar_mean(cur_r), "rmax_max": scalar_max(cur_r),
+            "log_rmax_min": scalar_min(cur_log), "log_rmax_mean": scalar_mean(cur_log), "log_rmax_max": scalar_max(cur_log),
+            "rmax_ratio_min": scalar_min(ratio), "rmax_ratio_mean": scalar_mean(ratio), "rmax_ratio_max": scalar_max(ratio),
+        })
+    else:
+        base.update(rmax_grad_stats)
+        base.update({k: math.nan for k in ["rmax_min","rmax_mean","rmax_max","log_rmax_min","log_rmax_mean","log_rmax_max","rmax_ratio_min","rmax_ratio_mean","rmax_ratio_max"]})
     return base

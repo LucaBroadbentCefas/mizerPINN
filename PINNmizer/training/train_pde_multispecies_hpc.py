@@ -60,11 +60,19 @@ def parse_hpc_args():
     finally:
         sys.argv = original_argv
 
+    supplied = set()
+    for tok in original_argv[1:]:
+        if tok.startswith("--"):
+            supplied.add(tok.split("=", 1)[0])
     args.hpc = True
-    args.print_every = 2000
-    args.diag_every = 2000
-    args.diag_grad_every = 2000
-    args.checkpoint_every = 4000
+    if "--print-every" not in supplied:
+        args.print_every = 2000
+    if "--diag-every" not in supplied:
+        args.diag_every = 2000
+    if "--diag-grad-every" not in supplied:
+        args.diag_grad_every = 2000
+    if "--checkpoint-every" not in supplied:
+        args.checkpoint_every = 4000
     return args
 
 
@@ -170,6 +178,10 @@ def save_hpc_final_summary(*, status: str, error_message: str | None = None) -> 
         "final_fixed_loss_ic": _metric(fixed_row, "fixed_loss_ic"),
         "final_fixed_loss_bc": _metric(fixed_row, "fixed_loss_bc"),
         "final_fixed_residual_log_abs_p95": _metric(fixed_row, "fixed_residual_log_abs_p95"),
+        "final_rmax_raw_grad_norm": _metric(history_row, "rmax_raw_grad_norm"),
+        "final_rmax_mean": _metric(history_row, "rmax_mean"),
+        "final_rmax_ratio_mean": _metric(history_row, "rmax_ratio_mean"),
+        "estimated_rmax_csv": str(_RUN_DIR / "estimated_rmax.csv") if (_RUN_DIR / "estimated_rmax.csv").exists() else None,
         "final_checkpoint_path": _LATEST_CHECKPOINT_PATH,
         "final_model_path": str(final_model_path) if final_model_path.exists() else None,
     }

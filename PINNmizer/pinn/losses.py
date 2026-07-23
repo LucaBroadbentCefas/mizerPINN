@@ -218,6 +218,7 @@ def compute_recruitment_boundary_loss_from_state(
     constant_recruitment_r: float | None = None,
     bc_penalty: str = "squared",
     bc_pseudo_huber_delta: float = 1.0,
+    boundary_target_gradient_mode: str = "detached",
 ) -> dict[str, torch.Tensor]:
     """
     Recruitment boundary condition.
@@ -251,11 +252,14 @@ def compute_recruitment_boundary_loss_from_state(
     """
     if loss_form not in {"log", "physical", "relative"}:
         raise ValueError("loss_form must be 'log', 'physical', or 'relative'.")
+    if boundary_target_gradient_mode not in {"detached", "rmax-only"}:
+        raise ValueError("boundary_target_gradient_mode must be 'detached' or 'rmax-only'.")
 
     log_N_grid = state["log_N_grid"]
     N_grid = state["N_grid"]
     growth_grid = state["growth_grid"]
-    recruitment_flux = state["recruitment"]["rdd_flux"]
+    recruitment = state["recruitment"]
+    recruitment_flux = recruitment["rdd_flux"]
 
     if use_constant_recruitment_r:
         if constant_recruitment_r is None:
@@ -308,27 +312,39 @@ def compute_recruitment_boundary_loss_from_state(
         device=log_N_left.device,
     )
 
+    if boundary_target_gradient_mode == "rmax-only" and not use_constant_recruitment_r:
+        rdi_flux = recruitment["rdi_flux"]
+        rmax = params.r_max
+        if species_idx is not None:
+            rdi_flux = rdi_flux[:, sl]
+            rmax = rmax[sl]
+        if rmax.ndim != 1 or rmax.shape[0] != rdi_flux.shape[1]:
+            raise ValueError(f"r_max shape {tuple(rmax.shape)} is incompatible with rdi_flux {tuple(rdi_flux.shape)}.")
+        recruitment_flux_for_target = rdi_flux.detach() / (1.0 + rdi_flux.detach() / rmax.reshape(1, -1))
+        g_for_target = g_left.detach()
+    else:
+        recruitment_flux_for_target = recruitment_flux.detach()
+        g_for_target = g_left.detach()
+
     target_log_N = torch.full_like(log_N_left, float("nan"))
     target_N = torch.full_like(N_left, float("nan"))
 
     if bool((valid_count > 0).detach().cpu()):
         target_log_N_valid = (
-            torch.log(recruitment_flux[valid_mask])
-            - torch.log(g_left[valid_mask])
-        ).detach()
-        target_N_valid = torch.exp(target_log_N_valid).detach()
+            torch.log(recruitment_flux_for_target[valid_mask])
+            - torch.log(g_for_target[valid_mask])
+        )
+        target_N_valid = recruitment_flux_for_target[valid_mask] / g_for_target[valid_mask]
 
-        target_log_N[valid_mask] = target_log_N_valid
-        target_N[valid_mask] = target_N_valid
+        target_log_N[valid_mask] = target_log_N_valid.detach()
+        target_N[valid_mask] = target_N_valid.detach()
 
         if loss_form == "log":
             residual_valid = log_N_left[valid_mask] - target_log_N_valid
         elif loss_form == "physical":
             residual_valid = N_left[valid_mask] - target_N_valid
         else:
-            relative_scale = (
-                g_left[valid_mask] / recruitment_flux[valid_mask]
-            ).detach()
+            relative_scale = g_for_target[valid_mask] / recruitment_flux_for_target[valid_mask]
             residual_valid = N_left[valid_mask] * relative_scale - 1.0
 
         loss_bc = _pointwise_penalty(
@@ -414,7 +430,7 @@ def compute_recruitment_boundary_loss_from_state(
     }
 
 
-def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchParams, n_pp: torch.Tensor, residual_form: str = "log", *, n_init: torch.Tensor | None = None, lambda_pde: float = 1.0, lambda_ic: float = 0.0, lambda_bc: float = 0.0, boundary_loss_form: str = "log", species_idx: int | None = None, eps: float = 1e-30, bc_eps: float | None = None, bc_g_min: float = 1e-12, use_constant_recruitment_r: bool = False, constant_recruitment_r: float | None = None, causal_loss: str = "off", causal_n_chunks: int = 32, causal_epsilon: float = 1.0, pde_penalty: str = "squared", pde_pseudo_huber_delta: float = 1.0, bc_penalty: str = "squared", bc_pseudo_huber_delta: float = 1.0,) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchParams, n_pp: torch.Tensor, residual_form: str = "log", *, n_init: torch.Tensor | None = None, lambda_pde: float = 1.0, lambda_ic: float = 0.0, lambda_bc: float = 0.0, boundary_loss_form: str = "log", species_idx: int | None = None, eps: float = 1e-30, bc_eps: float | None = None, bc_g_min: float = 1e-12, use_constant_recruitment_r: bool = False, constant_recruitment_r: float | None = None, causal_loss: str = "off", causal_n_chunks: int = 32, causal_epsilon: float = 1.0, pde_penalty: str = "squared", pde_pseudo_huber_delta: float = 1.0, bc_penalty: str = "squared", bc_pseudo_huber_delta: float = 1.0, boundary_target_gradient_mode: str = "detached",) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     include_ic = lambda_ic != 0.0
     state = compute_pde_state(model=model, batch=batch, params=params, n_pp=n_pp, include_ic=include_ic)
     residual_out = compute_pde_residual_from_state(state)
@@ -466,6 +482,7 @@ def compute_pde_loss(model, batch: dict[str, torch.Tensor], params: MizerTorchPa
             constant_recruitment_r=constant_recruitment_r,
             bc_penalty=bc_penalty,
             bc_pseudo_huber_delta=bc_pseudo_huber_delta,
+            boundary_target_gradient_mode=boundary_target_gradient_mode,
         )
         loss_bc = bc_out["loss_bc"]
     else:
@@ -498,6 +515,7 @@ def compute_pde_loss_paired(
     pde_pseudo_huber_delta: float = 1.0,
     bc_penalty: str = "squared",
     bc_pseudo_huber_delta: float = 1.0,
+    boundary_target_gradient_mode: str = "detached",
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     include_ic = lambda_ic != 0.0
 
@@ -573,6 +591,7 @@ def compute_pde_loss_paired(
             constant_recruitment_r=constant_recruitment_r,
             bc_penalty=bc_penalty,
             bc_pseudo_huber_delta=bc_pseudo_huber_delta,
+            boundary_target_gradient_mode=boundary_target_gradient_mode,
         )
         loss_bc = bc_out["loss_bc"]
     else:
@@ -620,6 +639,7 @@ def compute_pde_loss_r3_slabbed(
     pde_pseudo_huber_delta: float = 1.0,
     bc_penalty: str = "squared",
     bc_pseudo_huber_delta: float = 1.0,
+    boundary_target_gradient_mode: str = "detached",
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     if causal_loss != "off":
         raise ValueError(
@@ -728,6 +748,7 @@ def compute_pde_loss_r3_slabbed(
             constant_recruitment_r=constant_recruitment_r,
             bc_penalty=bc_penalty,
             bc_pseudo_huber_delta=bc_pseudo_huber_delta,
+            boundary_target_gradient_mode=boundary_target_gradient_mode,
         )
         loss_bc = bc_out["loss_bc"]
     else:

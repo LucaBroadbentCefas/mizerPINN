@@ -277,3 +277,7 @@ The old advice to forbid `R3/Causal R3 + causal_curriculum` is obsolete for curr
 - Inspect where retained `x_points` concentrate if results look pathological.
 - Check `r3_n_time`, `r3_n_eval_per_time`, `r3_population_size`, and `r3_biology_time_loops` to understand actual work per step.
 - Keep active `w_max` masking in both sampling and loss/scoring.
+
+### Inverse `r_max` interpretation warning
+
+Optional per-species `r_max` estimation is available for controlled inverse experiments, but it does not resolve the scientific uncertainty around the pointwise recruitment boundary condition. Estimated values should not be interpreted as identified from a falling training loss without recovery tests, sensitivity checks, and validation against alternative boundary formulations. The reference inverse run does not use timestep consistency (`--lambda-timestep 0.0`).

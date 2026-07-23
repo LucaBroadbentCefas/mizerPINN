@@ -632,3 +632,21 @@ Modes:
 - `step`: fraction follows supplied schedule.
 
 For R3/Causal R3, this same `t_upper` is passed as `t_max_current` to `R3Population.resample_time_points_()` before each step. Therefore the old categorical rule “do not stack R3 with causal curriculum” is obsolete for the current source. Causal time truncation and Causal R3 gating still have different meanings and should be interpreted separately.
+
+### Optional inverse `r_max` gradient path
+
+When multispecies training is run with `--estimate-rmax`, each species has a trainable raw value `z_i` mapped by
+
+```text
+log r_max_i = lower + (upper - lower) sigmoid(z_i)
+r_max_i = exp(log r_max_i)
+```
+
+The recruitment boundary target uses the existing stock-recruitment relation but with selective detachment:
+
+```text
+R_DD_i* = stopgrad(R_DI_i) / (1 + stopgrad(R_DI_i) / r_max_i)
+N_target_i = R_DD_i* / stopgrad(g_left_i)
+```
+
+Thus the boundary prediction remains differentiable through the network, `R_DI` and `g_left` target branches do not send gradients to the network, and `r_max` receives direct gradients only through the recruitment boundary loss.
