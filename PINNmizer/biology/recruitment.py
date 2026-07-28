@@ -15,7 +15,7 @@ def compute_recruitment_direct_from_growth_grid(N_grid: torch.Tensor, params: Mi
     e_repro_grid = growth_grid["e_repro_eval"]
     assert e_repro_grid.shape == N_grid.shape
     repro_integrand = e_repro_grid * N_grid
-    repro_integral = torch.trapz(repro_integrand, x=params.w, dim=1)
+    repro_integral = (repro_integrand * params.dw[None, :]).sum(dim=1)
     egg_idx = params.w_min_idx.to(torch.long) - 1
     egg_w = params.w[egg_idx]
     rdi_flux = 0.5 * repro_integral * params.erepro / egg_w

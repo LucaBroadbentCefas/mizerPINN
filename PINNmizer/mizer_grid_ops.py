@@ -2,7 +2,6 @@ import torch
 from .utils import pos
 
 from .params import MizerTorchParams, fish_start
-from .biology.fishing import compute_fishing_mortality_grid
 
 def as_complex(real: torch.Tensor, imag: torch.Tensor) -> torch.Tensor:
     return torch.complex(real, imag)
@@ -188,6 +187,8 @@ def total_mortality(
     """
     TMB equivalent: Mort()
     """
+    from .biology.fishing import compute_fishing_mortality_grid
+
     f_mort = compute_fishing_mortality_grid(params, effort=effort)
     return pred_mort + params.mu_b + f_mort
 

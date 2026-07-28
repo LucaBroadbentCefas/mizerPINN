@@ -106,7 +106,7 @@ ARGS=(
   --bc-pseudo-huber-delta 1.0
 
   --lambda-pde 1.0
-  --lambda-ic 1.0
+  --lambda-ic 1.0d
   --lambda-bc 1.0
   --initial-w-bc 0.1
 
