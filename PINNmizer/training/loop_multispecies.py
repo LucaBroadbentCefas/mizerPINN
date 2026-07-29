@@ -66,6 +66,15 @@ def inverse_rmax_grad_stats(inverse_rmax, *, require_nonzero: bool = False) -> d
         "rmax_grad_finite": 1.0,
     }
 
+
+def data_cv_grad_norm(inverse_data_cv) -> float:
+    if inverse_data_cv is None or inverse_data_cv.raw_parameter.grad is None:
+        return math.nan
+    grad = inverse_data_cv.raw_parameter.grad
+    if not torch.isfinite(grad).all():
+        raise FloatingPointError("Non-finite observation CV gradient.")
+    return float(torch.linalg.vector_norm(grad.detach()).cpu())
+
 def train_one_step_multispecies(
     *,
     model: nn.Module,
@@ -134,6 +143,7 @@ def train_one_step_multispecies(
     data_loss_eps: float = 1e-30,
     data_time_quadrature_points: int = 1,
     inverse_rmax=None,
+    inverse_data_cv=None,
     boundary_target_gradient_mode: str = "detached",
 ) -> dict:
     if wang_weight_batch not in {"fixed", "training"}:
@@ -320,7 +330,14 @@ def train_one_step_multispecies(
                 params,
                 data_time_quadrature_points=data_time_quadrature_points,
             )
-            nll = lognormal_nll(pred, observation_batch["value"], observation_batch["sd_log"], eps=data_loss_eps)
+            estimated_sd_log = inverse_data_cv.current_sd_log() if inverse_data_cv is not None else None
+            if estimated_sd_log is None:
+                sd_log_used = observation_batch["sd_log"]
+            elif inverse_data_cv.scope == "global":
+                sd_log_used = estimated_sd_log.expand(observation_batch["value"].numel())
+            else:
+                sd_log_used = estimated_sd_log[observation_batch["species_idx"]]
+            nll = lognormal_nll(pred, observation_batch["value"], sd_log_used, eps=data_loss_eps)
 
             loss_data = nll["loss_data"]
             data_out = {
@@ -329,6 +346,7 @@ def train_one_step_multispecies(
                 "data_value": observation_batch["value"],
                 "data_log_residual": nll["log_residual"],
                 "data_loss_contribution": nll["loss_contribution"],
+                "data_sd_log_used": sd_log_used,
             }
 
     out.update(data_out)
@@ -508,6 +526,7 @@ def train_one_step_multispecies(
 
     grad_norm = total_grad_norm_and_check(model)
     rmax_grad_stats = inverse_rmax_grad_stats(inverse_rmax, require_nonzero=(inverse_rmax is not None and lambda_bc != 0.0 and step == 1))
+    cv_grad_norm = data_cv_grad_norm(inverse_data_cv)
 
     optimizer.step()
     if inverse_rmax is not None:
@@ -521,6 +540,7 @@ def train_one_step_multispecies(
 
     lr = float(optimizer.param_groups[0]["lr"])
     rmax_lr = next((float(g["lr"]) for g in optimizer.param_groups if g.get("name") == "rmax"), math.nan)
+    data_cv_lr = next((float(g["lr"]) for g in optimizer.param_groups if g.get("name") == "data_cv"), math.nan)
 
     r3_diag = {
         "r3_population_size": math.nan,
@@ -584,6 +604,8 @@ def train_one_step_multispecies(
         "loss": float(out["loss"].detach().cpu()),
         "lr": lr,
         "rmax_lr": rmax_lr,
+        "data_cv_lr": data_cv_lr,
+        "data_cv_grad_norm": cv_grad_norm,
         "loss_pde": float(out["loss_pde"].detach().cpu()),
         "pde_penalty": pde_penalty,
         "pde_pseudo_huber_delta": float(pde_pseudo_huber_delta),
@@ -735,4 +757,11 @@ def train_one_step_multispecies(
     else:
         base.update(rmax_grad_stats)
         base.update({k: math.nan for k in ["rmax_min","rmax_mean","rmax_max","log_rmax_min","log_rmax_mean","log_rmax_max","rmax_ratio_min","rmax_ratio_mean","rmax_ratio_max"]})
+    if inverse_data_cv is not None:
+        with torch.no_grad():
+            cv, sd = inverse_data_cv.current_cv(), inverse_data_cv.current_sd_log()
+        base.update({"data_cv_min": scalar_min(cv), "data_cv_mean": scalar_mean(cv), "data_cv_max": scalar_max(cv),
+                     "data_sd_log_min": scalar_min(sd), "data_sd_log_mean": scalar_mean(sd), "data_sd_log_max": scalar_max(sd)})
+    else:
+        base.update({k: math.nan for k in ["data_cv_min", "data_cv_mean", "data_cv_max", "data_sd_log_min", "data_sd_log_mean", "data_sd_log_max"]})
     return base
