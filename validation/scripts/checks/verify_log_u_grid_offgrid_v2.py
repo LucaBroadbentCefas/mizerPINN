@@ -64,7 +64,7 @@ from PINNmizer.pinn.data_losses import lognormal_nll
 from PINNmizer.pinn.derivatives import evaluate_log_model_with_derivatives_at_eval
 from PINNmizer.pinn.model_eval import _make_model_inputs, evaluate_log_model_on_points
 from PINNmizer.pinn.models import build_pinn_model
-from PINNmizer.pinn.observation_operators import predict_observations
+from PINNmizer.pinn.observation_operators import observation_time_grid, predict_observations
 from PINNmizer.pinn.pde_state import compute_pde_state
 from PINNmizer.pinn.residual import compute_pde_residual_from_state
 from PINNmizer.pinn.state_scale import (
@@ -996,26 +996,10 @@ def run_observation_diagnostics(
         default_cv=default_cv,
     )
 
-    obs_times = torch.cat(
-        [observation_batch["t_start"], observation_batch["t_end"]]
+    t_grid = observation_time_grid(
+        observation_batch,
+        data_time_quadrature_points=quadrature_points,
     )
-    if quadrature_points > 1:
-        quadrature = [
-            torch.linspace(
-                a,
-                b,
-                quadrature_points,
-                dtype=obs_times.dtype,
-                device=obs_times.device,
-            )
-            for a, b in zip(
-                observation_batch["t_start"],
-                observation_batch["t_end"],
-            )
-        ]
-        obs_times = torch.cat([obs_times, torch.cat(quadrature)])
-
-    t_grid = torch.unique(obs_times).sort().values
     with torch.no_grad():
         grid_eval = evaluate_log_model_on_points(
             model=model,
@@ -1027,6 +1011,7 @@ def run_observation_diagnostics(
             {"N_grid": grid_eval["N"], "t_grid": t_grid},
             observation_batch,
             params,
+            data_time_quadrature_points=quadrature_points,
         )
         nll = lognormal_nll(
             prediction,

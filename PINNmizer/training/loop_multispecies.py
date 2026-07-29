@@ -21,7 +21,7 @@ from PINNmizer.training.weighting import (
 from PINNmizer.pinn.timestep_consistency_multispecies import compute_timestep_consistency_loss_multispecies
 from PINNmizer.params import scale_x, scale_t
 from PINNmizer.pinn.model_eval import evaluate_log_model_on_points
-from PINNmizer.pinn.observation_operators import predict_observations
+from PINNmizer.pinn.observation_operators import observation_time_grid, predict_observations
 from PINNmizer.pinn.data_losses import lognormal_nll
 
 
@@ -302,15 +302,10 @@ def train_one_step_multispecies(
                 for k, v in observation_batch.items()
             }
 
-            obs_times = torch.cat([observation_batch["t_start"], observation_batch["t_end"]])
-
-            if data_time_quadrature_points > 1:
-                qs = []
-                for a, b in zip(observation_batch["t_start"], observation_batch["t_end"]):
-                    qs.append(torch.linspace(a, b, data_time_quadrature_points, dtype=obs_times.dtype, device=obs_times.device))
-                obs_times = torch.cat([obs_times, torch.cat(qs)])
-
-            t_grid = torch.unique(obs_times).sort().values
+            t_grid = observation_time_grid(
+                observation_batch,
+                data_time_quadrature_points=data_time_quadrature_points,
+            )
 
             grid_eval = evaluate_log_model_on_points(
                 model=model,
@@ -319,7 +314,12 @@ def train_one_step_multispecies(
                 params=params,
             )
 
-            pred = predict_observations({"N_grid": grid_eval["N"], "t_grid": t_grid}, observation_batch, params)
+            pred = predict_observations(
+                {"N_grid": grid_eval["N"], "t_grid": t_grid},
+                observation_batch,
+                params,
+                data_time_quadrature_points=data_time_quadrature_points,
+            )
             nll = lognormal_nll(pred, observation_batch["value"], observation_batch["sd_log"], eps=data_loss_eps)
 
             loss_data = nll["loss_data"]

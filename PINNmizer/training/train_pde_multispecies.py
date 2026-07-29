@@ -38,7 +38,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 from PINNmizer.io import load_mizer_inputs
 from PINNmizer.io_observations import load_observation_csv
 from PINNmizer.pinn.model_eval import evaluate_log_model_on_points
-from PINNmizer.pinn.observation_operators import predict_observations
+from PINNmizer.pinn.observation_operators import observation_time_grid, predict_observations
 from PINNmizer.pinn.data_losses import lognormal_nll
 from PINNmizer.params import scale_x, scale_t, active_grid_mask
 from PINNmizer.diagnostics.fixed_grid import (
@@ -419,13 +419,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def save_data_predictions_final(*, run_dir: Path, model: nn.Module, params, observation_batch: dict[str, object], eps: float, data_time_quadrature_points: int) -> None:
-    obs_times = torch.cat([observation_batch["t_start"], observation_batch["t_end"]])
-    if data_time_quadrature_points > 1:
-        obs_times = torch.cat([obs_times, torch.cat([torch.linspace(a, b, data_time_quadrature_points, dtype=obs_times.dtype, device=obs_times.device) for a, b in zip(observation_batch["t_start"], observation_batch["t_end"])])])
-    t_grid = torch.unique(obs_times).sort().values
+    t_grid = observation_time_grid(
+        observation_batch,
+        data_time_quadrature_points=data_time_quadrature_points,
+    )
     with torch.no_grad():
         grid_eval = evaluate_log_model_on_points(model=model, x_scaled=scale_x(torch.log(params.w), params), t_scaled=scale_t(t_grid, params), params=params)
-        pred = predict_observations({"N_grid": grid_eval["N"], "t_grid": t_grid}, observation_batch, params)
+        pred = predict_observations(
+            {"N_grid": grid_eval["N"], "t_grid": t_grid},
+            observation_batch,
+            params,
+            data_time_quadrature_points=data_time_quadrature_points,
+        )
         nll = lognormal_nll(pred, observation_batch["value"], observation_batch["sd_log"], eps=eps)
     rows = []
     n = observation_batch["value"].numel()

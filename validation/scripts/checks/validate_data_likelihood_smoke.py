@@ -8,7 +8,7 @@ import torch
 
 from PINNmizer.params import MizerTorchParams
 from PINNmizer.io_observations import load_observation_csv
-from PINNmizer.pinn.observation_operators import biomass_prediction, catch_prediction
+from PINNmizer.pinn.observation_operators import biomass_prediction, catch_prediction, observation_time_grid
 from PINNmizer.pinn.data_losses import lognormal_nll
 from PINNmizer.biology.fishing import evaluate_fishing_mortality_direct
 
@@ -70,6 +70,37 @@ def main():
     N_with_midpoint = torch.stack([N_grid[0], torch.full_like(N_grid[0], 1e6), N_grid[1]])
     annual_with_midpoint = catch_prediction(N_with_midpoint, torch.tensor([0.0, 0.5, 1.0]), params, torch.tensor([0]), torch.tensor([0]), torch.tensor([0.0]), torch.tensor([1.0]), torch.tensor([1.0]), torch.tensor([4.0]), gear_specific=True)
     assert torch.allclose(annual_with_midpoint, annual)
+
+    q = 10
+    interval_batch = {
+        "t_start": torch.tensor([0.0], dtype=torch.float64),
+        "t_end": torch.tensor([1.0], dtype=torch.float64),
+    }
+    t_quadrature = observation_time_grid(interval_batch, data_time_quadrature_points=q)
+    assert t_quadrature.numel() == q + 1
+    assert torch.allclose(t_quadrature, torch.linspace(0.0, 1.0, q + 1, dtype=torch.float64))
+
+    N_quadrature = torch.stack([N_grid[0] + t * (N_grid[1] - N_grid[0]) for t in t_quadrature])
+    annual_10 = catch_prediction(
+        N_quadrature,
+        t_quadrature,
+        params,
+        torch.tensor([0]),
+        torch.tensor([0]),
+        torch.tensor([0.0]),
+        torch.tensor([1.0]),
+        torch.tensor([1.0]),
+        torch.tensor([4.0]),
+        gear_specific=True,
+        data_time_quadrature_points=q,
+    )
+    rates_10 = []
+    selectivity = torch.tensor([1.0, 0.5, 0.25], dtype=torch.float64)
+    for k in range(q):
+        effort_k = 1.0 + 2.0 * t_quadrature[k]
+        F_k = effort_k * 2.0 * selectivity
+        rates_10.append((F_k * N_quadrature[k, 0] * params.w * params.dw).sum())
+    assert torch.allclose(annual_10, torch.stack(rates_10).mean().reshape(1))
 
     equal = lognormal_nll(torch.tensor([2.0]), torch.tensor([2.0]), torch.tensor([0.5]))
     assert torch.allclose(equal["loss_data"], torch.log(torch.tensor(0.5)))

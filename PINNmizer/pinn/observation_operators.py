@@ -14,6 +14,33 @@ def _time_indices(t_grid: torch.Tensor, t0: torch.Tensor, t1: torch.Tensor) -> t
     return torch.argmin(torch.abs(t_grid - mid)).reshape(1)
 
 
+def observation_time_grid(
+    observation_batch: dict[str, object],
+    data_time_quadrature_points: int = 1,
+) -> torch.Tensor:
+    """Build observation evaluation times, including left-closed interval points."""
+    if data_time_quadrature_points < 1:
+        raise ValueError("data_time_quadrature_points must be at least 1.")
+
+    t_start = observation_batch["t_start"]
+    t_end = observation_batch["t_end"]
+    obs_times = [t_start, t_end]
+
+    if data_time_quadrature_points > 1:
+        fractions = torch.arange(
+            data_time_quadrature_points,
+            dtype=t_start.dtype,
+            device=t_start.device,
+        ) / float(data_time_quadrature_points)
+        interval_times = (
+            t_start[:, None]
+            + (t_end - t_start)[:, None] * fractions[None, :]
+        )
+        obs_times.append(interval_times.reshape(-1))
+
+    return torch.unique(torch.cat(obs_times)).sort().values
+
+
 def _endpoint_indices(t_grid: torch.Tensor, t0: torch.Tensor, t1: torch.Tensor) -> torch.Tensor:
     """Return the grid indices for an instantaneous time or interval endpoints."""
     i0 = torch.argmin(torch.abs(t_grid - t0)).reshape(1)
@@ -21,6 +48,20 @@ def _endpoint_indices(t_grid: torch.Tensor, t0: torch.Tensor, t1: torch.Tensor) 
     if bool((i0 == i1).all().detach().cpu()):
         return i0
     return torch.cat([i0, i1])
+
+
+def _left_closed_interval_indices(
+    t_grid: torch.Tensor,
+    t0: torch.Tensor,
+    t1: torch.Tensor,
+) -> torch.Tensor:
+    """Return evaluation times in [min(t0, t1), max(t0, t1))."""
+    lower = torch.minimum(t0, t1)
+    upper = torch.maximum(t0, t1)
+    mask = (t_grid >= lower) & (t_grid < upper)
+    if bool(mask.any().detach().cpu()):
+        return torch.nonzero(mask, as_tuple=False).reshape(-1)
+    return torch.argmin(torch.abs(t_grid - lower)).reshape(1)
 
 
 def biomass_prediction(N_grid: torch.Tensor, t_grid: torch.Tensor, params: MizerTorchParams, species_idx: torch.Tensor, t_start: torch.Tensor, t_end: torch.Tensor, w_min: torch.Tensor, w_max: torch.Tensor, *, abundance: bool = False) -> torch.Tensor:
@@ -59,34 +100,61 @@ def _gear_fishing(params: MizerTorchParams, gear_idx: int | None, species_idx: i
     return effort[gear_idx] * catchability[gear_idx, species_idx] * selectivity[gear_idx, species_idx, :]
 
 
-def catch_prediction(N_grid: torch.Tensor, t_grid: torch.Tensor, params: MizerTorchParams, species_idx: torch.Tensor, gear_idx: torch.Tensor, t_start: torch.Tensor, t_end: torch.Tensor, w_min: torch.Tensor, w_max: torch.Tensor, *, gear_specific: bool) -> torch.Tensor:
+def catch_prediction(
+    N_grid: torch.Tensor,
+    t_grid: torch.Tensor,
+    params: MizerTorchParams,
+    species_idx: torch.Tensor,
+    gear_idx: torch.Tensor,
+    t_start: torch.Tensor,
+    t_end: torch.Tensor,
+    w_min: torch.Tensor,
+    w_max: torch.Tensor,
+    *,
+    gear_specific: bool,
+    data_time_quadrature_points: int = 1,
+) -> torch.Tensor:
     """Predict instantaneous or annual catch/yield observations.
 
-    Instantaneous observations return Y(t). Interval observations use the mean
-    of the catch rates at the interval endpoints multiplied by interval length.
-    For the intended annual data this is the annual mean-rate approximation
-    C_y = 0.5 * [Y(y) + Y(y + 1)] * 1 year.
-    Output shape [n_obs].
+    With q > 1, interval observations use q equally spaced left-closed times:
+
+        t_k = t_start + k * (t_end - t_start) / q,  k = 0, ..., q - 1
+        C = mean_k Y(t_k) * abs(t_end - t_start)
+
+    For q=10 and a one-year interval, this matches mizer output at
+    y, y+0.1, ..., y+0.9, with the y+1 endpoint excluded.
     """
+    if data_time_quadrature_points < 1:
+        raise ValueError("data_time_quadrature_points must be at least 1.")
+
     w = params.w.to(dtype=N_grid.dtype, device=N_grid.device)
     dw = params.dw.to(dtype=N_grid.dtype, device=N_grid.device)
     out = []
     for j in range(species_idx.numel()):
         sp = int(species_idx[j].detach().cpu())
         gear = int(gear_idx[j].detach().cpu()) if gear_specific else None
-        tidx = _endpoint_indices(t_grid, t_start[j], t_end[j])
+        duration = torch.abs(t_end[j] - t_start[j])
+        if data_time_quadrature_points > 1 and bool((duration > 0).detach().cpu()):
+            tidx = _left_closed_interval_indices(t_grid, t_start[j], t_end[j])
+        else:
+            tidx = _endpoint_indices(t_grid, t_start[j], t_end[j])
         wmask = (w >= w_min[j]) & (w <= w_max[j])
         rates = []
         for ti in tidx:
             F = _gear_fishing(params, gear, sp, t_grid[ti]).to(dtype=N_grid.dtype, device=N_grid.device)
             rates.append((F[wmask] * N_grid[ti, sp, wmask] * w[wmask] * dw[wmask]).sum())
         mean_rate = torch.stack(rates).mean()
-        duration = torch.abs(t_end[j] - t_start[j])
         out.append(torch.where(duration > 0, mean_rate * duration, mean_rate))
     return torch.stack(out)
 
 
-def predict_observations(state: dict[str, torch.Tensor], observation_batch: dict[str, object], params: MizerTorchParams) -> torch.Tensor:
+def predict_observations(
+    state: dict[str, torch.Tensor],
+    observation_batch: dict[str, object],
+    params: MizerTorchParams,
+    *,
+    data_time_quadrature_points: int = 1,
+) -> torch.Tensor:
     """Dispatch deterministic observation operators; returns prediction [n_obs]."""
     N_grid = state["N_grid"]
     t_grid = state["t_grid"]
@@ -100,9 +168,9 @@ def predict_observations(state: dict[str, torch.Tensor], observation_batch: dict
         elif typ == "survey_abundance":
             p = biomass_prediction(N_grid, t_grid, params, observation_batch["species_idx"][sl], observation_batch["t_start"][sl], observation_batch["t_end"][sl], observation_batch["w_min"][sl], observation_batch["w_max"][sl], abundance=True) * observation_batch["q"][j]
         elif typ == "catch_total":
-            p = catch_prediction(N_grid, t_grid, params, observation_batch["species_idx"][sl], observation_batch["gear_idx"][sl], observation_batch["t_start"][sl], observation_batch["t_end"][sl], observation_batch["w_min"][sl], observation_batch["w_max"][sl], gear_specific=False)
+            p = catch_prediction(N_grid, t_grid, params, observation_batch["species_idx"][sl], observation_batch["gear_idx"][sl], observation_batch["t_start"][sl], observation_batch["t_end"][sl], observation_batch["w_min"][sl], observation_batch["w_max"][sl], gear_specific=False, data_time_quadrature_points=data_time_quadrature_points)
         elif typ == "catch_gear":
-            p = catch_prediction(N_grid, t_grid, params, observation_batch["species_idx"][sl], observation_batch["gear_idx"][sl], observation_batch["t_start"][sl], observation_batch["t_end"][sl], observation_batch["w_min"][sl], observation_batch["w_max"][sl], gear_specific=True)
+            p = catch_prediction(N_grid, t_grid, params, observation_batch["species_idx"][sl], observation_batch["gear_idx"][sl], observation_batch["t_start"][sl], observation_batch["t_end"][sl], observation_batch["w_min"][sl], observation_batch["w_max"][sl], gear_specific=True, data_time_quadrature_points=data_time_quadrature_points)
         else:
             raise ValueError(f"Unsupported obs_type: {typ}")
         pred.append(p.reshape(()))
