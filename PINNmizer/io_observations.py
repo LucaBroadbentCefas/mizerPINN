@@ -11,7 +11,7 @@ SUPPORTED_OBS_TYPES = {"biomass", "survey_biomass", "survey_abundance", "catch_t
 REQUIRED_COLUMNS = {"obs_type", "species_idx", "t_start", "value"}
 
 
-def load_observation_csv(path: str | Path, params: MizerTorchParams, *, default_cv: float | None = 0.3) -> dict[str, object]:
+def load_observation_csv(path: str | Path, params: MizerTorchParams, *, default_cv: float | None = 0.3, estimate_cv: bool = False) -> dict[str, object]:
     """Load long-format observation CSV as tensors matching params dtype/device.
 
     Returned tensors are length [n_obs]. Times and weights are physical units.
@@ -52,18 +52,19 @@ def load_observation_csv(path: str | Path, params: MizerTorchParams, *, default_
         raise ValueError("gear_idx is required for obs_type='catch_gear'.")
 
     value = pd.to_numeric(df["value"], errors="coerce")
-    if (~(value > 0) | ~value.apply(lambda x: pd.notna(x))).any():
+    if (~(value > 0) | ~value.apply(lambda x: pd.notna(x) and __import__('math').isfinite(x))).any():
         raise ValueError("Observation value must be finite and positive.")
 
     cv = pd.to_numeric(df["cv"], errors="coerce")
     sd_log = pd.to_numeric(df["sd_log"], errors="coerce")
     missing_sd = sd_log.isna()
-    if missing_sd.any():
+    used_default_cv = bool((missing_sd & cv.isna()).any()) if not estimate_cv else False
+    if not estimate_cv and missing_sd.any():
         if default_cv is None and cv[missing_sd].isna().any():
             raise ValueError("Each observation needs sd_log, cv, or --data-default-cv.")
         cv_fill = cv.copy().fillna(float(default_cv))
         sd_log[missing_sd] = (1.0 + cv_fill[missing_sd] ** 2).apply(lambda x: __import__('math').sqrt(__import__('math').log(x)))
-    if (~(sd_log > 0) | sd_log.isna()).any():
+    if not estimate_cv and (~(sd_log > 0) | ~sd_log.apply(lambda x: pd.notna(x) and __import__('math').isfinite(x))).any():
         raise ValueError("sd_log must be finite and positive after cv/default conversion.")
 
     def ten(col, kind=float):
@@ -71,7 +72,7 @@ def load_observation_csv(path: str | Path, params: MizerTorchParams, *, default_
         return torch.as_tensor(vals.to_numpy(copy=True), dtype=(torch.long if kind is int else dtype), device=device)
 
     gear = pd.to_numeric(df["gear_idx"], errors="coerce").fillna(-1).astype(int)
-    return {
+    result = {
         "obs_type": df["obs_type"].astype(str).tolist(),
         "dataset": df["dataset"].fillna("").astype(str).tolist(),
         "unit": df["unit"].fillna("").astype(str).tolist(),
@@ -82,4 +83,10 @@ def load_observation_csv(path: str | Path, params: MizerTorchParams, *, default_
         "value": ten("value"), "cv": torch.as_tensor(cv.fillna(float("nan")).to_numpy(), dtype=dtype, device=device),
         "sd_log": torch.as_tensor(sd_log.to_numpy(), dtype=dtype, device=device),
         "q": ten("q"),
+        "uncertainty_source": "fixed_default_cv" if used_default_cv else "fixed_row_cv",
     }
+    # Preserve optional simulation/provenance columns without making them required.
+    for col in ["true_cv", "true_sd_log", "value_true", "replicate_id", "noise_seed"]:
+        if col in df.columns:
+            result[col] = df[col].tolist()
+    return result

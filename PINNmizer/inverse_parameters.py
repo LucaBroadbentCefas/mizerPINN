@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import torch
 import torch.nn as nn
 
@@ -44,3 +45,41 @@ class BoundedLogRMax(nn.Module):
 
     def config(self) -> dict:
         return {"type": self.__class__.__name__, "lower": self.lower, "upper": self.upper, "eps": self.eps}
+
+
+class BoundedDataCV(nn.Module):
+    """Bounded global or per-species observation CV in log-CV space."""
+
+    def __init__(self, initial_cv: torch.Tensor, *, lower: float = 0.02, upper: float = 1.5, scope: str = "species", eps: float = 1e-12):
+        super().__init__()
+        if scope not in {"species", "global"}:
+            raise ValueError("data CV scope must be 'species' or 'global'.")
+        if not (0.0 < lower < upper):
+            raise ValueError(f"data CV bounds require 0 < lower < upper, got {lower}, {upper}.")
+        if initial_cv.ndim != 1 or initial_cv.numel() < 1:
+            raise ValueError(f"initial_cv must be a non-empty vector, got {tuple(initial_cv.shape)}.")
+        if not torch.isfinite(initial_cv).all() or bool(((initial_cv < lower) | (initial_cv > upper)).any()):
+            raise ValueError(f"initial CV must be finite and within [{lower}, {upper}].")
+        lo = torch.as_tensor(lower, dtype=initial_cv.dtype, device=initial_cv.device).log()
+        hi = torch.as_tensor(upper, dtype=initial_cv.dtype, device=initial_cv.device).log()
+        initial_log = initial_cv.log()
+        transform_eps = max(float(eps), float(torch.finfo(initial_cv.dtype).eps))
+        p = ((initial_log - lo) / (hi - lo)).clamp(transform_eps, 1.0 - transform_eps)
+        self.raw_parameter = nn.Parameter(torch.logit(p))
+        self.lower, self.upper, self.scope, self.eps = float(lower), float(upper), scope, float(eps)
+        self.register_buffer("initial_cv", initial_cv.detach().clone())
+        self.register_buffer("initial_log_cv", initial_log.detach().clone())
+
+    def current_log_cv(self) -> torch.Tensor:
+        lo = math.log(self.lower)
+        return lo + (math.log(self.upper) - lo) * torch.sigmoid(self.raw_parameter)
+
+    def current_cv(self) -> torch.Tensor:
+        return self.current_log_cv().exp()
+
+    def current_sd_log(self) -> torch.Tensor:
+        cv = self.current_cv()
+        return torch.sqrt(torch.log1p(cv.square()))
+
+    def config(self) -> dict:
+        return {"type": self.__class__.__name__, "scope": self.scope, "lower": self.lower, "upper": self.upper, "eps": self.eps}
