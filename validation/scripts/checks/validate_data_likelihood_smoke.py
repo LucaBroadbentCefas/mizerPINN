@@ -9,7 +9,7 @@ import torch
 from PINNmizer.params import MizerTorchParams
 from PINNmizer.io_observations import load_observation_csv
 from PINNmizer.pinn.observation_operators import biomass_prediction, catch_prediction, observation_time_grid
-from PINNmizer.pinn.data_losses import lognormal_nll
+from PINNmizer.pinn.data_losses import lognormal_nll, observation_relative_nll
 from PINNmizer.biology.fishing import evaluate_fishing_mortality_direct
 from PINNmizer.inverse_parameters import BoundedDataCV, BoundedLogRMax
 from PINNmizer.training.checkpointing import save_checkpoint
@@ -113,10 +113,29 @@ def main():
         rates_10.append((F_k * N_quadrature[k, 0] * params.w * params.dw).sum())
     assert torch.allclose(annual_10, torch.stack(rates_10).mean().reshape(1))
 
-    equal = lognormal_nll(torch.tensor([2.0]), torch.tensor([2.0]), torch.tensor([0.5]))
+    equal = observation_relative_nll(
+        torch.tensor([2.0]),
+        torch.tensor([2.0]),
+        torch.tensor([0.5]),
+    )
+    assert torch.allclose(equal["relative_residual"], torch.zeros(1))
+    assert torch.allclose(equal["standardized_residual"], torch.zeros(1))
     assert torch.allclose(equal["loss_data"], torch.log(torch.tensor(0.5)))
-    twice = lognormal_nll(torch.tensor([4.0]), torch.tensor([2.0]), torch.tensor([1.0]))
-    assert torch.allclose(torch.abs(twice["log_residual"]), torch.log(torch.tensor([2.0])))
+
+    overprediction = observation_relative_nll(
+        torch.tensor([4.0]),
+        torch.tensor([2.0]),
+        torch.tensor([1.0]),
+    )
+    assert torch.allclose(overprediction["relative_residual"], torch.tensor([1.0]))
+    assert torch.allclose(overprediction["standardized_residual"], torch.tensor([1.0]))
+    assert torch.allclose(overprediction["loss_data"], torch.tensor(0.5))
+
+    cv = torch.tensor([0.3])
+    sd_log = torch.sqrt(torch.log1p(cv.square()))
+    compatibility = lognormal_nll(torch.tensor([4.0]), torch.tensor([2.0]), sd_log)
+    direct = observation_relative_nll(torch.tensor([4.0]), torch.tensor([2.0]), cv)
+    assert torch.allclose(compatibility["loss_data"], direct["loss_data"])
 
     initial = torch.tensor([0.3, 0.4], dtype=torch.float64)
     species_cv = BoundedDataCV(initial, lower=0.02, upper=1.5, scope="species")
@@ -131,7 +150,7 @@ def main():
     old = global_cv.raw_parameter.detach().clone()
     optimizer = torch.optim.Adam([{"params": global_cv.parameters(), "lr": 1e-2, "name": "data_cv"}])
     prediction = torch.tensor([4.0], dtype=torch.float64, requires_grad=True)
-    loss = lognormal_nll(prediction, torch.tensor([2.0], dtype=torch.float64), global_cv.current_sd_log())["loss_data"]
+    loss = observation_relative_nll(prediction, torch.tensor([2.0], dtype=torch.float64), global_cv.current_cv())["loss_data"]
     loss.backward()
     assert prediction.grad is not None
     assert global_cv.raw_parameter.grad is not None and torch.isfinite(global_cv.raw_parameter.grad).all() and global_cv.raw_parameter.grad.abs().sum() > 0
@@ -155,7 +174,7 @@ def main():
     assert not torch.allclose(F0_direct, F1_direct)
     fixed = make_params(time_varying=False)
     assert torch.allclose(evaluate_fishing_mortality_direct(fixed.w, fixed, t_eval=torch.tensor(0.0)), evaluate_fishing_mortality_direct(fixed.w, fixed, t_eval=torch.tensor(1.0)))
-    print("data likelihood smoke checks passed")
+    print("observation-normalised data likelihood smoke checks passed")
 
 
 if __name__ == "__main__":
