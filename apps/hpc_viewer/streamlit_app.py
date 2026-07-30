@@ -30,19 +30,6 @@ if _DATA_LOSS_SPEC is None or _DATA_LOSS_SPEC.loader is None:
 _data_loss_extension = importlib.util.module_from_spec(_DATA_LOSS_SPEC)
 _DATA_LOSS_SPEC.loader.exec_module(_data_loss_extension)
 
-_RUNTIME_FIX_PATH = Path(__file__).with_name("_streamlit_runtime_fix.py")
-_RUNTIME_FIX_SPEC = importlib.util.spec_from_file_location(
-    "pinnmizer_hpc_viewer_runtime_fix",
-    _RUNTIME_FIX_PATH,
-)
-if _RUNTIME_FIX_SPEC is None or _RUNTIME_FIX_SPEC.loader is None:
-    raise ImportError(
-        f"Could not load Streamlit runtime fixes from {_RUNTIME_FIX_PATH}"
-    )
-
-_runtime_fix = importlib.util.module_from_spec(_RUNTIME_FIX_SPEC)
-_RUNTIME_FIX_SPEC.loader.exec_module(_runtime_fix)
-
 
 _original_normalise_mizer_dataframe = _impl.normalise_mizer_dataframe
 _original_load_fixed_fields = _impl.load_fixed_fields
@@ -167,7 +154,6 @@ def _load_fixed_fields_with_species_mask(
 _impl.normalise_mizer_dataframe = _normalise_mizer_dataframe_without_masked_bins
 _impl.load_fixed_fields = _load_fixed_fields_with_species_mask
 _data_loss_extension.install(_impl)
-_runtime_fix.install(_impl)
 
 
 if __name__ == "__main__":
