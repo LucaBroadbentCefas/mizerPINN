@@ -2,23 +2,12 @@
 from __future__ import annotations
 
 from functools import wraps
-from pathlib import Path
 from typing import Any
 
+import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-
-
-_PAGE_NAMES = [
-    "Run browser",
-    "Single run: training",
-    "Single run: data",
-    "Single run: fixed diagnostics",
-    "Single run: fields",
-    "Compare runs",
-    "Mizer comparison",
-    "File/config view",
-]
 
 
 def _translate_width(kwargs: dict[str, Any]) -> None:
@@ -44,7 +33,6 @@ def _force_svg_scatter_traces(figure: Any) -> Any:
                 trace["type"] = "scatter"
         return go.Figure(payload)
     except Exception:
-        # Rendering the original figure is preferable to breaking the page.
         return figure
 
 
@@ -70,173 +58,102 @@ def _patch_streamlit_function(name: str, *, force_svg: bool = False) -> None:
 
 
 def _patch_streamlit_api() -> None:
-    # These are the width-aware calls used by the viewer. Keeping the translation
-    # central prevents warnings from both the base app and its data-loss extension.
     _patch_streamlit_function("plotly_chart", force_svg=True)
-    for name in (
-        "dataframe",
-        "data_editor",
-        "altair_chart",
-        "vega_lite_chart",
-        "line_chart",
-        "area_chart",
-        "bar_chart",
-        "scatter_chart",
-        "pyplot",
-        "image",
-    ):
-        _patch_streamlit_function(name)
+    _patch_streamlit_function("dataframe")
 
 
-def _render_selected_page(
-    impl,
-    page: str,
-    run_df,
-    selected_run: str | None,
-    selected_runs: list[str],
-    run_dir: Path,
-    *,
-    log_y: bool,
-    markers: bool,
-    clip: bool,
-    heat_mode: str,
-    mizer_paths: str,
-    uploads,
-) -> None:
-    if page == "Run browser":
-        impl.run_browser_page(run_df, selected_runs, log_y, markers)
-    elif page == "Single run: training":
-        impl.history_page(run_dir, False, log_y, markers) if selected_run else st.info(
-            "Select a run."
-        )
-    elif page == "Single run: data":
-        impl.data_page(run_dir, markers) if selected_run else st.info("Select a run.")
-    elif page == "Single run: fixed diagnostics":
-        impl.history_page(run_dir, True, log_y, markers) if selected_run else st.info(
-            "Select a run."
-        )
-    elif page == "Single run: fields":
-        impl.fields_page(run_dir, clip, heat_mode, markers) if selected_run else st.info(
-            "Select a run."
-        )
-    elif page == "Compare runs":
-        impl.compare_page(run_df, selected_runs, clip, heat_mode, markers)
-    elif page == "Mizer comparison":
-        if selected_run:
-            mizers = impl.load_mizer_sources(mizer_paths, uploads)
-            impl.mizer_page(
-                run_df,
-                selected_run,
-                selected_runs,
-                mizers,
-                clip,
-                heat_mode,
-                markers,
+def _values_equal(left: Any, right: Any, impl) -> bool:
+    try:
+        return bool(
+            np.isclose(
+                float(left),
+                float(right),
+                rtol=1e-6,
+                atol=1e-12,
+                equal_nan=True,
             )
-        else:
-            st.info("Select a PINN run.")
-    elif page == "File/config view":
-        impl.file_view_page(run_dir) if selected_run else st.info("Select a run.")
-
-
-def _main(impl) -> None:
-    st.set_page_config(page_title="PINNmizer HPC Viewer", layout="wide")
-    st.title("PINNmizer HPC run viewer")
-
-    with st.sidebar:
-        run_root = Path(
-            st.text_input("Run root path", str(impl.DEFAULT_RUN_ROOT))
-        ).expanduser()
-        if st.button("Refresh / re-scan"):
-            st.cache_data.clear()
-
-        label_mode = st.selectbox(
-            "Run label mode",
-            [
-                "folder name",
-                "short folder name",
-                "model_arch + seed",
-                "custom label assembled from selected config fields",
-            ],
         )
-        if label_mode.startswith("custom"):
-            st.multiselect(
-                "Custom label config fields",
-                impl.RUN_COLUMNS,
-                default=["model_arch", "seed"],
-            )
+    except (TypeError, ValueError):
+        return impl._value_group_key(left) == impl._value_group_key(right)
 
-        log_y = st.checkbox("Log y-axis where relevant", True)
-        markers = st.checkbox("Show points", True)
-        clip = st.checkbox("Quantile clipping for heatmaps", True)
-        heat_mode = st.selectbox(
-            "Heatmap colour range",
-            ["auto", "symmetric around zero", "percentile clipped"],
-            index=2,
+
+def _display_value(value: Any) -> str:
+    return "NA" if pd.isna(value) else str(value)
+
+
+def _show_architecture_differences(impl, run_df, selected_runs: list[str]) -> None:
+    """Render the comparison table with Arrow-safe homogeneous columns."""
+    st.subheader("Selected-run architecture/config differences")
+    fields = [
+        "model_arch", "hidden_width", "hidden_layers", "fourier_num_features",
+        "fourier_scale", "fourier_include_raw_input", "weight_factorization",
+        "rwf_mu", "rwf_sigma", "rwf_apply_to", "rwf_base_init",
+        "residual_form", "boundary_loss_form", "time_sampling", "causal_loss",
+        "loss_weighting", "collocation_strategy", "r3_population_size", "seed",
+        "fourier_seed", "lr", "n_steps", "n_time", "n_eval", "lambda_pde",
+        "lambda_ic", "lambda_bc", "lambda_timestep",
+    ]
+    selected = run_df[run_df.run_id.isin(selected_runs)].set_index("run_id")
+    display_rows: list[dict[str, str]] = []
+    style_rows: list[dict[str, str]] = []
+
+    for field in fields:
+        values = [
+            selected.at[run_id, field]
+            if field in selected.columns and run_id in selected.index
+            else np.nan
+            for run_id in selected_runs
+        ]
+        groups: list[list[Any]] = []
+        for value in values:
+            for group in groups:
+                if _values_equal(value, group[0], impl):
+                    group.append(value)
+                    break
+            else:
+                groups.append([value])
+
+        if len(groups) <= 1:
+            continue
+
+        mode = max(groups, key=len)[0]
+        display_rows.append(
+            {
+                "field": field,
+                **{
+                    run_id: _display_value(value)
+                    for run_id, value in zip(selected_runs, values)
+                },
+            }
         )
-        mizer_paths = st.text_area("Mizer CSV local paths (one per line)")
-        uploads = st.file_uploader(
-            "Upload mizer CSVs", type="csv", accept_multiple_files=True
+        style_rows.append(
+            {
+                "field": field,
+                **{
+                    run_id: (
+                        ""
+                        if _values_equal(value, mode, impl)
+                        else "background-color: #ffe08a; font-weight: 600"
+                    )
+                    for run_id, value in zip(selected_runs, values)
+                },
+            }
         )
 
-    run_df = impl.scan_runs(run_root)
-    if run_df.empty:
-        st.warning(f"No run folders found under {run_root}")
+    if not display_rows:
+        st.info("No differing architecture/config fields among the selected runs.")
+        return
 
-    run_ids = run_df.run_id.tolist()
-    if run_ids and st.session_state.get("selected_run") not in run_ids:
-        st.session_state["selected_run"] = run_ids[0]
-    if not run_ids:
-        st.session_state["selected_run"] = None
-
-    with st.sidebar:
-        selected_run = (
-            st.selectbox(
-                "Single selected run",
-                run_ids,
-                index=(
-                    run_ids.index(st.session_state["selected_run"])
-                    if run_ids
-                    and st.session_state.get("selected_run") in run_ids
-                    else 0
-                ),
-            )
-            if run_ids
-            else None
-        )
-        if selected_run:
-            st.session_state["selected_run"] = selected_run
-
-        selected_runs = st.multiselect(
-            "Runs for comparison",
-            run_ids,
-            default=run_ids[: min(3, len(run_ids))],
-        )
-        page = st.radio("Page", _PAGE_NAMES, key="hpc_viewer_page")
-
-    selected_run = st.session_state.get("selected_run")
-    run_dir = (
-        Path(run_df.loc[run_df.run_id == selected_run, "run_dir"].iloc[0])
-        if selected_run
-        else Path("")
-    )
-
-    _render_selected_page(
-        impl,
-        page,
-        run_df,
-        selected_run,
-        selected_runs,
-        run_dir,
-        log_y=log_y,
-        markers=markers,
-        clip=clip,
-        heat_mode=heat_mode,
-        mizer_paths=mizer_paths,
-        uploads=uploads,
-    )
+    display = pd.DataFrame(display_rows).set_index("field").astype(str)
+    styles = pd.DataFrame(style_rows).set_index("field").reindex_like(display)
+    styled = display.style.apply(lambda _: styles, axis=None)
+    st.dataframe(styled, use_container_width=True)
 
 
 def install(impl) -> None:
     _patch_streamlit_api()
-    impl.main = lambda: _main(impl)
+    impl.show_architecture_differences = (
+        lambda run_df, selected_runs: _show_architecture_differences(
+            impl, run_df, selected_runs
+        )
+    )
