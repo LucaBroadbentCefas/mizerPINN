@@ -352,6 +352,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lambda-data", type=float, default=0.0)
     parser.add_argument("--data-default-cv", type=float, default=0.3)
     parser.add_argument("--estimate-data-cv", action="store_true", default=False)
+    parser.add_argument("--data-discrepancy-gate", action="store_true", default=False)
     parser.add_argument("--data-cv-scope", choices=["species", "global"], default="species")
     parser.add_argument("--data-cv-init", type=float, default=0.3)
     parser.add_argument("--data-cv-lower", type=float, default=0.02)
@@ -551,6 +552,8 @@ def save_estimated_data_cv(inverse_data_cv, params, run_dir) -> str | None:
 
 def main() -> None:
     args = parse_args()
+    if args.data_discrepancy_gate and args.estimate_data_cv:
+        raise ValueError("--data-discrepancy-gate currently requires fixed known observation uncertainty and cannot be combined with --estimate-data-cv.")
     if not (0.0 < args.data_cv_lower < args.data_cv_upper):
         raise ValueError("Data CV bounds require 0 < --data-cv-lower < --data-cv-upper.")
     if not (args.data_cv_lower <= args.data_cv_init <= args.data_cv_upper):
@@ -820,6 +823,7 @@ def main() -> None:
         "lambda_data": args.lambda_data,
         "data_default_cv": args.data_default_cv,
         "estimate_data_cv": args.estimate_data_cv,
+        "data_discrepancy_gate": args.data_discrepancy_gate,
         "data_cv_scope": args.data_cv_scope,
         "data_cv_init": args.data_cv_init,
         "data_cv_lower": args.data_cv_lower,
@@ -973,6 +977,7 @@ def main() -> None:
                 data_time_quadrature_points=args.data_time_quadrature_points,
                 inverse_rmax=inverse_rmax,
                 inverse_data_cv=inverse_data_cv,
+                data_discrepancy_gate=args.data_discrepancy_gate,
                 boundary_target_gradient_mode="rmax-only" if args.estimate_rmax else "detached",
             )
 
