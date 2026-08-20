@@ -22,7 +22,7 @@ from PINNmizer.pinn.timestep_consistency_multispecies import compute_timestep_co
 from PINNmizer.params import scale_x, scale_t
 from PINNmizer.pinn.model_eval import evaluate_log_model_on_points
 from PINNmizer.pinn.observation_operators import observation_time_grid, predict_observations
-from PINNmizer.pinn.data_losses import lognormal_nll
+from PINNmizer.pinn.data_losses import apply_data_discrepancy_gate, lognormal_nll
 
 
 def scalar_min(x: torch.Tensor) -> float:
@@ -144,6 +144,7 @@ def train_one_step_multispecies(
     data_time_quadrature_points: int = 1,
     inverse_rmax=None,
     inverse_data_cv=None,
+    data_discrepancy_gate: bool = False,
     boundary_target_gradient_mode: str = "detached",
 ) -> dict:
     if wang_weight_batch not in {"fixed", "training"}:
@@ -354,6 +355,21 @@ def train_one_step_multispecies(
 
     if "n_data_obs_active" not in out:
         out["n_data_obs_active"] = loss_data.new_zeros(())
+    if "data_log_residual" in out:
+        out.update(apply_data_discrepancy_gate(
+            loss_data,
+            out["data_log_residual"],
+            out["data_sd_log_used"],
+            enabled=data_discrepancy_gate,
+        ))
+    else:
+        out.update(apply_data_discrepancy_gate(
+            loss_data,
+            loss_data.new_empty((0,)),
+            loss_data.new_empty((0,)),
+            enabled=data_discrepancy_gate,
+        ))
+    loss_data_effective = out["loss_data_effective"]
     loss_pde_for_weighting = out["loss_pde"] if loss_weighting == "expert-grad-norm" else out.get("loss_pde_ungated", out["loss_pde"])
     
     raw_losses = {
@@ -369,7 +385,7 @@ def train_one_step_multispecies(
         "ic": lambda_ic * out["loss_ic"],
         "bc": lambda_bc * out["loss_bc"],
         "timestep": lambda_timestep * out["loss_timestep"],
-        "data": lambda_data * out["loss_data"],
+        "data": lambda_data * loss_data_effective,
     }
 
     weight_stats = {
@@ -459,7 +475,7 @@ def train_one_step_multispecies(
                 "ic": lambda_ic * calibration_out["loss_ic"],
                 "bc": lambda_bc * calibration_out["loss_bc"],
                 "timestep": lambda_timestep * calibration_loss_timestep,
-                "data": lambda_data * loss_data,
+                "data": lambda_data * loss_data_effective,
             }
             weight_update_used_fixed_batch = 1.0
         elif active_weight_batch == "training":
@@ -495,7 +511,7 @@ def train_one_step_multispecies(
         + out["loss_ic"]
         + out["loss_bc"]
         + out["loss_timestep"]
-        + out["loss_data"]
+        + loss_data_effective
     )
 
 
@@ -505,7 +521,7 @@ def train_one_step_multispecies(
             + lambda_ic * out["loss_ic"]
             + lambda_bc * out["loss_bc"]
             + lambda_timestep * out["loss_timestep"]
-            + lambda_data * out["loss_data"]
+            + lambda_data * loss_data_effective
         )
     else:
         loss = (
@@ -513,7 +529,7 @@ def train_one_step_multispecies(
             + lambda_ic * loss_weights["ic"] * out["loss_ic"]
             + lambda_bc * loss_weights["bc"] * out["loss_bc"]
             + lambda_timestep * loss_weights["timestep"] * out["loss_timestep"]
-            + lambda_data * loss_weights["data"] * out["loss_data"]
+            + lambda_data * loss_weights["data"] * loss_data_effective
         )
 
 
@@ -614,6 +630,10 @@ def train_one_step_multispecies(
         "loss_ic": float(out["loss_ic"].detach().cpu()),
         "loss_bc": float(out["loss_bc"].detach().cpu()),
         "loss_data": float(out["loss_data"].detach().cpu()),
+        "loss_data_effective": float(loss_data_effective.detach().cpu()),
+        "data_discrepancy_q": float(out["data_discrepancy_q"].cpu()),
+        "data_discrepancy_q95": float(out["data_discrepancy_q95"].cpu()),
+        "data_loss_active": float(out["data_loss_active"].cpu()),
         "grad_norm": grad_norm,
         "residual_log_mean": scalar_mean(residual_log),
         "residual_log_abs_mean": scalar_mean(torch.abs(residual_log)),
@@ -640,7 +660,7 @@ def train_one_step_multispecies(
         "wang_scaled_loss_ic": float((loss_weights["ic"] * out["loss_ic"]).detach().cpu()),
         "wang_scaled_loss_bc": float((loss_weights["bc"] * out["loss_bc"]).detach().cpu()),
         "wang_scaled_loss_timestep": float((loss_weights["timestep"] * out["loss_timestep"]).detach().cpu()),
-        "wang_scaled_loss_data": float((loss_weights.get("data", 1.0) * out["loss_data"]).detach().cpu()),
+        "wang_scaled_loss_data": float((loss_weights.get("data", 1.0) * loss_data_effective).detach().cpu()),
         "loss_pde_for_weighting": float(loss_pde_for_weighting.detach().cpu()),
         "loss_pde_ungated": float(out.get("loss_pde_ungated", out["loss_pde"]).detach().cpu()),
         "loss_pde_gated": float(out.get("loss_pde_gated", out["loss_pde"]).detach().cpu()),
@@ -669,14 +689,14 @@ def train_one_step_multispecies(
         "objective_loss_ic": float((lambda_ic * loss_weights["ic"] * out["loss_ic"]).detach().cpu()),
         "objective_loss_bc": float((lambda_bc * loss_weights["bc"] * out["loss_bc"]).detach().cpu()),
         "objective_loss_timestep": float((lambda_timestep * loss_weights["timestep"] * out["loss_timestep"]).detach().cpu()),
-        "objective_loss_data": float((lambda_data * loss_weights.get("data", 1.0) * out["loss_data"]).detach().cpu()),
+        "objective_loss_data": float((lambda_data * loss_weights.get("data", 1.0) * loss_data_effective).detach().cpu()),
         
         # Backward-compatible aliases for old plotting/history code.
         "weighted_loss_pde": float((lambda_pde * loss_weights["pde"] * out["loss_pde"]).detach().cpu()),
         "weighted_loss_ic": float((lambda_ic * loss_weights["ic"] * out["loss_ic"]).detach().cpu()),
         "weighted_loss_bc": float((lambda_bc * loss_weights["bc"] * out["loss_bc"]).detach().cpu()),
         "weighted_loss_timestep": float((lambda_timestep * loss_weights["timestep"] * out["loss_timestep"]).detach().cpu()),
-        "weighted_loss_data": float((lambda_data * loss_weights.get("data", 1.0) * out["loss_data"]).detach().cpu()),
+        "weighted_loss_data": float((lambda_data * loss_weights.get("data", 1.0) * loss_data_effective).detach().cpu()),
         "grad_pde_max_for_weighting": weight_stats["grad_pde_max"],
         "grad_ic_mean_for_weighting": weight_stats["grad_ic_mean"],
         "grad_bc_mean_for_weighting": weight_stats["grad_bc_mean"],
