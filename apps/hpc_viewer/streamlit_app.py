@@ -17,18 +17,25 @@ if _SPEC is None or _SPEC.loader is None:
 _impl = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_impl)
 
-_DATA_LOSS_EXTENSION_PATH = Path(__file__).with_name("_data_loss_extension.py")
-_DATA_LOSS_SPEC = importlib.util.spec_from_file_location(
-    "pinnmizer_hpc_viewer_data_loss",
-    _DATA_LOSS_EXTENSION_PATH,
-)
-if _DATA_LOSS_SPEC is None or _DATA_LOSS_SPEC.loader is None:
-    raise ImportError(
-        f"Could not load Streamlit data-loss extension from {_DATA_LOSS_EXTENSION_PATH}"
-    )
 
-_data_loss_extension = importlib.util.module_from_spec(_DATA_LOSS_SPEC)
-_DATA_LOSS_SPEC.loader.exec_module(_data_loss_extension)
+def _load_extension(filename: str, module_name: str):
+    path = Path(__file__).with_name(filename)
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load Streamlit extension from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_data_loss_extension = _load_extension(
+    "_data_loss_extension.py",
+    "pinnmizer_hpc_viewer_data_loss",
+)
+_mizer_surface_extension = _load_extension(
+    "_mizer_surface_extension.py",
+    "pinnmizer_hpc_viewer_mizer_surfaces",
+)
 
 
 _original_normalise_mizer_dataframe = _impl.normalise_mizer_dataframe
@@ -153,6 +160,7 @@ def _load_fixed_fields_with_species_mask(
 
 _impl.normalise_mizer_dataframe = _normalise_mizer_dataframe_without_masked_bins
 _impl.load_fixed_fields = _load_fixed_fields_with_species_mask
+_mizer_surface_extension.install(_impl)
 _data_loss_extension.install(_impl)
 
 
