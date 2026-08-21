@@ -1,35 +1,19 @@
-"""Data-loss diagnostics and UI overrides for the PINNmizer HPC viewer."""
+"""Observation-data diagnostics for the PINNmizer HPC viewer.
+
+This extension deliberately owns only the Data tab.  The run browser, training,
+fixed diagnostics, fields, run comparison, mizer comparison, and file/config
+pages remain the base viewer implementations.
+"""
 from __future__ import annotations
 
 from pathlib import Path
 from statistics import NormalDist
-from typing import Any
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-
-
-DATA_COLUMNS = [
-    "final_loss_data", "final_objective_loss_data", "final_weighted_loss_data",
-    "final_n_data_obs", "final_data_log_residual_abs_mean",
-    "final_data_log_residual_abs_max", "lambda_data", "data_csv",
-    "data_default_cv", "estimate_data_cv", "data_cv_scope", "data_cv_init",
-    "data_cv_lower", "data_cv_upper", "data_cv_lr", "initial_w_data",
-]
-DATA_CONFIG_FIELDS = [
-    "lambda_data", "data_csv", "data_default_cv", "estimate_data_cv",
-    "data_cv_scope", "data_cv_init", "data_cv_lower", "data_cv_upper",
-    "data_cv_lr", "initial_w_data",
-]
-TRAINING_METRICS = [
-    "loss", "loss_unweighted", "loss_pde", "loss_ic", "loss_bc", "loss_data",
-    "objective_loss_pde", "objective_loss_ic", "objective_loss_bc",
-    "objective_loss_data", "w_pde", "w_ic", "w_bc", "w_data", "n_data_obs",
-    "data_log_residual_abs_mean", "data_log_residual_abs_max",
-]
 
 
 @st.cache_data(show_spinner=False)
@@ -43,13 +27,6 @@ def _read_csv(run_dir: str | Path, name: str) -> pd.DataFrame | None:
         return pd.DataFrame()
     except Exception:
         return None
-
-
-def _last(df: pd.DataFrame, name: str) -> float:
-    if name not in df:
-        return float("nan")
-    x = pd.to_numeric(df[name], errors="coerce").dropna()
-    return float(x.iloc[-1]) if not x.empty else float("nan")
 
 
 def _species_names(run_dir: Path, impl) -> dict[int, str]:
@@ -81,9 +58,9 @@ def _prepare_predictions(raw: pd.DataFrame, run_dir: Path, impl) -> pd.DataFrame
     keep = np.ones(len(d), dtype=bool)
     for name in required:
         keep &= np.isfinite(d[name].to_numpy(dtype=float))
-    keep &= (d["value"].to_numpy(dtype=float) > 0)
-    keep &= (d["prediction"].to_numpy(dtype=float) > 0)
-    keep &= (d["sd_log_used"].to_numpy(dtype=float) > 0)
+    keep &= d["value"].to_numpy(dtype=float) > 0
+    keep &= d["prediction"].to_numpy(dtype=float) > 0
+    keep &= d["sd_log_used"].to_numpy(dtype=float) > 0
     d = d.loc[keep].copy()
     d["standardised_log_residual"] = d["log_residual"] / d["sd_log_used"]
     d["half_z2"] = 0.5 * d["standardised_log_residual"] ** 2
@@ -110,42 +87,6 @@ def _normal_quantiles(n: int) -> np.ndarray:
     normal = NormalDist()
     p = (np.arange(1, n + 1, dtype=float) - 0.5) / n
     return np.asarray([normal.inv_cdf(float(v)) for v in p])
-
-
-def _data_summary(run_dir: str | Path, impl) -> dict[str, float] | None:
-    raw = _read_csv(run_dir, "data_predictions_final.csv")
-    if raw is None or raw.empty:
-        return None
-    try:
-        d = _prepare_predictions(raw, Path(run_dir), impl)
-    except ValueError:
-        return None
-    if d.empty:
-        return None
-    z = d["standardised_log_residual"].to_numpy(dtype=float)
-    nll = pd.to_numeric(d["loss_contribution"], errors="coerce").mean() if "loss_contribution" in d else np.nan
-    return {
-        "n_observations": float(len(d)), "mean_data_nll": float(nll),
-        "mean_standardised_residual": float(np.mean(z)),
-        "rmse_standardised_residual": float(np.sqrt(np.mean(z ** 2))),
-        "fraction_within_1_96": float(np.mean(np.abs(z) <= 1.96)),
-    }
-
-
-def _data_config_differences(run_df: pd.DataFrame, selected_runs: list[str]) -> None:
-    fields = [f for f in DATA_CONFIG_FIELDS if f in run_df]
-    if len(selected_runs) < 2 or not fields:
-        return
-    selected = run_df[run_df.run_id.isin(selected_runs)].set_index("run_id")
-    rows = []
-    for field in fields:
-        values = [selected.at[r, field] if r in selected.index else np.nan for r in selected_runs]
-        keys = [("NA" if pd.isna(v) else str(v)) for v in values]
-        if len(set(keys)) > 1:
-            rows.append({"field": field, **dict(zip(selected_runs, keys))})
-    if rows:
-        st.subheader("Selected-run data-loss configuration differences")
-        st.dataframe(pd.DataFrame(rows).set_index("field"), use_container_width=True)
 
 
 def _data_page(run_dir: Path, markers: bool, impl) -> None:
@@ -183,7 +124,8 @@ def _data_page(run_dir: Path, markers: bool, impl) -> None:
     z = d["standardised_log_residual"].to_numpy(dtype=float)
     nll = pd.to_numeric(d["loss_contribution"], errors="coerce").mean() if "loss_contribution" in d else np.nan
     cards = [
-        ("Observations", len(d), False), ("Mean data NLL", nll, False),
+        ("Observations", len(d), False),
+        ("Mean data NLL", nll, False),
         ("Mean standardised residual", np.mean(z), False),
         ("Standardised residual RMSE", np.sqrt(np.mean(z ** 2)), False),
         ("Within ±1.96", np.mean(np.abs(z) <= 1.96), True),
@@ -309,153 +251,7 @@ def _data_page(run_dir: Path, markers: bool, impl) -> None:
 
 
 def install(impl) -> None:
-    original_history = impl.history_page
-    original_compare = impl.compare_page
-
-    impl.RUN_COLUMNS[:] = [c for c in impl.RUN_COLUMNS if c != "lambda_timestep"]
-    for c in DATA_COLUMNS:
-        if c not in impl.RUN_COLUMNS:
-            impl.RUN_COLUMNS.append(c)
-    impl.PLOT_INTERPRETATIONS.update({
-        "Total loss": "The optimiser objective combines weighted PDE, IC, BC, and observation-data terms.",
-        "Total unweighted loss": "The raw sum of PDE, IC, BC, and data terms before lambda and adaptive weighting.",
-        "Unscaled loss terms": "Raw PDE, IC, BC, and lognormal observation-NLL terms. Their normalisations differ.",
-        "Objective loss terms": "Actual optimiser contributions lambda_k*w_k*loss_k for PDE, IC, BC, and data.",
-        "Adaptive weight trajectories": "Adaptive optimisation multipliers for PDE, IC, BC, and data; these are not fit metrics.",
-        "Data residual summaries": "Absolute log residual summaries |log(observed)-log(predicted)| over active observations.",
-        "Data value ranges": "Observed and predicted minima/maxima for scale-collapse and range-mismatch checks.",
-        "Active data observations": "Number of observations admitted by the current causal time window.",
-    })
-
-    def run_browser(run_df, selected_runs, log_y, markers):
-        st.header("Run browser")
-        filtered = run_df.copy()
-        for col in ["status", "model_arch", "collocation_strategy", "loss_weighting", "causal_loss", "weight_factorization", "seed", "estimate_data_cv", "data_cv_scope"]:
-            if col not in filtered:
-                continue
-            values = sorted(str(v) for v in filtered[col].dropna().unique() if str(v) != "")
-            chosen = st.multiselect(f"Filter {col}", values, key=f"filter_{col}")
-            if chosen:
-                filtered = filtered[filtered[col].astype(str).isin(chosen)]
-        metric = st.selectbox("Training-history metric for selected iteration", TRAINING_METRICS)
-        step = st.number_input("Iteration for direct comparison", min_value=0, value=1000, step=100)
-        filtered = impl.add_loss_at_step(filtered, int(step), metric)
-        st.caption("Uses the nearest logged step in each run's loss_history.csv.")
-        event = st.dataframe(filtered, use_container_width=True, key="run_browser_table", on_select="rerun", selection_mode="single-row")
-        if event.selection.rows:
-            selected = str(filtered.iloc[event.selection.rows[0]]["run_id"])
-            if selected != st.session_state.get("last_table_selected_run"):
-                st.session_state["last_table_selected_run"] = selected
-                st.session_state["selected_run"] = selected
-                st.rerun()
-        if len(selected_runs) >= 2:
-            impl.show_architecture_differences(filtered, selected_runs)
-            _data_config_differences(filtered, selected_runs)
-        ranking = [
-            f"{metric}_at_selected_step", "final_fixed_residual_log_abs_p95", "final_loss",
-            "final_loss_unweighted", "final_loss_pde", "final_loss_ic", "final_loss_bc",
-            "final_loss_data", "final_objective_loss_data", "final_data_log_residual_abs_mean",
-            "final_data_log_residual_abs_max", "seconds_per_step",
-        ]
-        ranking = [x for x in ranking if x in filtered]
-        rank_metric = st.selectbox("Ranking metric", ranking)
-        x = filtered[["run_id", rank_metric]].copy()
-        x[rank_metric] = pd.to_numeric(x[rank_metric], errors="coerce")
-        x = x.dropna().sort_values(rank_metric)
-        if x.empty:
-            st.info(f"No values available for {rank_metric}.")
-        else:
-            st.plotly_chart(px.bar(x, x=rank_metric, y="run_id", orientation="h", title=f"Run ranking: {rank_metric}"), use_container_width=True)
-        terms = ["final_loss_pde", "final_loss_ic", "final_loss_bc", "final_loss_data"]
-        x = filtered[filtered.run_id.isin(selected_runs)][["run_id"] + terms].melt("run_id", var_name="term", value_name="loss").dropna()
-        if not x.empty:
-            st.plotly_chart(px.bar(x, x="run_id", y="loss", color="term", barmode="group", log_y=log_y, title="Final training-loss decomposition"), use_container_width=True)
-        group = st.selectbox("Scatter colour", ["model_arch", "collocation_strategy", "loss_weighting", "causal_loss", "weight_factorization", "estimate_data_cv"])
-        quality = st.selectbox("Quality metric", ["final_fixed_residual_log_abs_p95", "final_loss_data", "final_objective_loss_data", "final_data_log_residual_abs_mean", "final_data_log_residual_abs_max"])
-        st.plotly_chart(px.scatter(filtered, x="seconds_per_step", y=quality, color=group, hover_data=["run_id", "final_loss", "final_loss_data"], title="Speed-quality scatter"), use_container_width=True)
-        architecture = st.selectbox("Architecture/hyperparameter x", ["hidden_width", "hidden_layers", "fourier_scale", "fourier_num_features", "rwf_sigma", "r3_population_size", "lambda_data", "data_default_cv"])
-        st.plotly_chart(px.scatter(filtered, x=architecture, y=quality, color=group, hover_data=["run_id"], title="Architecture / hyperparameter scatter"), use_container_width=True)
-
-    def history(run_dir, fixed, log_y, markers):
-        if fixed:
-            return original_history(run_dir, fixed, log_y, markers)
-        df = impl.load_loss_history(run_dir)
-        st.header("Single run: training")
-        if df is None:
-            st.warning("loss_history.csv not found for this run")
-            return
-        if df.empty:
-            st.info("loss_history.csv exists but is empty")
-            return
-        cards = [c for c in ["loss_data", "objective_loss_data", "w_data", "data_log_residual_abs_mean", "n_data_obs"] if c in df and pd.to_numeric(df[c], errors="coerce").notna().any()]
-        if cards:
-            for col, name in zip(st.columns(len(cards)), cards):
-                col.metric(name, impl.format_scalar(_last(df, name)))
-        plots = [
-            ("Total loss", ["loss"]), ("Total unweighted loss", ["loss_unweighted"]),
-            ("Unscaled loss terms", ["loss_pde", "loss_ic", "loss_bc", "loss_data"]),
-            ("Objective loss terms", ["objective_loss_pde", "objective_loss_ic", "objective_loss_bc", "objective_loss_data"]),
-            ("Adaptive weight trajectories", ["w_pde", "w_ic", "w_bc", "w_data"]),
-            ("Data residual summaries", ["data_log_residual_abs_mean", "data_log_residual_abs_max"]),
-            ("Data value ranges", ["data_pred_min", "data_pred_max", "data_obs_min", "data_obs_max"]),
-            ("Active data observations", ["n_data_obs"]), ("Gradient norm", ["grad_norm"]),
-            ("Causal curriculum", ["causal_fraction", "t_max_current"]),
-            ("Causal chunk diagnostics", ["pde_causal_weight_first", "pde_causal_weight_mean", "pde_causal_weight_last", "pde_causal_chunk_loss_mean", "pde_causal_chunk_loss_max"]),
-        ]
-        for title, candidates in plots:
-            ys = [c for c in candidates if c in df and pd.to_numeric(df[c], errors="coerce").notna().any()]
-            if not ys:
-                continue
-            use_log = log_y and "Causal" not in title and title != "Active data observations"
-            impl.plot_with_desc(
-                lambda ys=ys, title=title, use_log=use_log: impl.make_multi_line_plot(df, "step", ys, title, "value", use_log, markers),
-                impl.PLOT_INTERPRETATIONS.get(title, f"Tracks {title.lower()} from loss_history.csv."),
-                impl.line_desc("loss_history.csv", ["step"] + ys, "non-positive values are omitted only on log plots", use_log, False),
-            )
-
-    class _CompareStreamlitProxy:
-        def __getattr__(self, name):
-            return getattr(st, name)
-        def selectbox(self, label, options, *args, **kwargs):
-            if label == "Training loss overlay metric":
-                options = TRAINING_METRICS
-            return st.selectbox(label, options, *args, **kwargs)
-
-    def compare(run_df, selected_runs, clip, mode, markers):
-        if len(selected_runs) >= 2:
-            rows = []
-            run_dirs = dict(zip(run_df.run_id, run_df.run_dir))
-            for run_id in selected_runs:
-                summary = _data_summary(run_dirs[run_id], impl)
-                if summary:
-                    rows.append({"run_id": run_id, **summary})
-            if rows:
-                st.subheader("Final observation-fit comparison")
-                table = pd.DataFrame(rows)
-                metric = st.selectbox("Observation-fit comparison metric", ["mean_data_nll", "rmse_standardised_residual", "mean_standardised_residual", "fraction_within_1_96"])
-                st.plotly_chart(px.bar(table, x="run_id", y=metric, title=metric), use_container_width=True)
-                st.dataframe(table, use_container_width=True)
-        old = impl.st
-        impl.st = _CompareStreamlitProxy()
-        try:
-            original_compare(run_df, selected_runs, clip, mode, markers)
-        finally:
-            impl.st = old
-
-    def file_view(run_dir):
-        st.header("File/config view")
-        for name in ["config.json", "final_summary.json", "final_summary.csv", "timing_summary.csv", "data_predictions_final.csv", "data_cv_history.csv", "estimated_data_cv.csv", "run_command.txt"]:
-            st.subheader(name)
-            path = run_dir / name
-            if name.endswith(".csv"):
-                d = impl.safe_read_csv(path)
-                st.info(f"{name} not found or unreadable") if d is None else st.dataframe(d, use_container_width=True)
-            elif name.endswith(".json"):
-                d = impl.safe_read_json(path)
-                st.info(f"{name} not found or unreadable") if not d else st.json(d)
-            else:
-                text = impl.safe_read_text(path)
-                st.info(f"{name} not found or unreadable") if not text else st.code(text)
+    """Add only the data page while preserving every base-viewer page unchanged."""
 
     def main():
         st.set_page_config(page_title="PINNmizer HPC Viewer", layout="wide")
@@ -473,6 +269,7 @@ def install(impl) -> None:
             heat_mode = st.selectbox("Heatmap colour range", ["auto", "symmetric around zero", "percentile clipped"], index=2)
             mizer_paths = st.text_area("Mizer CSV local paths (one per line)")
             uploads = st.file_uploader("Upload mizer CSVs", type="csv", accept_multiple_files=True)
+
         run_df = impl.scan_runs(run_root)
         if run_df.empty:
             st.warning(f"No run folders found under {run_root}")
@@ -481,27 +278,47 @@ def install(impl) -> None:
             st.session_state["selected_run"] = run_ids[0]
         if not run_ids:
             st.session_state["selected_run"] = None
+
         with st.sidebar:
-            selected_run = st.selectbox("Single selected run", run_ids, index=run_ids.index(st.session_state["selected_run"]) if run_ids and st.session_state["selected_run"] in run_ids else 0) if run_ids else None
+            selected_run = st.selectbox(
+                "Single selected run",
+                run_ids,
+                index=run_ids.index(st.session_state["selected_run"])
+                if run_ids and st.session_state["selected_run"] in run_ids else 0,
+            ) if run_ids else None
             if selected_run:
                 st.session_state["selected_run"] = selected_run
             selected_runs = st.multiselect("Runs for comparison", run_ids, default=run_ids[:min(3, len(run_ids))])
+
         selected_run = st.session_state.get("selected_run")
         run_dir = Path(run_df.loc[run_df.run_id == selected_run, "run_dir"].iloc[0]) if selected_run else Path("")
         mizers = impl.load_mizer_sources(mizer_paths, uploads)
-        tabs = st.tabs(["Run browser", "Single run: training", "Single run: data", "Single run: fixed diagnostics", "Single run: fields", "Compare runs", "Mizer comparison", "File/config view"])
-        with tabs[0]: run_browser(run_df, selected_runs, log_y, markers)
-        with tabs[1]: history(run_dir, False, log_y, markers) if selected_run else st.info("Select a run.")
-        with tabs[2]: _data_page(run_dir, markers, impl) if selected_run else st.info("Select a run.")
-        with tabs[3]: history(run_dir, True, log_y, markers) if selected_run else st.info("Select a run.")
-        with tabs[4]: impl.fields_page(run_dir, clip, heat_mode, markers) if selected_run else st.info("Select a run.")
-        with tabs[5]: compare(run_df, selected_runs, clip, heat_mode, markers)
-        with tabs[6]: impl.mizer_page(run_df, selected_run, selected_runs, mizers, clip, heat_mode, markers) if selected_run else st.info("Select a PINN run.")
-        with tabs[7]: file_view(run_dir) if selected_run else st.info("Select a run.")
+        tabs = st.tabs([
+            "Run browser",
+            "Single run: training",
+            "Single run: data",
+            "Single run: fixed diagnostics",
+            "Single run: fields",
+            "Compare runs",
+            "Mizer comparison",
+            "File/config view",
+        ])
+        with tabs[0]:
+            impl.run_browser_page(run_df, selected_runs, log_y, markers)
+        with tabs[1]:
+            impl.history_page(run_dir, False, log_y, markers) if selected_run else st.info("Select a run.")
+        with tabs[2]:
+            _data_page(run_dir, markers, impl) if selected_run else st.info("Select a run.")
+        with tabs[3]:
+            impl.history_page(run_dir, True, log_y, markers) if selected_run else st.info("Select a run.")
+        with tabs[4]:
+            impl.fields_page(run_dir, clip, heat_mode, markers) if selected_run else st.info("Select a run.")
+        with tabs[5]:
+            impl.compare_page(run_df, selected_runs, clip, heat_mode, markers)
+        with tabs[6]:
+            impl.mizer_page(run_df, selected_run, selected_runs, mizers, clip, heat_mode, markers) if selected_run else st.info("Select a PINN run.")
+        with tabs[7]:
+            impl.file_view_page(run_dir) if selected_run else st.info("Select a run.")
 
-    impl.run_browser_page = run_browser
-    impl.history_page = history
     impl.data_page = lambda run_dir, markers: _data_page(run_dir, markers, impl)
-    impl.compare_page = compare
-    impl.file_view_page = file_view
     impl.main = main
