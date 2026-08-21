@@ -36,6 +36,10 @@ _mizer_surface_extension = _load_extension(
     "_mizer_surface_extension.py",
     "pinnmizer_hpc_viewer_mizer_surfaces",
 )
+_training_data_terms_extension = _load_extension(
+    "_training_data_terms_extension.py",
+    "pinnmizer_hpc_viewer_training_data_terms",
+)
 
 
 _original_normalise_mizer_dataframe = _impl.normalise_mizer_dataframe
@@ -162,6 +166,7 @@ _impl.normalise_mizer_dataframe = _normalise_mizer_dataframe_without_masked_bins
 _impl.load_fixed_fields = _load_fixed_fields_with_species_mask
 _mizer_surface_extension.install(_impl)
 _data_loss_extension.install(_impl)
+_training_data_terms_extension.install(_impl)
 
 
 if __name__ == "__main__":
