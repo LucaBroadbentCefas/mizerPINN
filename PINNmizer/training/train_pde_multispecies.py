@@ -106,14 +106,34 @@ def load_checkpoint_weights(
     optimizer_loaded = False
     if load_optimizer_state:
         if optimizer is None:
-            raise ValueError("optimizer must be provided when load_optimizer_state=True.")
+            raise ValueError(
+                "optimizer must be provided when load_optimizer_state=True."
+            )
+    
         if "optimizer_state_dict" not in checkpoint:
-            raise KeyError(f"Checkpoint has no 'optimizer_state_dict': {checkpoint_path}")
+            raise KeyError(
+                f"Checkpoint has no 'optimizer_state_dict': {checkpoint_path}"
+            )
+    
         ck_groups = checkpoint["optimizer_state_dict"].get("param_groups", [])
-        cur_names = [g.get("name") for g in optimizer.param_groups]
-        ck_names = [g.get("name") for g in ck_groups]
-        if cur_names != ck_names:
-            raise ValueError(f"Incompatible optimizer parameter groups in checkpoint: {ck_names} vs current {cur_names}.")
+        cur_names = [group.get("name") for group in optimizer.param_groups]
+        ck_names = [group.get("name") for group in ck_groups]
+    
+        legacy_network_group = (
+            len(ck_groups) == 1
+            and len(optimizer.param_groups) == 1
+            and ck_names == [None]
+            and cur_names == ["network"]
+        )
+    
+        if legacy_network_group:
+            ck_groups[0]["name"] = "network"
+        elif cur_names != ck_names:
+            raise ValueError(
+                "Incompatible optimizer parameter groups in checkpoint: "
+                f"{ck_names} vs current {cur_names}."
+            )
+    
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         optimizer_loaded = True
 

@@ -18,7 +18,7 @@ library(tibble)
 #   progress_bar = FALSE
 # )
 
-gears <- gear_params(NS_params)
+gears <- gear_params(mizer::NS_params)
 
 survey_gears <- data.frame(
   gear = rep("survey", 12),
@@ -62,7 +62,7 @@ make_observation_data <- function(sim, survey_gear_name = "survey") {
   yield_df$time <- as.numeric(as.character(yield_df$time))
   yield_df$year <- floor(yield_df$time)
 
-  catch_obs <- yield_df |>
+    catch_obs <- yield_df |>
     dplyr::filter(time >= year, time < year + 1) |>
     dplyr::group_by(year, gear, sp) |>
     dplyr::summarise(
