@@ -35,9 +35,14 @@ from PINNmizer.training.outputs import (
 from PINNmizer.training.loop import train_one_step, total_grad_norm_and_check, scalar_min, scalar_max, scalar_mean
 from PINNmizer.pinn.state_scale import set_state_scale_from_initial_condition, DEFAULT_STATE_SCALE_EPS
 from PINNmizer.pinn.r3 import make_r3_population, CausalR3
+from PINNmizer.inverse_parameters import BoundedDataCV, BoundedLogRMax
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 from PINNmizer.io import load_mizer_inputs
+from PINNmizer.io_observations import load_observation_csv
+from PINNmizer.pinn.model_eval import evaluate_log_model_on_points
+from PINNmizer.pinn.observation_operators import observation_time_grid, predict_observations
+from PINNmizer.pinn.data_losses import lognormal_nll
 from PINNmizer.params import scale_x, scale_t, active_grid_mask
 from PINNmizer.diagnostics.fixed_grid import (
     make_fixed_pde_batch as make_fixed_diagnostic_pde_batch,
@@ -82,6 +87,9 @@ def load_checkpoint_weights(
     checkpoint_path: str | Path,
     device,
     load_optimizer_state: bool = False,
+    inverse_rmax=None,
+    inverse_data_cv=None,
+    scheduler=None,
 ) -> dict:
     checkpoint_path = Path(checkpoint_path)
 
@@ -99,6 +107,21 @@ def load_checkpoint_weights(
         raise ValueError(f"Checkpoint state_parameterization={checkpoint_param!r} does not match requested {requested_param!r}.")
 
     model.load_state_dict(checkpoint["model_state_dict"])
+    inverse_loaded = False
+    if inverse_rmax is not None and "inverse_parameter_state_dict" in checkpoint:
+        inverse_rmax.load_state_dict(checkpoint["inverse_parameter_state_dict"])
+        inverse_loaded = True
+    cv_loaded = False
+    if inverse_data_cv is not None and "data_cv_state_dict" in checkpoint:
+        inverse_data_cv.load_state_dict(checkpoint["data_cv_state_dict"])
+        cv_loaded = True
+    elif inverse_data_cv is None and "data_cv_state_dict" in checkpoint:
+        raise ValueError("Checkpoint contains estimated data CV, but this run did not enable --estimate-data-cv.")
+
+    scheduler_loaded = False
+    if scheduler is not None and "scheduler_state_dict" in checkpoint:
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        scheduler_loaded = True
 
     optimizer_loaded = False
     if load_optimizer_state:
@@ -106,6 +129,11 @@ def load_checkpoint_weights(
             raise ValueError("optimizer must be provided when load_optimizer_state=True.")
         if "optimizer_state_dict" not in checkpoint:
             raise KeyError(f"Checkpoint has no 'optimizer_state_dict': {checkpoint_path}")
+        ck_groups = checkpoint["optimizer_state_dict"].get("param_groups", [])
+        cur_names = [g.get("name") for g in optimizer.param_groups]
+        ck_names = [g.get("name") for g in ck_groups]
+        if cur_names != ck_names:
+            raise ValueError(f"Incompatible optimizer parameter groups in checkpoint: {ck_names} vs current {cur_names}.")
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         optimizer_loaded = True
 
@@ -113,6 +141,9 @@ def load_checkpoint_weights(
         "path": str(checkpoint_path),
         "checkpoint_step": checkpoint.get("step", None),
         "optimizer_loaded": optimizer_loaded,
+        "scheduler_loaded": scheduler_loaded,
+        "inverse_parameter_loaded": inverse_loaded,
+        "data_cv_loaded": cv_loaded,
         "checkpoint_config": checkpoint.get("config", None),
     }
 
@@ -452,6 +483,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lambda-bc", type=float, default=0.0)
     parser.add_argument("--disable-wang-weights", action="store_true")
     parser.add_argument("--lambda-timestep", type=float, default=0.0)
+    parser.add_argument("--estimate-rmax", action="store_true", default=False)
+    parser.add_argument("--rmax-lr", type=float, default=1e-3)
+    parser.add_argument("--rmax-log-lower", type=float, default=0.0)
+    parser.add_argument("--rmax-log-upper", type=float, default=50.0)
+    parser.add_argument("--data-csv", default=None)
+    parser.add_argument("--lambda-data", type=float, default=0.0)
+    parser.add_argument("--initial-w-data", type=float, default=1.0)
+    parser.add_argument("--data-default-cv", type=float, default=0.3)
+    parser.add_argument("--estimate-data-cv", action="store_true", default=False)
+    parser.add_argument("--data-discrepancy-gate", action="store_true", default=False)
+    parser.add_argument("--data-cv-scope", choices=["species", "global"], default="species")
+    parser.add_argument("--data-cv-init", type=float, default=0.3)
+    parser.add_argument("--data-cv-lower", type=float, default=0.02)
+    parser.add_argument("--data-cv-upper", type=float, default=1.5)
+    parser.add_argument("--data-cv-lr", type=float, default=1e-3)
+    parser.add_argument("--data-loss-eps", type=float, default=1e-30)
+    parser.add_argument("--data-time-quadrature-points", type=int, default=1)
     parser.add_argument("--timestep-loss-form", choices=["physical", "log", "relative"], default="physical")
     parser.add_argument("--detach-step-target", action="store_true", default=True)
     parser.add_argument("--no-detach-step-target", dest="detach_step_target", action="store_false")
@@ -528,8 +576,133 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def effective_data_sd_log(observation_batch, inverse_data_cv):
+    if inverse_data_cv is None:
+        return observation_batch["sd_log"]
+    sd = inverse_data_cv.current_sd_log()
+    return sd.expand(observation_batch["value"].numel()) if inverse_data_cv.scope == "global" else sd[observation_batch["species_idx"]]
+
+
+def save_data_predictions_final(*, run_dir: Path, model: nn.Module, params, observation_batch: dict[str, object], eps: float, data_time_quadrature_points: int, inverse_data_cv=None) -> None:
+    t_grid = observation_time_grid(
+        observation_batch,
+        data_time_quadrature_points=data_time_quadrature_points,
+    )
+    with torch.no_grad():
+        grid_eval = evaluate_log_model_on_points(model=model, x_scaled=scale_x(torch.log(params.w), params), t_scaled=scale_t(t_grid, params), params=params)
+        pred = predict_observations(
+            {"N_grid": grid_eval["N"], "t_grid": t_grid},
+            observation_batch,
+            params,
+            data_time_quadrature_points=data_time_quadrature_points,
+        )
+        sd_log_used = effective_data_sd_log(observation_batch, inverse_data_cv)
+        nll = lognormal_nll(pred, observation_batch["value"], sd_log_used, eps=eps)
+        cv_used = torch.sqrt(torch.expm1(sd_log_used.square()))
+    rows = []
+    n = observation_batch["value"].numel()
+    for j in range(n):
+        rows.append({
+            "obs_type": observation_batch["obs_type"][j],
+            "dataset": observation_batch["dataset"][j],
+            "species_idx": int(observation_batch["species_idx"][j].cpu()),
+            "gear_idx": int(observation_batch["gear_idx"][j].cpu()),
+            "t_start": float(observation_batch["t_start"][j].cpu()),
+            "t_end": float(observation_batch["t_end"][j].cpu()),
+            "w_min": float(observation_batch["w_min"][j].cpu()),
+            "w_max": float(observation_batch["w_max"][j].cpu()),
+            "value": float(observation_batch["value"][j].cpu()),
+            "prediction": float(pred[j].cpu()),
+            "log_residual": float(nll["log_residual"][j].cpu()),
+            "cv": float(observation_batch["cv"][j].cpu()),
+            "sd_log": float(observation_batch["sd_log"][j].cpu()),
+            "cv_used": float(cv_used[j].cpu()),
+            "sd_log_used": float(sd_log_used[j].cpu()),
+            "loss_contribution": float(nll["loss_contribution"][j].cpu()),
+        } | {k: observation_batch[k][j] for k in ["true_cv", "true_sd_log", "value_true", "replicate_id", "noise_seed"] if k in observation_batch})
+    pd.DataFrame(rows).to_csv(run_dir / "data_predictions_final.csv", index=False)
+
+
+def rmax_rows(inverse_rmax, params, step: int) -> list[dict]:
+    if inverse_rmax is None:
+        return []
+    with torch.no_grad():
+        cur = inverse_rmax.current_r_max().detach().cpu()
+        log = inverse_rmax.current_log_r_max().detach().cpu()
+        init = inverse_rmax.initial_r_max.detach().cpu()
+        init_log = inverse_rmax.initial_log_r_max.detach().cpu()
+        ratio = (cur / init).detach().cpu()
+        raw = inverse_rmax.raw_logit.detach().cpu()
+        grad = inverse_rmax.raw_logit.grad.detach().cpu() if inverse_rmax.raw_logit.grad is not None else torch.full_like(raw, float("nan"))
+    species = getattr(params, "species", None)
+    rows=[]
+    for i in range(cur.numel()):
+        rows.append({"step": step, "species_idx": i, "species": str(species[i]) if species is not None and i < len(species) else "", "initial_r_max": float(init[i]), "initial_log_r_max": float(init_log[i]), "r_max": float(cur[i]), "log_r_max": float(log[i]), "ratio_to_initial": float(ratio[i]), "raw_parameter": float(raw[i]), "raw_gradient": float(grad[i])})
+    return rows
+
+def save_rmax_history(rows: list[dict], run_dir: Path) -> None:
+    if rows:
+        pd.DataFrame(rows).to_csv(run_dir / "rmax_history.csv", index=False)
+
+def save_estimated_rmax(inverse_rmax, params, run_dir: Path) -> str | None:
+    if inverse_rmax is None:
+        return None
+    rows = rmax_rows(inverse_rmax, params, step=-1)
+    for row in rows:
+        row["estimated_r_max"] = row.pop("r_max")
+        row["estimated_log_r_max"] = row.pop("log_r_max")
+        row.pop("step", None); row.pop("raw_parameter", None); row.pop("raw_gradient", None)
+        row["lower_log_bound"] = inverse_rmax.lower; row["upper_log_bound"] = inverse_rmax.upper
+    path = run_dir / "estimated_rmax.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return str(path)
+
+
+def data_cv_rows(inverse_data_cv, params, step: int) -> list[dict]:
+    if inverse_data_cv is None:
+        return []
+    cv, sd = inverse_data_cv.current_cv().detach().cpu(), inverse_data_cv.current_sd_log().detach().cpu()
+    initial, raw = inverse_data_cv.initial_cv.cpu(), inverse_data_cv.raw_parameter.detach().cpu()
+    grad = inverse_data_cv.raw_parameter.grad
+    grad = grad.detach().cpu() if grad is not None else torch.full_like(raw, float("nan"))
+    names = getattr(params, "species", None)
+    rows = []
+    for i in range(cv.numel()):
+        global_scope = inverse_data_cv.scope == "global"
+        rows.append({"step": step, "scope": inverse_data_cv.scope, "species_idx": -1 if global_scope else i,
+                     "species": "global" if global_scope else (str(names[i]) if names is not None else str(i)),
+                     "initial_cv": float(initial[i]), "cv": float(cv[i]), "sd_log": float(sd[i]),
+                     "ratio_to_initial": float(cv[i] / initial[i]), "raw_parameter": float(raw[i]), "raw_gradient": float(grad[i])})
+    return rows
+
+
+def save_data_cv_history(rows, run_dir):
+    if rows:
+        pd.DataFrame(rows).to_csv(run_dir / "data_cv_history.csv", index=False)
+
+
+def save_estimated_data_cv(inverse_data_cv, params, run_dir) -> str | None:
+    if inverse_data_cv is None:
+        return None
+    rows = data_cv_rows(inverse_data_cv, params, -1)
+    for row in rows:
+        row["estimated_cv"] = row.pop("cv"); row["estimated_sd_log"] = row.pop("sd_log")
+        for key in ["step", "ratio_to_initial", "raw_parameter", "raw_gradient"]: row.pop(key)
+        row["lower_cv_bound"], row["upper_cv_bound"] = inverse_data_cv.lower, inverse_data_cv.upper
+    path = run_dir / "estimated_data_cv.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return str(path)
+
 def main() -> None:
     args = parse_args()
+    if args.data_discrepancy_gate and args.estimate_data_cv:
+        raise ValueError("--data-discrepancy-gate currently requires fixed known observation uncertainty and cannot be combined with --estimate-data-cv.")
+    if not (0.0 < args.data_cv_lower < args.data_cv_upper):
+        raise ValueError("Data CV bounds require 0 < --data-cv-lower < --data-cv-upper.")
+    if not (args.data_cv_lower <= args.data_cv_init <= args.data_cv_upper):
+        raise ValueError("--data-cv-init must lie within the configured data CV bounds.")
+    if args.estimate_data_cv and (args.lambda_data == 0.0 or args.data_csv is None):
+        raise ValueError("--estimate-data-cv requires --lambda-data > 0 and an active --data-csv dataset.")
     if args.pde_penalty == "pseudo-huber" and args.pde_pseudo_huber_delta <= 0.0:
         raise ValueError("--pde-pseudo-huber-delta must be strictly positive when --pde-penalty=pseudo-huber.")
     if args.bc_penalty == "pseudo-huber" and args.bc_pseudo_huber_delta <= 0.0:
@@ -592,6 +765,10 @@ def main() -> None:
 
     n_species = params.interaction.shape[0]
 
+    observation_batch = None
+    if args.data_csv is not None and args.lambda_data != 0.0:
+        observation_batch = load_observation_csv(args.data_csv, params, default_cv=args.data_default_cv, estimate_cv=args.estimate_data_cv)
+
     if n_species != 1:
         raise ValueError(f"Expected one species, got {n_species}")
 
@@ -647,7 +824,21 @@ def main() -> None:
             state_parameterization=args.state_parameterization,
         )
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    inverse_rmax = None
+    if args.estimate_rmax:
+        inverse_rmax = BoundedLogRMax(params.r_max, lower=args.rmax_log_lower, upper=args.rmax_log_upper).to(dtype=params.r_max.dtype, device=params.r_max.device)
+        params.r_max = inverse_rmax.current_r_max()
+    inverse_data_cv = None
+    if args.estimate_data_cv:
+        size = 1
+        initial_cv = torch.full((size,), args.data_cv_init, dtype=params.w.dtype, device=params.w.device)
+        inverse_data_cv = BoundedDataCV(initial_cv, lower=args.data_cv_lower, upper=args.data_cv_upper, scope=args.data_cv_scope).to(dtype=params.w.dtype, device=params.w.device)
+    groups = [{"params": model.parameters(), "lr": args.lr, "name": "network"}]
+    if inverse_rmax is not None:
+        groups.append({"params": inverse_rmax.parameters(), "lr": args.rmax_lr, "name": "rmax"})
+    if inverse_data_cv is not None:
+        groups.append({"params": inverse_data_cv.parameters(), "lr": args.data_cv_lr, "name": "data_cv"})
+    optimizer = torch.optim.Adam(groups)
     scheduler = build_lr_scheduler(optimizer=optimizer, args=args)
 
     loaded_checkpoint = None
@@ -658,13 +849,19 @@ def main() -> None:
             checkpoint_path=args.load_weights,
             device=params.w.device,
             load_optimizer_state=args.load_optimizer_state,
+            inverse_rmax=inverse_rmax,
+            inverse_data_cv=inverse_data_cv,
+            scheduler=scheduler,
         )
+        if inverse_rmax is not None:
+            params.r_max = inverse_rmax.current_r_max()
 
     loss_weights = {
         "pde": args.initial_w_pde,
         "ic": args.initial_w_ic,
         "bc": args.initial_w_bc,
         "timestep": args.initial_w_timestep,
+        "data": args.initial_w_data,
     }
 
     weight_state = {
@@ -761,6 +958,24 @@ def main() -> None:
         "initial_w_ic": args.initial_w_ic,
         "initial_w_bc": args.initial_w_bc,
         "initial_w_timestep": args.initial_w_timestep,
+        "initial_w_data": args.initial_w_data,
+        "estimate_rmax": args.estimate_rmax,
+        "rmax_lr": args.rmax_lr,
+        "rmax_log_lower": args.rmax_log_lower,
+        "rmax_log_upper": args.rmax_log_upper,
+        "boundary_target_gradient_mode": "rmax-only" if args.estimate_rmax else "detached",
+        "data_csv": args.data_csv,
+        "lambda_data": args.lambda_data,
+        "data_default_cv": args.data_default_cv,
+        "estimate_data_cv": args.estimate_data_cv,
+        "data_discrepancy_gate": args.data_discrepancy_gate,
+        "data_cv_scope": args.data_cv_scope,
+        "data_cv_init": args.data_cv_init,
+        "data_cv_lower": args.data_cv_lower,
+        "data_cv_upper": args.data_cv_upper,
+        "data_cv_lr": args.data_cv_lr,
+        "data_loss_eps": args.data_loss_eps,
+        "data_time_quadrature_points": args.data_time_quadrature_points,
         "hard_set_first_weight_update": args.hard_set_first_weight_update,
         "init_final_bias_from_ic": args.init_final_bias_from_ic,
         "causal_curriculum": args.causal_curriculum,
@@ -828,6 +1043,8 @@ def main() -> None:
         )
 
     history = []
+    rmax_history = []
+    data_cv_history = []
     hpc_history = []
     latest_history_row = None
     latest_fixed_diagnostic_row = None
@@ -893,6 +1110,14 @@ def main() -> None:
                 detach_step_target=args.detach_step_target,
                 timestep_dt=args.timestep_dt,
                 timestep_n_pairs=args.timestep_n_pairs,
+                observation_batch=observation_batch,
+                lambda_data=args.lambda_data,
+                data_loss_eps=args.data_loss_eps,
+                data_time_quadrature_points=args.data_time_quadrature_points,
+                inverse_rmax=inverse_rmax,
+                inverse_data_cv=inverse_data_cv,
+                data_discrepancy_gate=args.data_discrepancy_gate,
+                boundary_target_gradient_mode="rmax-only" if args.estimate_rmax else "detached",
                 collocation_strategy=args.collocation_strategy,
                 r3_population=r3_population,
                 r3_update_every=args.r3_update_every,
@@ -921,6 +1146,10 @@ def main() -> None:
             )
 
             history.append(row)
+            if inverse_rmax is not None:
+                rmax_history.extend(rmax_rows(inverse_rmax, params, step))
+            if inverse_data_cv is not None:
+                data_cv_history.extend(data_cv_rows(inverse_data_cv, params, step))
             latest_history_row = row
             n_steps_completed = step
 
@@ -1009,6 +1238,8 @@ def main() -> None:
                     optimizer=optimizer,
                     config=config,
                     scheduler=scheduler,
+                    inverse_rmax=inverse_rmax,
+                    inverse_data_cv=inverse_data_cv,
                     latest_history_row=filter_hpc_history_row(row),
                     latest_fixed_diagnostic_row=latest_fixed_diagnostic_row,
                     subdir="checkpoints",
@@ -1066,6 +1297,9 @@ def main() -> None:
                     model=model,
                     optimizer=optimizer,
                     config=config,
+                    scheduler=scheduler,
+                    inverse_rmax=inverse_rmax,
+                    inverse_data_cv=inverse_data_cv,
                 ))
 
         timing["actual_total_seconds"] = time.perf_counter() - start_time
@@ -1087,14 +1321,24 @@ def main() -> None:
         else:
             save_history(history, run_dir)
 
+        save_rmax_history(rmax_history, run_dir)
+        save_data_cv_history(data_cv_history, run_dir)
+        config["estimated_rmax_csv"] = save_estimated_rmax(inverse_rmax, params, run_dir)
+        config["estimated_data_cv_csv"] = save_estimated_data_cv(inverse_data_cv, params, run_dir)
+        if observation_batch is not None and args.lambda_data != 0.0:
+            save_data_predictions_final(run_dir=run_dir, model=model, params=params, observation_batch=observation_batch, eps=args.data_loss_eps, data_time_quadrature_points=args.data_time_quadrature_points, inverse_data_cv=inverse_data_cv)
+        save_json(config, run_dir / "config.json")
+
         final_model_path = run_dir / "model_final.pt"
         final_checkpoint = {
             "step": args.n_steps,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "config": config,
+            **({"inverse_parameter_state_dict": inverse_rmax.state_dict()} if inverse_rmax is not None else {}),
+            **({"data_cv_state_dict": inverse_data_cv.state_dict()} if inverse_data_cv is not None else {}),
         }
-        if args.hpc and scheduler is not None:
+        if scheduler is not None:
             final_checkpoint["scheduler_state_dict"] = scheduler.state_dict()
         torch.save(final_checkpoint, final_model_path)
 

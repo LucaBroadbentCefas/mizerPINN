@@ -13,8 +13,16 @@ from PINNmizer.pinn.losses import (
     compute_pde_loss_r3_slabbed,
 )
 from PINNmizer.pinn.r3 import update_r3_population_
-from PINNmizer.training.weighting import update_expert_gradient_norm_weights_, update_wang_gradient_weights_
+from PINNmizer.training.weighting import (
+    rescale_fixed_calibration_batch,
+    update_expert_gradient_norm_weights_,
+    update_wang_gradient_weights_,
+)
 from PINNmizer.pinn.timestep_consistency import compute_timestep_consistency_loss
+from PINNmizer.params import scale_x, scale_t
+from PINNmizer.pinn.model_eval import evaluate_log_model_on_points
+from PINNmizer.pinn.observation_operators import observation_time_grid, predict_observations
+from PINNmizer.pinn.data_losses import apply_data_discrepancy_gate, lognormal_nll
 
 
 def scalar_min(x: torch.Tensor) -> float:
@@ -38,6 +46,34 @@ def total_grad_norm_and_check(model: nn.Module) -> float:
     if total is None:
         return 0.0
     return float(torch.sqrt(total).cpu())
+
+
+def inverse_rmax_grad_stats(inverse_rmax, *, require_nonzero: bool = False) -> dict:
+    if inverse_rmax is None:
+        return {"rmax_raw_grad_norm": math.nan, "rmax_raw_grad_min": math.nan, "rmax_raw_grad_max": math.nan, "rmax_grad_finite": math.nan}
+    grad = inverse_rmax.raw_logit.grad
+    if grad is None:
+        raise RuntimeError("Missing r_max raw gradient; boundary graph is disconnected from inverse r_max.")
+    if not torch.isfinite(grad).all():
+        raise FloatingPointError("Non-finite gradient in inverse r_max raw_logit.")
+    norm = float(torch.linalg.vector_norm(grad.detach()).cpu())
+    if require_nonzero and norm == 0.0:
+        raise RuntimeError("Zero r_max gradient on first active step; recruitment boundary graph is disconnected from inverse r_max.")
+    return {
+        "rmax_raw_grad_norm": norm,
+        "rmax_raw_grad_min": float(grad.detach().min().cpu()),
+        "rmax_raw_grad_max": float(grad.detach().max().cpu()),
+        "rmax_grad_finite": 1.0,
+    }
+
+
+def data_cv_grad_norm(inverse_data_cv) -> float:
+    if inverse_data_cv is None or inverse_data_cv.raw_parameter.grad is None:
+        return math.nan
+    grad = inverse_data_cv.raw_parameter.grad
+    if not torch.isfinite(grad).all():
+        raise FloatingPointError("Non-finite observation CV gradient.")
+    return float(torch.linalg.vector_norm(grad.detach()).cpu())
 
 def train_one_step(
     *,
@@ -92,6 +128,7 @@ def train_one_step(
     lr_scheduler_name: str = "none",
     wang_weight_batch: str = "fixed",
     weight_calibration_batch: dict[str, torch.Tensor] | None = None,
+    fixed_collocation_batch: dict[str, torch.Tensor] | None = None,
     time_sampling: str = "uniform",
     causal_loss: str = "off",
     causal_n_chunks: int = 32,
@@ -102,7 +139,14 @@ def train_one_step(
     expert_weight_min: float | None = None,
     expert_weight_max: float | None = None,
     expert_weight_batch: str = "fixed",
-    fixed_collocation_batch: dict[str, torch.Tensor] | None = None,
+    observation_batch: dict[str, object] | None = None,
+    lambda_data: float = 0.0,
+    data_loss_eps: float = 1e-30,
+    data_time_quadrature_points: int = 1,
+    inverse_rmax=None,
+    inverse_data_cv=None,
+    data_discrepancy_gate: bool = False,
+    boundary_target_gradient_mode: str = "detached",
 ) -> dict:
     if wang_weight_batch not in {"fixed", "training"}:
         raise ValueError("wang_weight_batch must be 'fixed' or 'training'.")
@@ -114,6 +158,8 @@ def train_one_step(
     expert_weight_max = weight_max if expert_weight_max is None else expert_weight_max
 
     optimizer.zero_grad(set_to_none=True)
+    if inverse_rmax is not None:
+        params.r_max = inverse_rmax.current_r_max()
 
     if collocation_strategy == "uniform":
         batch = sample_pde_batch(
@@ -149,38 +195,23 @@ def train_one_step(
             pde_pseudo_huber_delta=pde_pseudo_huber_delta,
             bc_penalty=bc_penalty,
             bc_pseudo_huber_delta=bc_pseudo_huber_delta,
+            boundary_target_gradient_mode=boundary_target_gradient_mode,
         )
 
     elif collocation_strategy == "fixed-grid":
         if fixed_collocation_batch is None:
             raise ValueError("fixed-grid collocation requires fixed_collocation_batch.")
-
         batch = fixed_collocation_batch
-
         _, out = compute_pde_loss(
-            model=model,
-            batch=batch,
-            params=params,
-            n_pp=n_pp,
-            residual_form=residual_form,
-            n_init=n_init,
-            lambda_pde=lambda_pde,
-            lambda_ic=lambda_ic,
-            lambda_bc=lambda_bc,
-            boundary_loss_form=boundary_loss_form,
-            species_idx=0,
-            eps=eps,
-            bc_eps=bc_eps,
-            bc_g_min=bc_g_min,
-            use_constant_recruitment_r=bc_use_constant_r,
-            constant_recruitment_r=bc_constant_r,
-            causal_loss=causal_loss,
-            causal_n_chunks=causal_n_chunks,
-            causal_epsilon=causal_epsilon,
-            pde_penalty=pde_penalty,
-            pde_pseudo_huber_delta=pde_pseudo_huber_delta,
-            bc_penalty=bc_penalty,
-            bc_pseudo_huber_delta=bc_pseudo_huber_delta,
+            model=model, batch=batch, params=params, n_pp=n_pp,
+            residual_form=residual_form, n_init=n_init, lambda_pde=lambda_pde,
+            lambda_ic=lambda_ic, lambda_bc=lambda_bc, boundary_loss_form=boundary_loss_form,
+            species_idx=0, eps=eps, bc_eps=bc_eps, bc_g_min=bc_g_min,
+            use_constant_recruitment_r=bc_use_constant_r, constant_recruitment_r=bc_constant_r,
+            causal_loss=causal_loss, causal_n_chunks=causal_n_chunks, causal_epsilon=causal_epsilon,
+            pde_penalty=pde_penalty, pde_pseudo_huber_delta=pde_pseudo_huber_delta,
+            bc_penalty=bc_penalty, bc_pseudo_huber_delta=bc_pseudo_huber_delta,
+            boundary_target_gradient_mode=boundary_target_gradient_mode,
         )
 
     elif collocation_strategy in {"r3", "causal-r3"}:
@@ -225,6 +256,7 @@ def train_one_step(
             pde_pseudo_huber_delta=pde_pseudo_huber_delta,
             bc_penalty=bc_penalty,
             bc_pseudo_huber_delta=bc_pseudo_huber_delta,
+            boundary_target_gradient_mode=boundary_target_gradient_mode,
         )
 
     else:
@@ -264,6 +296,98 @@ def train_one_step(
           )
     out["loss_timestep"] = loss_timestep
 
+    loss_data = out["loss_pde"].new_zeros(())
+    data_out = {}
+
+    if lambda_data > 0.0 and observation_batch is not None:
+        keep = torch.maximum(
+            observation_batch["t_start"],
+            observation_batch["t_end"],
+        ) <= torch.as_tensor(
+            t_max_current,
+            dtype=observation_batch["t_start"].dtype,
+            device=observation_batch["t_start"].device,
+        )
+
+        out["n_data_obs_active"] = torch.as_tensor(
+            keep.sum().item(),
+            dtype=loss_data.dtype,
+            device=loss_data.device,
+        )
+
+        if bool(keep.any().detach().cpu()):
+            idx = torch.nonzero(keep, as_tuple=False).reshape(-1)
+            idx_list = idx.detach().cpu().tolist()
+            n_obs = observation_batch["value"].numel()
+
+            observation_batch = {
+                k: (
+                    v[idx]
+                    if torch.is_tensor(v) and v.ndim > 0 and v.shape[0] == n_obs
+                    else [v[i] for i in idx_list]
+                    if isinstance(v, list) and len(v) == n_obs
+                    else v
+                )
+                for k, v in observation_batch.items()
+            }
+
+            t_grid = observation_time_grid(
+                observation_batch,
+                data_time_quadrature_points=data_time_quadrature_points,
+            )
+
+            grid_eval = evaluate_log_model_on_points(
+                model=model,
+                x_scaled=scale_x(torch.log(params.w), params),
+                t_scaled=scale_t(t_grid, params),
+                params=params,
+            )
+
+            pred = predict_observations(
+                {"N_grid": grid_eval["N"], "t_grid": t_grid},
+                observation_batch,
+                params,
+                data_time_quadrature_points=data_time_quadrature_points,
+            )
+            estimated_sd_log = inverse_data_cv.current_sd_log() if inverse_data_cv is not None else None
+            if estimated_sd_log is None:
+                sd_log_used = observation_batch["sd_log"]
+            elif inverse_data_cv.scope == "global":
+                sd_log_used = estimated_sd_log.expand(observation_batch["value"].numel())
+            else:
+                sd_log_used = estimated_sd_log[observation_batch["species_idx"]]
+            nll = lognormal_nll(pred, observation_batch["value"], sd_log_used, eps=data_loss_eps)
+
+            loss_data = nll["loss_data"]
+            data_out = {
+                "loss_data": loss_data,
+                "data_prediction": pred,
+                "data_value": observation_batch["value"],
+                "data_log_residual": nll["log_residual"],
+                "data_loss_contribution": nll["loss_contribution"],
+                "data_sd_log_used": sd_log_used,
+            }
+
+    out.update(data_out)
+    out["loss_data"] = loss_data
+
+    if "n_data_obs_active" not in out:
+        out["n_data_obs_active"] = loss_data.new_zeros(())
+    if "data_log_residual" in out:
+        out.update(apply_data_discrepancy_gate(
+            loss_data,
+            out["data_log_residual"],
+            out["data_sd_log_used"],
+            enabled=data_discrepancy_gate,
+        ))
+    else:
+        out.update(apply_data_discrepancy_gate(
+            loss_data,
+            loss_data.new_empty((0,)),
+            loss_data.new_empty((0,)),
+            enabled=data_discrepancy_gate,
+        ))
+    loss_data_effective = out["loss_data_effective"]
     loss_pde_for_weighting = out["loss_pde"] if loss_weighting == "expert-grad-norm" else out.get("loss_pde_ungated", out["loss_pde"])
     
     raw_losses = {
@@ -271,6 +395,7 @@ def train_one_step(
         "ic": out["loss_ic"],
         "bc": out["loss_bc"],
         "timestep": out["loss_timestep"],
+        "data": out["loss_data"],
     }
     
     losses_for_weighting = {
@@ -278,6 +403,7 @@ def train_one_step(
         "ic": lambda_ic * out["loss_ic"],
         "bc": lambda_bc * out["loss_bc"],
         "timestep": lambda_timestep * out["loss_timestep"],
+        "data": lambda_data * loss_data_effective,
     }
 
     weight_stats = {
@@ -285,18 +411,22 @@ def train_one_step(
         "grad_ic_mean": math.nan,
         "grad_bc_mean": math.nan,
         "grad_timestep_mean": math.nan,
+        "grad_data_mean": math.nan,
         "target_ic": math.nan,
         "target_bc": math.nan,
         "target_timestep": math.nan,
+        "target_data": math.nan,
         "hard_set": 0.0,
         "grad_norm_pde_for_weighting": math.nan,
         "grad_norm_ic_for_weighting": math.nan,
         "grad_norm_bc_for_weighting": math.nan,
         "grad_norm_timestep_for_weighting": math.nan,
+        "grad_norm_data_for_weighting": math.nan,
         "target_w_pde": math.nan,
         "target_w_ic": math.nan,
         "target_w_bc": math.nan,
         "target_w_timestep": math.nan,
+        "target_w_data": math.nan,
         "expert_weight_total_grad_norm": math.nan,
         "expert_weight_hard_set": 0.0,
     }
@@ -321,9 +451,15 @@ def train_one_step(
                     "fixed adaptive weighting requires weight_calibration_batch."
                 )
 
+            calibration_batch = rescale_fixed_calibration_batch(
+                weight_calibration_batch,
+                params=params,
+                t_max_current=t_max_current,
+            )
+
             _, calibration_out = compute_pde_loss(
                 model=model,
-                batch=weight_calibration_batch,
+                batch=calibration_batch,
                 params=params,
                 n_pp=n_pp,
                 residual_form=residual_form,
@@ -345,6 +481,7 @@ def train_one_step(
                 pde_pseudo_huber_delta=pde_pseudo_huber_delta,
                 bc_penalty=bc_penalty,
                 bc_pseudo_huber_delta=bc_pseudo_huber_delta,
+                boundary_target_gradient_mode=boundary_target_gradient_mode,
             )
             calibration_loss_pde_for_weighting = calibration_out["loss_pde"] if loss_weighting == "expert-grad-norm" else calibration_out.get(
                 "loss_pde_ungated",
@@ -356,6 +493,7 @@ def train_one_step(
                 "ic": lambda_ic * calibration_out["loss_ic"],
                 "bc": lambda_bc * calibration_out["loss_bc"],
                 "timestep": lambda_timestep * calibration_loss_timestep,
+                "data": lambda_data * loss_data_effective,
             }
             weight_update_used_fixed_batch = 1.0
         elif active_weight_batch == "training":
@@ -391,6 +529,7 @@ def train_one_step(
         + out["loss_ic"]
         + out["loss_bc"]
         + out["loss_timestep"]
+        + loss_data_effective
     )
 
 
@@ -400,6 +539,7 @@ def train_one_step(
             + lambda_ic * out["loss_ic"]
             + lambda_bc * out["loss_bc"]
             + lambda_timestep * out["loss_timestep"]
+            + lambda_data * loss_data_effective
         )
     else:
         loss = (
@@ -407,6 +547,7 @@ def train_one_step(
             + lambda_ic * loss_weights["ic"] * out["loss_ic"]
             + lambda_bc * loss_weights["bc"] * out["loss_bc"]
             + lambda_timestep * loss_weights["timestep"] * out["loss_timestep"]
+            + lambda_data * loss_weights["data"] * loss_data_effective
         )
 
 
@@ -418,8 +559,12 @@ def train_one_step(
     loss.backward()
 
     grad_norm = total_grad_norm_and_check(model)
+    rmax_grad_stats = inverse_rmax_grad_stats(inverse_rmax, require_nonzero=(inverse_rmax is not None and lambda_bc != 0.0 and step == 1))
+    cv_grad_norm = data_cv_grad_norm(inverse_data_cv)
 
     optimizer.step()
+    if inverse_rmax is not None:
+        params.r_max = inverse_rmax.current_r_max()
 
     if lr_scheduler is not None:
         if lr_scheduler_name == "plateau":
@@ -428,6 +573,8 @@ def train_one_step(
             lr_scheduler.step()
 
     lr = float(optimizer.param_groups[0]["lr"])
+    rmax_lr = next((float(g["lr"]) for g in optimizer.param_groups if g.get("name") == "rmax"), math.nan)
+    data_cv_lr = next((float(g["lr"]) for g in optimizer.param_groups if g.get("name") == "data_cv"), math.nan)
 
     r3_diag = {
         "r3_population_size": math.nan,
@@ -469,6 +616,7 @@ def train_one_step(
                     score_form=r3_score_form,
                     causal=causal_r3 if collocation_strategy == "causal-r3" else None,
                     causal_score=causal_r3_score,
+                    species_idx=0,
                 )
             )
 
@@ -489,6 +637,9 @@ def train_one_step(
         "step": step,
         "loss": float(out["loss"].detach().cpu()),
         "lr": lr,
+        "rmax_lr": rmax_lr,
+        "data_cv_lr": data_cv_lr,
+        "data_cv_grad_norm": cv_grad_norm,
         "loss_pde": float(out["loss_pde"].detach().cpu()),
         "pde_penalty": pde_penalty,
         "pde_pseudo_huber_delta": float(pde_pseudo_huber_delta),
@@ -496,6 +647,11 @@ def train_one_step(
         "bc_pseudo_huber_delta": float(bc_pseudo_huber_delta),
         "loss_ic": float(out["loss_ic"].detach().cpu()),
         "loss_bc": float(out["loss_bc"].detach().cpu()),
+        "loss_data": float(out["loss_data"].detach().cpu()),
+        "loss_data_effective": float(loss_data_effective.detach().cpu()),
+        "data_discrepancy_q": float(out["data_discrepancy_q"].cpu()),
+        "data_discrepancy_q95": float(out["data_discrepancy_q95"].cpu()),
+        "data_loss_active": float(out["data_loss_active"].cpu()),
         "grad_norm": grad_norm,
         "residual_log_mean": scalar_mean(residual_log),
         "residual_log_abs_mean": scalar_mean(torch.abs(residual_log)),
@@ -517,10 +673,12 @@ def train_one_step(
         "w_ic": float(loss_weights["ic"]),
         "w_bc": float(loss_weights["bc"]),
         "w_timestep": float(loss_weights["timestep"]),
+        "w_data": float(loss_weights.get("data", 1.0)),
         "wang_scaled_loss_pde": float((loss_weights["pde"] * out["loss_pde"]).detach().cpu()),
         "wang_scaled_loss_ic": float((loss_weights["ic"] * out["loss_ic"]).detach().cpu()),
         "wang_scaled_loss_bc": float((loss_weights["bc"] * out["loss_bc"]).detach().cpu()),
         "wang_scaled_loss_timestep": float((loss_weights["timestep"] * out["loss_timestep"]).detach().cpu()),
+        "wang_scaled_loss_data": float((loss_weights.get("data", 1.0) * loss_data_effective).detach().cpu()),
         "loss_pde_for_weighting": float(loss_pde_for_weighting.detach().cpu()),
         "loss_pde_ungated": float(out.get("loss_pde_ungated", out["loss_pde"]).detach().cpu()),
         "loss_pde_gated": float(out.get("loss_pde_gated", out["loss_pde"]).detach().cpu()),
@@ -549,12 +707,14 @@ def train_one_step(
         "objective_loss_ic": float((lambda_ic * loss_weights["ic"] * out["loss_ic"]).detach().cpu()),
         "objective_loss_bc": float((lambda_bc * loss_weights["bc"] * out["loss_bc"]).detach().cpu()),
         "objective_loss_timestep": float((lambda_timestep * loss_weights["timestep"] * out["loss_timestep"]).detach().cpu()),
+        "objective_loss_data": float((lambda_data * loss_weights.get("data", 1.0) * loss_data_effective).detach().cpu()),
         
         # Backward-compatible aliases for old plotting/history code.
         "weighted_loss_pde": float((lambda_pde * loss_weights["pde"] * out["loss_pde"]).detach().cpu()),
         "weighted_loss_ic": float((lambda_ic * loss_weights["ic"] * out["loss_ic"]).detach().cpu()),
         "weighted_loss_bc": float((lambda_bc * loss_weights["bc"] * out["loss_bc"]).detach().cpu()),
         "weighted_loss_timestep": float((lambda_timestep * loss_weights["timestep"] * out["loss_timestep"]).detach().cpu()),
+        "weighted_loss_data": float((lambda_data * loss_weights.get("data", 1.0) * loss_data_effective).detach().cpu()),
         "grad_pde_max_for_weighting": weight_stats["grad_pde_max"],
         "grad_ic_mean_for_weighting": weight_stats["grad_ic_mean"],
         "grad_bc_mean_for_weighting": weight_stats["grad_bc_mean"],
@@ -562,10 +722,13 @@ def train_one_step(
         "target_w_bc": weight_stats["target_bc"] if math.isfinite(weight_stats["target_bc"]) else weight_stats["target_w_bc"],
         "grad_timestep_mean_for_weighting": weight_stats["grad_timestep_mean"],
         "target_w_timestep": weight_stats["target_timestep"] if math.isfinite(weight_stats["target_timestep"]) else weight_stats["target_w_timestep"],
+        "grad_data_mean_for_weighting": weight_stats["grad_data_mean"],
+        "target_w_data": weight_stats["target_data"] if math.isfinite(weight_stats["target_data"]) else weight_stats["target_w_data"],
         "grad_norm_pde_for_weighting": weight_stats["grad_norm_pde_for_weighting"],
         "grad_norm_ic_for_weighting": weight_stats["grad_norm_ic_for_weighting"],
         "grad_norm_bc_for_weighting": weight_stats["grad_norm_bc_for_weighting"],
         "grad_norm_timestep_for_weighting": weight_stats["grad_norm_timestep_for_weighting"],
+        "grad_norm_data_for_weighting": weight_stats["grad_norm_data_for_weighting"],
         "target_w_pde": weight_stats["target_w_pde"],
         "expert_weight_total_grad_norm": weight_stats["expert_weight_total_grad_norm"],
         "loss_weighted": float(loss.detach().cpu()),
@@ -609,5 +772,34 @@ def train_one_step(
         "timestep_relative_abs_max": float((timestep_out["relative_abs_max"] if timestep_out is not None else torch.tensor(float("nan"))).detach().cpu()),
         "bc_use_constant_r": 1.0 if bc_use_constant_r else 0.0,
         "bc_constant_r": float(bc_constant_r) if bc_constant_r is not None else math.nan,
+        "n_data_obs": float(out.get("n_data_obs_active", torch.zeros_like(out["loss_data"])).detach().cpu()),
+        "data_pred_min": scalar_min(out["data_prediction"]) if "data_prediction" in out else math.nan,
+        "data_pred_max": scalar_max(out["data_prediction"]) if "data_prediction" in out else math.nan,
+        "data_obs_min": scalar_min(observation_batch["value"]) if observation_batch is not None and lambda_data > 0.0 else math.nan,
+        "data_obs_max": scalar_max(observation_batch["value"]) if observation_batch is not None and lambda_data > 0.0 else math.nan,
+        "data_log_residual_abs_mean": scalar_mean(torch.abs(out["data_log_residual"])) if "data_log_residual" in out else math.nan,
+        "data_log_residual_abs_max": scalar_max(torch.abs(out["data_log_residual"])) if "data_log_residual" in out else math.nan,
     }
+
+    if inverse_rmax is not None:
+        with torch.no_grad():
+            cur_r = inverse_rmax.current_r_max().detach()
+            cur_log = inverse_rmax.current_log_r_max().detach()
+            ratio = cur_r / inverse_rmax.initial_r_max
+        base.update(rmax_grad_stats)
+        base.update({
+            "rmax_min": scalar_min(cur_r), "rmax_mean": scalar_mean(cur_r), "rmax_max": scalar_max(cur_r),
+            "log_rmax_min": scalar_min(cur_log), "log_rmax_mean": scalar_mean(cur_log), "log_rmax_max": scalar_max(cur_log),
+            "rmax_ratio_min": scalar_min(ratio), "rmax_ratio_mean": scalar_mean(ratio), "rmax_ratio_max": scalar_max(ratio),
+        })
+    else:
+        base.update(rmax_grad_stats)
+        base.update({k: math.nan for k in ["rmax_min","rmax_mean","rmax_max","log_rmax_min","log_rmax_mean","log_rmax_max","rmax_ratio_min","rmax_ratio_mean","rmax_ratio_max"]})
+    if inverse_data_cv is not None:
+        with torch.no_grad():
+            cv, sd = inverse_data_cv.current_cv(), inverse_data_cv.current_sd_log()
+        base.update({"data_cv_min": scalar_min(cv), "data_cv_mean": scalar_mean(cv), "data_cv_max": scalar_max(cv),
+                     "data_sd_log_min": scalar_min(sd), "data_sd_log_mean": scalar_mean(sd), "data_sd_log_max": scalar_max(sd)})
+    else:
+        base.update({k: math.nan for k in ["data_cv_min", "data_cv_mean", "data_cv_max", "data_sd_log_min", "data_sd_log_mean", "data_sd_log_max"]})
     return base
