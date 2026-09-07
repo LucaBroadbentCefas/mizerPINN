@@ -4,19 +4,7 @@ library(tidyr)
 library(purrr)
 library(tibble)
 
-# sim must be a MizerSim object containing:
-#   sim@n: time x species x weight abundance density
-#   sim@params@w: weight grid
-#   sim@params@dw: weight-bin widths
-#
-# For meaningful annual catch totals, generate sim with subannual saves:
-#
-# sim <- project(
-#   params,
-#   t_max = 20,
-#   t_save = 0.1,
-#   progress_bar = FALSE
-# )
+
 
 gears <- gear_params(mizer::NS_params)
 
@@ -37,7 +25,7 @@ initial_effort(NS_params) <- effort
 
 sim <- project(NS_params, t_max = 40, t_save = 0.1, effort  = effort)
 
-make_observation_data <- function(sim, survey_gear_name = "survey") {
+make_observation_data <- function(sim, cv, survey_gear_name = "survey") {
 
   n <- sim@n
   w <- sim@params@w
@@ -62,7 +50,7 @@ make_observation_data <- function(sim, survey_gear_name = "survey") {
   yield_df$time <- as.numeric(as.character(yield_df$time))
   yield_df$year <- floor(yield_df$time)
 
-    catch_obs <- yield_df |>
+  catch_obs <- yield_df |>
     dplyr::filter(time >= year, time < year + 1) |>
     dplyr::group_by(year, gear, sp) |>
     dplyr::summarise(
@@ -83,27 +71,25 @@ make_observation_data <- function(sim, survey_gear_name = "survey") {
   gear_levels <- dimnames(getYieldGear(sim))$gear
   species_levels <- dimnames(getYieldGear(sim))$sp
 
-  #browser()
-
-    catch_obs%>%
+  catch_obs%>%
     dplyr::arrange(year, species, observation, gear)%>%
-      dplyr::mutate(
-        t_start = year,
-        t_end = year + 1,
-        species_idx = match(as.character(species), species_levels) - 1L,
-        gear_idx = match(as.character(gear), gear_levels) - 1L,
-        obs_type = "catch_gear",
-        cv = 0.3
-      )|>
-  dplyr::select(
-    obs_type,
-    species_idx,
-    gear_idx,
-    t_start,
-    t_end,
-    value,
-    cv
-  )
+    dplyr::mutate(
+      t_start = year,
+      t_end = year + 1,
+      species_idx = match(as.character(species), species_levels) - 1L,
+      gear_idx = match(as.character(gear), gear_levels) - 1L,
+      obs_type = "catch_gear",
+      cv = 0.3
+    )|>
+    dplyr::select(
+      obs_type,
+      species_idx,
+      gear_idx,
+      t_start,
+      t_end,
+      value,
+      cv
+    )
 }
 
 observation_data <- make_observation_data(
