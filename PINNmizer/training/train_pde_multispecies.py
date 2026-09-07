@@ -32,7 +32,7 @@ from PINNmizer.training.outputs_multispecies import (
 from PINNmizer.training.loop_multispecies import train_one_step_multispecies, total_grad_norm_and_check, scalar_min, scalar_max, scalar_mean
 from PINNmizer.pinn.state_scale import set_state_scale_from_initial_condition, DEFAULT_STATE_SCALE_EPS
 from PINNmizer.pinn.r3 import make_r3_population, CausalR3
-from PINNmizer.inverse_parameters import BoundedDataCV, BoundedLogRMax
+from PINNmizer.inverse_parameters import BoundedDataCV, BoundedLogRMax, LogFishingEffort
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 from PINNmizer.io import load_mizer_inputs
@@ -75,6 +75,7 @@ def load_checkpoint_weights(
     load_optimizer_state: bool = False,
     inverse_rmax=None,
     inverse_data_cv=None,
+    inverse_effort=None,
 ) -> dict:
     checkpoint_path = Path(checkpoint_path)
 
@@ -102,6 +103,15 @@ def load_checkpoint_weights(
         cv_loaded = True
     elif inverse_data_cv is None and "data_cv_state_dict" in checkpoint:
         raise ValueError("Checkpoint contains estimated data CV, but this run did not enable --estimate-data-cv.")
+    effort_loaded = False
+    has_effort = "inverse_effort_state_dict" in checkpoint
+    if inverse_effort is not None and has_effort:
+        inverse_effort.load_state_dict(checkpoint["inverse_effort_state_dict"])
+        effort_loaded = True
+    elif inverse_effort is None and has_effort:
+        raise ValueError("Checkpoint contains estimated effort, but this run did not enable --estimate-effort.")
+    elif inverse_effort is not None and not has_effort and (checkpoint.get("config") or {}).get("estimate_effort", False):
+        raise ValueError("Checkpoint declares estimated effort but has no inverse effort state.")
 
     optimizer_loaded = False
     if load_optimizer_state:
@@ -143,6 +153,7 @@ def load_checkpoint_weights(
         "optimizer_loaded": optimizer_loaded,
         "inverse_parameter_loaded": inverse_loaded,
         "data_cv_loaded": cv_loaded,
+        "effort_loaded": effort_loaded,
         "checkpoint_config": checkpoint.get("config", None),
     }
 
@@ -368,6 +379,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rmax-lr", type=float, default=1e-3)
     parser.add_argument("--rmax-log-lower", type=float, default=0.0)
     parser.add_argument("--rmax-log-upper", type=float, default=50.0)
+    parser.add_argument("--estimate-effort", action="store_true", default=False)
+    parser.add_argument("--effort-lr", type=float, default=1e-2)
+    parser.add_argument("--effort-init", type=float, default=1.0)
     parser.add_argument("--data-csv", default=None)
     parser.add_argument("--lambda-data", type=float, default=0.0)
     parser.add_argument("--data-default-cv", type=float, default=0.3)
@@ -535,6 +549,41 @@ def save_estimated_rmax(inverse_rmax, params, run_dir: Path) -> str | None:
     return str(path)
 
 
+def annual_effort_time_grid(params) -> torch.Tensor:
+    """Inclusive annual knots over the physical model domain."""
+    t_min, t_max = float(params.t_min), float(params.t_max)
+    if not (math.isfinite(t_min) and math.isfinite(t_max) and t_max >= t_min):
+        raise ValueError("Effort estimation requires a finite, ordered physical time domain.")
+    span = t_max - t_min
+    years = round(span)
+    if not math.isclose(span, years, rel_tol=0.0, abs_tol=1e-10):
+        raise ValueError("Effort estimation requires t_max - t_min to be a whole number of years.")
+    return torch.arange(years + 1, dtype=params.w.dtype, device=params.w.device) + t_min
+
+
+def save_estimated_effort(inverse_effort, effort_time, reference_effort, run_dir: Path) -> str | None:
+    if inverse_effort is None:
+        return None
+    estimated = inverse_effort.current_effort().detach().cpu()
+    logs = inverse_effort.log_effort.detach().cpu()
+    initial = inverse_effort.initial_effort.detach().cpu()
+    truth = reference_effort.detach().cpu().reshape(-1)
+    rows = []
+    for ti, physical_time in enumerate(effort_time.detach().cpu()):
+        for gear in range(estimated.shape[1]):
+            true = float(truth[gear])
+            est = float(estimated[ti, gear])
+            rows.append({"physical_time": float(physical_time), "gear_idx": gear,
+                         "initial_estimated_effort": float(initial[ti, gear]),
+                         "estimated_effort": est, "true_reference_effort": true,
+                         "absolute_error": abs(est - true),
+                         "estimated_log_effort": float(logs[ti, gear]),
+                         "estimated_true_ratio": est / true if true > 0.0 else math.nan})
+    path = run_dir / "estimated_effort.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return str(path)
+
+
 def data_cv_rows(inverse_data_cv, params, step: int) -> list[dict]:
     if inverse_data_cv is None:
         return []
@@ -601,6 +650,26 @@ def main() -> None:
         dtype=torch.float64,
         device=args.device,
     )
+
+    inverse_effort = None
+    effort_time = None
+    reference_effort = None
+    if args.estimate_effort:
+        if not math.isfinite(args.effort_init) or args.effort_init <= 0.0:
+            raise ValueError("--effort-init must be finite and strictly positive.")
+        if params.initial_effort is None:
+            raise ValueError("--estimate-effort requires exported initial_effort gear metadata.")
+        reference_effort = params.initial_effort.detach().clone()
+        effort_time = annual_effort_time_grid(params)
+        initial_matrix = torch.full(
+            (effort_time.numel(), reference_effort.numel()), args.effort_init,
+            dtype=params.w.dtype, device=params.w.device,
+        )
+        inverse_effort = LogFishingEffort(initial_matrix)
+        current_effort = inverse_effort.current_effort()
+        params.fishing_effort_time = effort_time
+        params.fishing_effort = current_effort
+        params.initial_effort = current_effort[0]
 
     params.state_parameterization = args.state_parameterization
     set_state_scale_from_initial_condition(params, n_init, eps=args.state_scale_eps)
@@ -698,6 +767,8 @@ def main() -> None:
         groups.append({"params": inverse_rmax.parameters(), "lr": args.rmax_lr, "name": "rmax"})
     if inverse_data_cv is not None:
         groups.append({"params": inverse_data_cv.parameters(), "lr": args.data_cv_lr, "name": "data_cv"})
+    if inverse_effort is not None:
+        groups.append({"params": inverse_effort.parameters(), "lr": args.effort_lr, "name": "effort"})
     optimizer = torch.optim.Adam(groups)
     scheduler = build_lr_scheduler(optimizer=optimizer, args=args)
     
@@ -711,9 +782,13 @@ def main() -> None:
             load_optimizer_state=args.load_optimizer_state,
             inverse_rmax=inverse_rmax,
             inverse_data_cv=inverse_data_cv,
+            inverse_effort=inverse_effort,
         )
         if inverse_rmax is not None:
             params.r_max = inverse_rmax.current_r_max()
+        if inverse_effort is not None:
+            params.fishing_effort = inverse_effort.current_effort()
+            params.initial_effort = params.fishing_effort[0]
     
     loss_weights = {
         "pde": args.initial_w_pde,
@@ -839,6 +914,12 @@ def main() -> None:
         "boundary_target_gradient_mode": "rmax-only" if args.estimate_rmax else "detached",
         "initial_r_max": inverse_rmax.initial_r_max.detach().cpu().tolist() if inverse_rmax is not None else None,
         "initial_log_r_max": inverse_rmax.initial_log_r_max.detach().cpu().tolist() if inverse_rmax is not None else None,
+        "estimate_effort": args.estimate_effort,
+        "effort_lr": args.effort_lr,
+        "effort_init": args.effort_init,
+        "effort_time_grid": effort_time.detach().cpu().tolist() if effort_time is not None else None,
+        "reference_effort": reference_effort.detach().cpu().tolist() if reference_effort is not None else None,
+        "estimated_effort_csv": None,
         "data_csv": args.data_csv,
         "lambda_data": args.lambda_data,
         "data_default_cv": args.data_default_cv,
@@ -896,6 +977,9 @@ def main() -> None:
         ),   
         "loaded_data_cv_state": (
             loaded_checkpoint["data_cv_loaded"] if loaded_checkpoint is not None else False
+        ),
+        "loaded_effort_state": (
+            loaded_checkpoint["effort_loaded"] if loaded_checkpoint is not None else False
         ),
         "note": (
             "Multi-species composite PINN loss with all-species PDE, IC, and recruitment boundary terms. "
@@ -997,6 +1081,7 @@ def main() -> None:
                 data_time_quadrature_points=args.data_time_quadrature_points,
                 inverse_rmax=inverse_rmax,
                 inverse_data_cv=inverse_data_cv,
+                inverse_effort=inverse_effort,
                 data_discrepancy_gate=args.data_discrepancy_gate,
                 boundary_target_gradient_mode="rmax-only" if args.estimate_rmax else "detached",
             )
@@ -1116,6 +1201,8 @@ def main() -> None:
                     config=config,
                     inverse_rmax=inverse_rmax,
                     inverse_data_cv=inverse_data_cv,
+                    inverse_effort=inverse_effort,
+                    effort_time=effort_time,
                 )
 
         timing["actual_total_seconds"] = time.perf_counter() - start_time
@@ -1134,6 +1221,7 @@ def main() -> None:
         estimated_rmax_path = save_estimated_rmax(inverse_rmax, params, run_dir)
         config["estimated_rmax_csv"] = estimated_rmax_path
         config["estimated_data_cv_csv"] = save_estimated_data_cv(inverse_data_cv, params, run_dir)
+        config["estimated_effort_csv"] = save_estimated_effort(inverse_effort, effort_time, reference_effort, run_dir)
         save_json(config, run_dir / "config.json")
 
         torch.save(
@@ -1144,6 +1232,7 @@ def main() -> None:
                 "config": config,
                 **({"inverse_parameter_state_dict": inverse_rmax.state_dict(), "inverse_parameter_config": inverse_rmax.config(), "initial_r_max": inverse_rmax.initial_r_max.detach().cpu(), "initial_log_r_max": inverse_rmax.initial_log_r_max.detach().cpu(), "current_r_max": inverse_rmax.current_r_max().detach().cpu(), "current_log_r_max": inverse_rmax.current_log_r_max().detach().cpu()} if inverse_rmax is not None else {}),
                 **({"data_cv_state_dict": inverse_data_cv.state_dict(), "data_cv_config": inverse_data_cv.config(), "initial_data_cv": inverse_data_cv.initial_cv.detach().cpu(), "current_data_cv": inverse_data_cv.current_cv().detach().cpu(), "current_data_sd_log": inverse_data_cv.current_sd_log().detach().cpu()} if inverse_data_cv is not None else {}),
+                **({"inverse_effort_state_dict": inverse_effort.state_dict(), "inverse_effort_config": inverse_effort.config(), "fishing_effort_time": effort_time.detach().cpu(), "initial_inverse_effort": inverse_effort.initial_effort.detach().cpu(), "current_estimated_effort": inverse_effort.current_effort().detach().cpu()} if inverse_effort is not None else {}),
             },
             run_dir / "model_final.pt",
         )

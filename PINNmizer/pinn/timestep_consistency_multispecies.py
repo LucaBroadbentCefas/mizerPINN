@@ -5,6 +5,7 @@ import torch
 from PINNmizer.mizer_grid_ops import step
 from PINNmizer.params import MizerTorchParams, _params_dtype_device, scale_t, scale_x, active_grid_mask
 from PINNmizer.pinn.model_eval import evaluate_log_model_on_points
+from PINNmizer.biology.fishing import evaluate_effort_at_time
 
 
 def _masked_mean(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -83,6 +84,9 @@ def compute_timestep_consistency_loss_multispecies(
             n=n0_i,
             params=params,
             dt=dt_tensor,
+            effort=(evaluate_effort_at_time(t0[i], params)
+                    if params.fishing_effort is not None and params.fishing_effort_time is not None
+                    else None),
         )
         stepped.append(n1_step_i)
         n_pp_step_list.append(n_pp_new_i)

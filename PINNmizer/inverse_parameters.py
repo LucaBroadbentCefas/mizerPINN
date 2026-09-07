@@ -47,6 +47,30 @@ class BoundedLogRMax(nn.Module):
         return {"type": self.__class__.__name__, "lower": self.lower, "upper": self.upper, "eps": self.eps}
 
 
+class LogFishingEffort(nn.Module):
+    """Unbounded log-parameterisation of a time-by-gear effort matrix."""
+
+    def __init__(self, initial_effort: torch.Tensor):
+        super().__init__()
+        if initial_effort.ndim != 2 or min(initial_effort.shape) < 1:
+            raise ValueError(
+                "initial_effort must have non-empty shape [n_effort_times, n_gears], "
+                f"got {tuple(initial_effort.shape)}."
+            )
+        if not torch.isfinite(initial_effort).all() or not (initial_effort > 0).all():
+            raise ValueError("initial_effort must be finite and strictly positive.")
+        initial_log = torch.log(initial_effort)
+        self.log_effort = nn.Parameter(initial_log.clone())
+        self.register_buffer("initial_effort", initial_effort.detach().clone())
+        self.register_buffer("initial_log_effort", initial_log.detach().clone())
+
+    def current_effort(self) -> torch.Tensor:
+        return torch.exp(self.log_effort)
+
+    def config(self) -> dict:
+        return {"type": self.__class__.__name__, "shape": list(self.log_effort.shape)}
+
+
 class BoundedDataCV(nn.Module):
     """Bounded global or per-species observation CV in log-CV space."""
 
