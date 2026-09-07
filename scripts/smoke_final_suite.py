@@ -87,12 +87,23 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--data-dir",
-        default="runs/generated_observations/final_suite",
+        default="final_runs/observations/final_runs",
         help="Directory containing perfect.csv and deterministic data variants.",
     )
     p.add_argument(
-        "--output-dir",
-        default="runs/smoke_final_suite",
+        "--final-input-root",
+        default="final_runs/final_suite_inputs",
+        help="Parent directory used by the final suite for task-specific input copies.",
+    )
+    p.add_argument(
+        "--noise-output-root",
+        default="final_runs/generated_observations/final_suite_noise",
+        help="Parent directory used by the final suite for generated noisy observations.",
+    )
+    p.add_argument(
+        "--manifest-root",
+        default="final_runs/final_suite_manifest",
+        help="Parent directory used by the final suite for task manifests.",
     )
     p.add_argument("--steps", type=int, default=3)
     p.add_argument("--n-time", type=int, default=4)
@@ -390,10 +401,16 @@ def main() -> int:
     single_base = abs_path(root, args.single_base_dir)
     ms_base = abs_path(root, args.ms_base_dir)
     data_dir = abs_path(root, args.data_dir)
-    output_dir = abs_path(root, args.output_dir)
+    final_input_root = abs_path(root, args.final_input_root)
+    noise_output_root = abs_path(root, args.noise_output_root)
+    manifest_root = abs_path(root, args.manifest_root)
+
+    # Exercise the same parent layout as the production final suite, but isolate
+    # smoke-test products so they cannot collide with real array jobs.
+    output_dir = manifest_root / "smoke_local"
     log_dir = output_dir / "logs"
-    generated_noise = output_dir / "generated_noise"
-    rmax_root = output_dir / "rmax_inputs"
+    generated_noise = noise_output_root / "smoke_local"
+    rmax_root = final_input_root / "smoke_local"
 
     output_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)

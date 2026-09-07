@@ -18,8 +18,27 @@ export_mizer_inputs_for_python <- function(params,
     )
   }
   write_mat <- function(x, name) {
+
+    d <- dim(x)
+
+    if (length(d) != 2L) {
+      stop(sprintf(
+        "%s must be a 2D matrix, got dimensions: %s",
+        name,
+        paste(d, collapse = " x ")
+      ))
+    }
+
+    # Strip mizer S3 classes while preserving matrix orientation
+    x_plain <- matrix(
+      as.numeric(x),
+      nrow = d[1],
+      ncol = d[2],
+      dimnames = dimnames(x)
+    )
+
     write.csv(
-      as.data.frame(as.matrix(x)),
+      x_plain,
       file.path(outdir, paste0(name, ".csv")),
       row.names = FALSE
     )

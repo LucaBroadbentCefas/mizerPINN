@@ -11,5 +11,9 @@ __pycache__/
 /py_pred*/
 /validation/outputs/
 /ABLATION_RUNS*/
-ABLATION_RUNS/ 
-ABLATION_RUNS/ 
+ABLATION_RUNS/
+ABLATION_RUNS/
+.RData
+.RDataTmp
+.Rhistory
+.Ruserdata
