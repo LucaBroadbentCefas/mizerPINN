@@ -75,6 +75,22 @@ def data_cv_grad_norm(inverse_data_cv) -> float:
         raise FloatingPointError("Non-finite observation CV gradient.")
     return float(torch.linalg.vector_norm(grad.detach()).cpu())
 
+
+def inverse_effort_grad_stats(inverse_effort, *, require_nonzero: bool = False) -> dict:
+    keys = ["effort_raw_grad_norm", "effort_raw_grad_min", "effort_raw_grad_max", "effort_grad_finite"]
+    if inverse_effort is None:
+        return {key: math.nan for key in keys}
+    grad = inverse_effort.log_effort.grad
+    if grad is None:
+        raise RuntimeError("Missing log-effort gradient; inverse fishing graph is disconnected.")
+    if not torch.isfinite(grad).all():
+        raise FloatingPointError("Non-finite inverse fishing-effort gradient.")
+    norm = float(torch.linalg.vector_norm(grad.detach()).cpu())
+    if require_nonzero and norm == 0.0:
+        raise RuntimeError("Zero effort gradient on first active inverse-effort step.")
+    return {"effort_raw_grad_norm": norm, "effort_raw_grad_min": scalar_min(grad),
+            "effort_raw_grad_max": scalar_max(grad), "effort_grad_finite": 1.0}
+
 def train_one_step_multispecies(
     *,
     model: nn.Module,
@@ -144,6 +160,7 @@ def train_one_step_multispecies(
     data_time_quadrature_points: int = 1,
     inverse_rmax=None,
     inverse_data_cv=None,
+    inverse_effort=None,
     data_discrepancy_gate: bool = False,
     boundary_target_gradient_mode: str = "detached",
 ) -> dict:
@@ -157,6 +174,10 @@ def train_one_step_multispecies(
     expert_weight_max = weight_max if expert_weight_max is None else expert_weight_max
 
     optimizer.zero_grad(set_to_none=True)
+    if inverse_effort is not None:
+        current_effort = inverse_effort.current_effort()
+        params.fishing_effort = current_effort
+        params.initial_effort = current_effort[0]
     if inverse_rmax is not None:
         params.r_max = inverse_rmax.current_r_max()
 
@@ -543,10 +564,14 @@ def train_one_step_multispecies(
     grad_norm = total_grad_norm_and_check(model)
     rmax_grad_stats = inverse_rmax_grad_stats(inverse_rmax, require_nonzero=(inverse_rmax is not None and lambda_bc != 0.0 and step == 1))
     cv_grad_norm = data_cv_grad_norm(inverse_data_cv)
+    effort_grad_stats = inverse_effort_grad_stats(inverse_effort, require_nonzero=(inverse_effort is not None and step == 1))
 
     optimizer.step()
     if inverse_rmax is not None:
         params.r_max = inverse_rmax.current_r_max()
+    if inverse_effort is not None:
+        params.fishing_effort = inverse_effort.current_effort()
+        params.initial_effort = params.fishing_effort[0]
 
     if lr_scheduler is not None:
         if lr_scheduler_name == "plateau":
@@ -557,6 +582,7 @@ def train_one_step_multispecies(
     lr = float(optimizer.param_groups[0]["lr"])
     rmax_lr = next((float(g["lr"]) for g in optimizer.param_groups if g.get("name") == "rmax"), math.nan)
     data_cv_lr = next((float(g["lr"]) for g in optimizer.param_groups if g.get("name") == "data_cv"), math.nan)
+    effort_lr = next((float(g["lr"]) for g in optimizer.param_groups if g.get("name") == "effort"), math.nan)
 
     r3_diag = {
         "r3_population_size": math.nan,
@@ -621,7 +647,9 @@ def train_one_step_multispecies(
         "lr": lr,
         "rmax_lr": rmax_lr,
         "data_cv_lr": data_cv_lr,
+        "effort_lr": effort_lr,
         "data_cv_grad_norm": cv_grad_norm,
+        **effort_grad_stats,
         "loss_pde": float(out["loss_pde"].detach().cpu()),
         "pde_penalty": pde_penalty,
         "pde_pseudo_huber_delta": float(pde_pseudo_huber_delta),
@@ -784,4 +812,15 @@ def train_one_step_multispecies(
                      "data_sd_log_min": scalar_min(sd), "data_sd_log_mean": scalar_mean(sd), "data_sd_log_max": scalar_max(sd)})
     else:
         base.update({k: math.nan for k in ["data_cv_min", "data_cv_mean", "data_cv_max", "data_sd_log_min", "data_sd_log_mean", "data_sd_log_max"]})
+    if inverse_effort is not None:
+        with torch.no_grad():
+            effort = inverse_effort.current_effort()
+            gear_grad = torch.linalg.vector_norm(inverse_effort.log_effort.grad, dim=0)
+            gear_mean = effort.mean(dim=0)
+        base.update({"effort_min": scalar_min(effort), "effort_max": scalar_max(effort), "effort_mean": scalar_mean(effort)})
+        for gear in range(effort.shape[1]):
+            base[f"effort_gear_{gear}_mean"] = float(gear_mean[gear].cpu())
+            base[f"effort_gear_{gear}_grad_norm"] = float(gear_grad[gear].cpu())
+    else:
+        base.update({"effort_min": math.nan, "effort_max": math.nan, "effort_mean": math.nan})
     return base

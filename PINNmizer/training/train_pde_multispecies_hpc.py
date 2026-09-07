@@ -182,6 +182,7 @@ def save_hpc_final_summary(*, status: str, error_message: str | None = None) -> 
         "final_rmax_mean": _metric(history_row, "rmax_mean"),
         "final_rmax_ratio_mean": _metric(history_row, "rmax_ratio_mean"),
         "estimated_rmax_csv": str(_RUN_DIR / "estimated_rmax.csv") if (_RUN_DIR / "estimated_rmax.csv").exists() else None,
+        "estimated_effort_csv": str(_RUN_DIR / "estimated_effort.csv") if (_RUN_DIR / "estimated_effort.csv").exists() else None,
         "final_checkpoint_path": _LATEST_CHECKPOINT_PATH,
         "final_model_path": str(final_model_path) if final_model_path.exists() else None,
     }

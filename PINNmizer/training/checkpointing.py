@@ -19,6 +19,8 @@ def save_checkpoint(
     subdir: str | None = None,
     inverse_rmax=None,
     inverse_data_cv=None,
+    inverse_effort=None,
+    effort_time=None,
 ) -> Path:
     outdir = run_dir if subdir is None else run_dir / subdir
     outdir.mkdir(parents=True, exist_ok=True)
@@ -44,6 +46,14 @@ def save_checkpoint(
             "initial_data_cv": inverse_data_cv.initial_cv.detach().cpu(),
             "current_data_cv": inverse_data_cv.current_cv().detach().cpu(),
             "current_data_sd_log": inverse_data_cv.current_sd_log().detach().cpu(),
+        })
+    if inverse_effort is not None:
+        checkpoint.update({
+            "inverse_effort_state_dict": inverse_effort.state_dict(),
+            "inverse_effort_config": inverse_effort.config(),
+            "fishing_effort_time": effort_time.detach().cpu(),
+            "initial_inverse_effort": inverse_effort.initial_effort.detach().cpu(),
+            "current_estimated_effort": inverse_effort.current_effort().detach().cpu(),
         })
     if scheduler is not None:
         checkpoint["scheduler_state_dict"] = scheduler.state_dict()
