@@ -6,6 +6,7 @@ from PINNmizer.diagnostics.checkpoint_snapshots import (
     parse_emitted_run_dir,
     snapshot_dir,
 )
+from scripts.materialize_checkpoint_outputs import override_input_dir_args
 
 
 def test_discover_checkpoints_supports_both_layouts(tmp_path: Path):
@@ -40,3 +41,21 @@ def test_snapshot_layout_and_metadata_filter(tmp_path: Path):
 def test_parse_emitted_run_dir_uses_last_match(tmp_path: Path):
     text = "Run directory: runs/old\nnoise\nRun directory: runs/new\n"
     assert parse_emitted_run_dir(text, repo_root=tmp_path) == (tmp_path / "runs" / "new").resolve()
+
+
+def test_override_input_dir_remaps_child_data_csv(tmp_path: Path):
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / "n_init_full.csv").write_text("x\n1\n", encoding="utf-8")
+    original = [
+        "--input-dir", "validation/fixtures/old_bundle",
+        "--data-csv", "validation/fixtures/old_bundle/observations.csv",
+        "--diag-grid-csv", "external/grid.csv",
+        "--n-steps", "10000",
+    ]
+
+    changed = override_input_dir_args(original, replacement)
+
+    assert changed[changed.index("--input-dir") + 1] == str(replacement.resolve())
+    assert changed[changed.index("--data-csv") + 1] == str(replacement.resolve() / "observations.csv")
+    assert changed[changed.index("--diag-grid-csv") + 1] == "external/grid.csv"
