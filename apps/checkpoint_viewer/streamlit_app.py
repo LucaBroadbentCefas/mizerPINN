@@ -20,6 +20,7 @@ from PINNmizer.diagnostics.checkpoint_snapshots import (  # noqa: E402
     discover_checkpoints,
     discover_snapshots,
 )
+from scripts.recover_hpc_outputs import parse_saved_command  # noqa: E402
 
 
 def _load_hpc_viewer():
@@ -34,6 +35,7 @@ def _load_hpc_viewer():
 impl = _load_hpc_viewer()
 DEFAULT_RUN_ROOT = PROJECT_ROOT / "runs"
 DEFAULT_SNAPSHOT_ROOT = PROJECT_ROOT / "checkpoint_views"
+DEFAULT_INPUT_ROOT = PROJECT_ROOT / "validation" / "fixtures"
 
 
 def _run_collections() -> dict[str, Path]:
@@ -57,16 +59,53 @@ def _run_label(run_id: str, run_dir: Path) -> str:
     return run_id
 
 
+def _saved_arg(run_dir: Path, flag: str) -> str | None:
+    try:
+        _, args = parse_saved_command(run_dir)
+    except (FileNotFoundError, ValueError):
+        return None
+    for idx, token in enumerate(args):
+        if token == flag:
+            return args[idx + 1] if idx + 1 < len(args) else None
+        if token.startswith(f"{flag}="):
+            return token.split("=", 1)[1]
+    return None
+
+
+def _saved_input_status(run_dir: Path, input_search_root: Path) -> tuple[str | None, Path | None, bool]:
+    raw = _saved_arg(run_dir, "--input-dir")
+    if raw is None:
+        return None, None, True
+
+    saved = Path(raw).expanduser()
+    resolved = saved if saved.is_absolute() else PROJECT_ROOT / saved
+    if (resolved / "n_init_full.csv").is_file():
+        return raw, resolved.resolve(), True
+
+    search_root = input_search_root.expanduser()
+    if search_root.is_dir():
+        direct = search_root / saved.name
+        if (direct / "n_init_full.csv").is_file():
+            return raw, direct.resolve(), True
+        matches = [
+            p for p in search_root.rglob(saved.name)
+            if p.is_dir() and (p / "n_init_full.csv").is_file()
+        ]
+        if len(matches) == 1:
+            return raw, matches[0].resolve(), True
+
+    return raw, None, False
+
+
 def _final_step(run_dir: Path) -> int | None:
     summary = impl.load_final_summary(run_dir)
     for key in ("n_steps_completed", "n_steps"):
         value = summary.get(key)
-        if value is not None:
-            try:
-                if np.isfinite(float(value)):
-                    return int(float(value))
-            except (TypeError, ValueError):
-                pass
+        try:
+            if value is not None and np.isfinite(float(value)):
+                return int(float(value))
+        except (TypeError, ValueError):
+            pass
     config = impl.load_config(run_dir)
     value = config.get("n_steps")
     try:
@@ -107,6 +146,7 @@ def _materialize_command(
     snapshot_root: Path,
     device: str | None,
     steps: list[int] | None,
+    input_dir_override: Path | None,
     overwrite: bool,
 ) -> list[str]:
     command = [
@@ -121,6 +161,8 @@ def _materialize_command(
         command.extend(["--device", device])
     if steps is not None:
         command.extend(["--steps", *[str(step) for step in steps]])
+    if input_dir_override is not None:
+        command.extend(["--input-dir-override", str(input_dir_override)])
     if overwrite:
         command.append("--overwrite")
     return command
@@ -132,6 +174,7 @@ def _materialize_runs(
     snapshot_root: Path,
     device: str | None,
     per_run_steps: dict[str, list[int] | None],
+    per_run_inputs: dict[str, Path | None],
     overwrite: bool,
 ) -> tuple[bool, list[tuple[str, subprocess.CompletedProcess[str]]]]:
     results: list[tuple[str, subprocess.CompletedProcess[str]]] = []
@@ -140,23 +183,16 @@ def _materialize_runs(
     total = max(1, len(selected))
 
     for idx, (display, run_dir) in enumerate(selected, start=1):
-        progress.progress(
-            (idx - 1) / total,
-            text=f"Preparing {idx}/{total}: {display}",
-        )
+        progress.progress((idx - 1) / total, text=f"Preparing {idx}/{total}: {display}")
         command = _materialize_command(
             run_dir,
             snapshot_root=snapshot_root,
             device=device,
             steps=per_run_steps.get(display),
+            input_dir_override=per_run_inputs.get(display),
             overwrite=overwrite,
         )
-        completed = subprocess.run(
-            command,
-            cwd=PROJECT_ROOT,
-            text=True,
-            capture_output=True,
-        )
+        completed = subprocess.run(command, cwd=PROJECT_ROOT, text=True, capture_output=True)
         results.append((display, completed))
         if completed.returncode != 0:
             ok = False
@@ -178,6 +214,7 @@ def main() -> None:
         else:
             run_root = collections[collection_name]
         snapshot_root = Path(st.text_input("Checkpoint snapshot folder", str(DEFAULT_SNAPSHOT_ROOT))).expanduser()
+        input_search_root = Path(st.text_input("Input bundle search folder", str(DEFAULT_INPUT_ROOT))).expanduser()
         if st.button("Refresh / re-scan"):
             st.cache_data.clear()
             st.rerun()
@@ -217,30 +254,60 @@ def main() -> None:
 
     st.subheader("Prepare checkpoint views")
     st.caption(
-        "Select runs and generate the intermediate plotting outputs directly from the app. "
-        "This loads saved checkpoints and evaluates them with zero optimisation steps."
+        "Select runs and generate intermediate plotting outputs directly from the app. "
+        "Checkpoint weights are evaluated with zero optimisation steps."
     )
 
-    prep_displays = st.multiselect(
-        "Runs to prepare",
-        run_options,
-        default=[selected_display],
-    )
+    prep_displays = st.multiselect("Runs to prepare", run_options, default=[selected_display])
     prep_selected = [(display, run_lookup[display][1]) for display in prep_displays]
 
+    per_run_inputs: dict[str, Path | None] = {}
     prep_rows = []
+    unresolved_inputs: list[str] = []
     for display, run_dir in prep_selected:
         checkpoints = discover_checkpoints(run_dir)
         snapshots = discover_snapshots(run_dir, snapshot_root, project_root=PROJECT_ROOT)
+        saved_input, resolved_input, input_ok = _saved_input_status(run_dir, input_search_root)
+        per_run_inputs[display] = None
+        if saved_input is not None:
+            saved_resolved = Path(saved_input).expanduser()
+            saved_resolved = saved_resolved if saved_resolved.is_absolute() else PROJECT_ROOT / saved_resolved
+            if resolved_input is not None and resolved_input != saved_resolved.resolve():
+                per_run_inputs[display] = resolved_input
+        if not input_ok:
+            unresolved_inputs.append(display)
         prep_rows.append({
             "run": display,
             "saved_checkpoints": len(checkpoints),
             "ready_views": len(snapshots),
             "missing_views": len([step for step in checkpoints if step not in snapshots]),
+            "saved_input": saved_input or "",
+            "input_status": str(resolved_input) if input_ok and resolved_input else "MISSING",
             "steps": ", ".join(f"{step:,}" for step in checkpoints),
         })
     if prep_rows:
         st.dataframe(pd.DataFrame(prep_rows), use_container_width=True, hide_index=True)
+
+    if len(prep_selected) == 1 and unresolved_inputs:
+        display, _ = prep_selected[0]
+        manual = Path(st.text_input(
+            "Replacement input bundle",
+            help="Select/type the exact Mizer export directory used for this run. It must contain n_init_full.csv.",
+        )).expanduser()
+        if str(manual) not in {"", "."} and (manual / "n_init_full.csv").is_file():
+            per_run_inputs[display] = manual.resolve()
+            unresolved_inputs.clear()
+            st.success(f"Using replacement input bundle: {manual.resolve()}")
+        else:
+            saved = _saved_arg(prep_selected[0][1], "--input-dir")
+            st.error(
+                f"The original input bundle `{saved}` is not available. "
+                "Point 'Replacement input bundle' at the exact original Mizer export before generating."
+            )
+    elif unresolved_inputs:
+        st.error(
+            "Some selected runs have missing original input bundles. Prepare those runs one at a time so an exact replacement bundle can be supplied."
+        )
 
     per_run_steps: dict[str, list[int] | None] = {display: None for display in prep_displays}
     step_mode = "All saved checkpoints"
@@ -268,9 +335,9 @@ def main() -> None:
     device = {"CPU": "cpu", "Original run device": None, "CUDA": "cuda"}[device_label]
     overwrite = c2.checkbox("Regenerate existing checkpoint views", False)
 
-    can_generate = bool(prep_selected)
+    can_generate = bool(prep_selected) and not unresolved_inputs
     if len(prep_selected) == 1 and step_mode == "Choose checkpoint steps":
-        can_generate = bool(per_run_steps[prep_selected[0][0]])
+        can_generate = can_generate and bool(per_run_steps[prep_selected[0][0]])
 
     if st.button("Generate checkpoint views", type="primary", disabled=not can_generate):
         ok, results = _materialize_runs(
@@ -278,6 +345,7 @@ def main() -> None:
             snapshot_root=snapshot_root.resolve(),
             device=device,
             per_run_steps=per_run_steps,
+            per_run_inputs=per_run_inputs,
             overwrite=overwrite,
         )
         if ok:
@@ -297,29 +365,17 @@ def main() -> None:
     st.divider()
 
     raw_checkpoints = discover_checkpoints(source_run)
-    snapshots = discover_snapshots(
-        source_run,
-        snapshot_root,
-        project_root=PROJECT_ROOT,
-    )
-
-    available: dict[str, Path] = {
-        f"step {step:,}": path for step, path in snapshots.items()
-    }
+    snapshots = discover_snapshots(source_run, snapshot_root, project_root=PROJECT_ROOT)
+    available: dict[str, Path] = {f"step {step:,}": path for step, path in snapshots.items()}
     final_step = _final_step(source_run)
     if impl.load_fixed_fields(source_run, species_idx=0) is not None:
         final_label = f"final ({final_step:,})" if final_step is not None else "final"
         available[final_label] = source_run
 
     status = pd.DataFrame([
-        {
-            "step": step,
-            "checkpoint": str(path),
-            "view_ready": step in snapshots,
-        }
+        {"step": step, "checkpoint": str(path), "view_ready": step in snapshots}
         for step, path in raw_checkpoints.items()
     ])
-
     st.subheader("Checkpoint availability")
     if status.empty:
         st.info("This run has no saved model_step checkpoints. Only the final state can be viewed if final HPC outputs exist.")
@@ -336,11 +392,15 @@ def main() -> None:
         st.session_state[state_key] = labels[-1]
 
     with st.sidebar:
-        selected_label = st.select_slider(
-            "Checkpoint / stopping step",
-            options=labels,
-            key=state_key,
-        )
+        if len(labels) == 1:
+            selected_label = labels[0]
+            st.caption(f"Checkpoint / stopping step: {selected_label}")
+        else:
+            selected_label = st.select_slider(
+                "Checkpoint / stopping step",
+                options=labels,
+                key=state_key,
+            )
         compare_labels = st.multiselect(
             "Checkpoints to compare",
             labels,
