@@ -158,7 +158,7 @@ export_mizer_inputs_for_python <- function(params,
   write_mat(Im(params@ft_pred_kernel_e), "ft_pred_kernel_e_imag")
   write_mat(Re(params@ft_pred_kernel_p), "ft_pred_kernel_p_real")
   write_mat(Im(params@ft_pred_kernel_p), "ft_pred_kernel_p_imag")
-  write_mat(as.numeric(params@ft_mask), "ft_mask")
+  write_mat(params@ft_mask, "ft_mask")
 
   # safer version for ft_mask shape
   write_mat(matrix(as.numeric(params@ft_mask),

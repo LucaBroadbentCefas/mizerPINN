@@ -17,3 +17,6 @@ ABLATION_RUNS/
 .RDataTmp
 .Rhistory
 .Ruserdata
+/final_runs/final_suite_inputs/
+/final_runs/final_suite_manifest/
+/final_runs/generated_observations/

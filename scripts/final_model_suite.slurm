@@ -304,7 +304,7 @@ run_single_species() {
         --causal-loss expert
         --causal-curriculum linear
         --causal-start-fraction 0.05
-        --causal-ramp-steps 20000
+        --causal-ramp-steps 10000
         --causal-step-fractions "0.05,0.10,0.20,0.40,0.70,1.0"
         --causal-n-chunks 64
         --causal-epsilon 1.0
