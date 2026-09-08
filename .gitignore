@@ -5,6 +5,7 @@
 __pycache__/
 *.py[cod]
 /runs
+/checkpoint_views/
 /py_growth_derivative*/
 /py_known*/
 /py_mizer*/
