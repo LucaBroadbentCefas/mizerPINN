@@ -1,8 +1,8 @@
-"""Read-only Streamlit browser for PINNmizer checkpoint snapshots."""
+"""Streamlit browser and materializer for PINNmizer checkpoint snapshots."""
 from __future__ import annotations
 
 import importlib.util
-import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -34,6 +34,15 @@ def _load_hpc_viewer():
 impl = _load_hpc_viewer()
 DEFAULT_RUN_ROOT = PROJECT_ROOT / "runs"
 DEFAULT_SNAPSHOT_ROOT = PROJECT_ROOT / "checkpoint_views"
+
+
+def _run_collections() -> dict[str, Path]:
+    roots = {"All runs": DEFAULT_RUN_ROOT}
+    if DEFAULT_RUN_ROOT.is_dir():
+        for path in sorted(p for p in DEFAULT_RUN_ROOT.iterdir() if p.is_dir()):
+            roots[str(path.relative_to(PROJECT_ROOT))] = path
+    roots["Custom path"] = Path("")
+    return roots
 
 
 def _run_label(run_id: str, run_dir: Path) -> str:
@@ -92,15 +101,86 @@ def _default_comparison(labels: list[str]) -> list[str]:
     return [labels[0], labels[len(labels) // 2], labels[-1]]
 
 
+def _materialize_command(
+    run_dir: Path,
+    *,
+    snapshot_root: Path,
+    device: str | None,
+    steps: list[int] | None,
+    overwrite: bool,
+) -> list[str]:
+    command = [
+        sys.executable,
+        "-m",
+        "scripts.materialize_checkpoint_outputs",
+        str(run_dir),
+        "--snapshot-root",
+        str(snapshot_root),
+    ]
+    if device is not None:
+        command.extend(["--device", device])
+    if steps is not None:
+        command.extend(["--steps", *[str(step) for step in steps]])
+    if overwrite:
+        command.append("--overwrite")
+    return command
+
+
+def _materialize_runs(
+    selected: list[tuple[str, Path]],
+    *,
+    snapshot_root: Path,
+    device: str | None,
+    per_run_steps: dict[str, list[int] | None],
+    overwrite: bool,
+) -> tuple[bool, list[tuple[str, subprocess.CompletedProcess[str]]]]:
+    results: list[tuple[str, subprocess.CompletedProcess[str]]] = []
+    ok = True
+    progress = st.progress(0.0, text="Preparing checkpoint views...")
+    total = max(1, len(selected))
+
+    for idx, (display, run_dir) in enumerate(selected, start=1):
+        progress.progress(
+            (idx - 1) / total,
+            text=f"Preparing {idx}/{total}: {display}",
+        )
+        command = _materialize_command(
+            run_dir,
+            snapshot_root=snapshot_root,
+            device=device,
+            steps=per_run_steps.get(display),
+            overwrite=overwrite,
+        )
+        completed = subprocess.run(
+            command,
+            cwd=PROJECT_ROOT,
+            text=True,
+            capture_output=True,
+        )
+        results.append((display, completed))
+        if completed.returncode != 0:
+            ok = False
+            break
+
+    progress.progress(1.0, text="Checkpoint preparation finished." if ok else "Checkpoint preparation failed.")
+    return ok, results
+
+
 def main() -> None:
     st.set_page_config(page_title="PINNmizer checkpoint viewer", layout="wide")
     st.title("PINNmizer checkpoint viewer")
 
+    collections = _run_collections()
     with st.sidebar:
-        run_root = Path(st.text_input("Source run root", str(DEFAULT_RUN_ROOT))).expanduser()
-        snapshot_root = Path(st.text_input("Checkpoint snapshot root", str(DEFAULT_SNAPSHOT_ROOT))).expanduser()
+        collection_name = st.selectbox("Run folder", list(collections))
+        if collection_name == "Custom path":
+            run_root = Path(st.text_input("Custom run folder", str(DEFAULT_RUN_ROOT))).expanduser()
+        else:
+            run_root = collections[collection_name]
+        snapshot_root = Path(st.text_input("Checkpoint snapshot folder", str(DEFAULT_SNAPSHOT_ROOT))).expanduser()
         if st.button("Refresh / re-scan"):
             st.cache_data.clear()
+            st.rerun()
         log_y = st.checkbox("Log y-axis where relevant", True)
         markers = st.checkbox("Show points", True)
         clip = st.checkbox("Quantile clipping for heatmaps", True)
@@ -111,6 +191,9 @@ def main() -> None:
         )
         mizer_paths = st.text_area("Mizer CSV local paths (one per line)")
         uploads = st.file_uploader("Upload mizer CSVs", type="csv", accept_multiple_files=True)
+
+    if message := st.session_state.pop("checkpoint_materialize_message", None):
+        st.success(message)
 
     run_df = impl.scan_runs(run_root)
     if run_df.empty:
@@ -129,8 +212,89 @@ def main() -> None:
         run_lookup[display] = (run_id, run_dir)
 
     with st.sidebar:
-        selected_display = st.selectbox("Source run", run_options)
+        selected_display = st.selectbox("Run to view", run_options)
     source_run_id, source_run = run_lookup[selected_display]
+
+    st.subheader("Prepare checkpoint views")
+    st.caption(
+        "Select runs and generate the intermediate plotting outputs directly from the app. "
+        "This loads saved checkpoints and evaluates them with zero optimisation steps."
+    )
+
+    prep_displays = st.multiselect(
+        "Runs to prepare",
+        run_options,
+        default=[selected_display],
+    )
+    prep_selected = [(display, run_lookup[display][1]) for display in prep_displays]
+
+    prep_rows = []
+    for display, run_dir in prep_selected:
+        checkpoints = discover_checkpoints(run_dir)
+        snapshots = discover_snapshots(run_dir, snapshot_root, project_root=PROJECT_ROOT)
+        prep_rows.append({
+            "run": display,
+            "saved_checkpoints": len(checkpoints),
+            "ready_views": len(snapshots),
+            "missing_views": len([step for step in checkpoints if step not in snapshots]),
+            "steps": ", ".join(f"{step:,}" for step in checkpoints),
+        })
+    if prep_rows:
+        st.dataframe(pd.DataFrame(prep_rows), use_container_width=True, hide_index=True)
+
+    per_run_steps: dict[str, list[int] | None] = {display: None for display in prep_displays}
+    step_mode = "All saved checkpoints"
+    if len(prep_selected) == 1:
+        display, run_dir = prep_selected[0]
+        saved = discover_checkpoints(run_dir)
+        existing = discover_snapshots(run_dir, snapshot_root, project_root=PROJECT_ROOT)
+        step_mode = st.radio(
+            "Checkpoint selection",
+            ["All saved checkpoints", "Choose checkpoint steps"],
+            horizontal=True,
+        )
+        if step_mode == "Choose checkpoint steps":
+            step_options = list(saved)
+            default_steps = [step for step in step_options if step not in existing] or step_options
+            per_run_steps[display] = st.multiselect(
+                "Checkpoint steps",
+                step_options,
+                default=default_steps,
+                format_func=lambda x: f"{x:,}",
+            )
+
+    c1, c2 = st.columns(2)
+    device_label = c1.selectbox("Evaluation device", ["CPU", "Original run device", "CUDA"])
+    device = {"CPU": "cpu", "Original run device": None, "CUDA": "cuda"}[device_label]
+    overwrite = c2.checkbox("Regenerate existing checkpoint views", False)
+
+    can_generate = bool(prep_selected)
+    if len(prep_selected) == 1 and step_mode == "Choose checkpoint steps":
+        can_generate = bool(per_run_steps[prep_selected[0][0]])
+
+    if st.button("Generate checkpoint views", type="primary", disabled=not can_generate):
+        ok, results = _materialize_runs(
+            prep_selected,
+            snapshot_root=snapshot_root.resolve(),
+            device=device,
+            per_run_steps=per_run_steps,
+            overwrite=overwrite,
+        )
+        if ok:
+            st.cache_data.clear()
+            total = len(results)
+            st.session_state["checkpoint_materialize_message"] = (
+                f"Checkpoint views prepared for {total} run{'s' if total != 1 else ''}."
+            )
+            st.rerun()
+        else:
+            display, completed = results[-1]
+            st.error(f"Checkpoint preparation failed for {display}.")
+            output = "\n".join(x for x in [completed.stdout, completed.stderr] if x).strip()
+            if output:
+                st.code(output)
+
+    st.divider()
 
     raw_checkpoints = discover_checkpoints(source_run)
     snapshots = discover_snapshots(
@@ -151,8 +315,7 @@ def main() -> None:
         {
             "step": step,
             "checkpoint": str(path),
-            "snapshot_ready": step in snapshots,
-            "snapshot": str(snapshots[step]) if step in snapshots else "",
+            "view_ready": step in snapshots,
         }
         for step, path in raw_checkpoints.items()
     ])
@@ -163,26 +326,8 @@ def main() -> None:
     else:
         st.dataframe(status, use_container_width=True, hide_index=True)
 
-    missing_steps = [step for step in raw_checkpoints if step not in snapshots]
-    if missing_steps:
-        command = [
-            sys.executable,
-            "-m",
-            "scripts.materialize_checkpoint_outputs",
-            str(source_run),
-            "--steps",
-            *[str(step) for step in missing_steps],
-            "--device",
-            "cpu",
-        ]
-        st.info(
-            "These checkpoints need one zero-step evaluation before the viewer can plot them. "
-            "Run this outside Streamlit; it does not retrain the model."
-        )
-        st.code(shlex.join(command), language="bash")
-
     if not available:
-        st.warning("No materialized checkpoint snapshots or final fixed-grid outputs are available for this run.")
+        st.warning("No checkpoint views or final fixed-grid outputs are available for this run. Generate them above.")
         return
 
     labels = list(available)
