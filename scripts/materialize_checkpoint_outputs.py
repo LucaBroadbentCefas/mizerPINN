@@ -27,6 +27,71 @@ from scripts.recover_hpc_outputs import parse_saved_command, recovery_args
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SNAPSHOT_ROOT = PROJECT_ROOT / "checkpoint_views"
+_INPUT_RELATED_PATH_FLAGS = ("--data-csv", "--diag-grid-csv")
+
+
+def _arg_value(args: list[str], flag: str) -> str | None:
+    for idx, token in enumerate(args):
+        if token == flag:
+            return args[idx + 1] if idx + 1 < len(args) else None
+        if token.startswith(f"{flag}="):
+            return token.split("=", 1)[1]
+    return None
+
+
+def _replace_value_arg(args: list[str], flag: str, value: str) -> list[str]:
+    out: list[str] = []
+    found = False
+    idx = 0
+    while idx < len(args):
+        token = args[idx]
+        if token == flag:
+            out.extend([flag, value])
+            found = True
+            idx += 2
+            continue
+        if token.startswith(f"{flag}="):
+            out.extend([flag, value])
+            found = True
+            idx += 1
+            continue
+        out.append(token)
+        idx += 1
+    if not found:
+        out.extend([flag, value])
+    return out
+
+
+def override_input_dir_args(original: list[str], input_dir: Path) -> list[str]:
+    """Replace the replay input bundle and remap child CSV paths safely.
+
+    Only path arguments that were lexically inside the original ``--input-dir``
+    are remapped. Unrelated external paths are left unchanged.
+    """
+    input_dir = input_dir.expanduser().resolve()
+    if not (input_dir / "n_init_full.csv").is_file():
+        raise FileNotFoundError(
+            f"Replacement input bundle is not a valid Mizer export: {input_dir}. "
+            "Expected n_init_full.csv."
+        )
+
+    old_input_raw = _arg_value(original, "--input-dir")
+    out = _replace_value_arg(original, "--input-dir", str(input_dir))
+    if old_input_raw is None:
+        return out
+
+    old_input = Path(old_input_raw)
+    for flag in _INPUT_RELATED_PATH_FLAGS:
+        raw = _arg_value(original, flag)
+        if raw is None:
+            continue
+        try:
+            relative = Path(raw).relative_to(old_input)
+        except ValueError:
+            continue
+        mapped = input_dir / relative
+        out = _replace_value_arg(out, flag, str(mapped))
+    return out
 
 
 def _truncate_histories(source_run: Path, snapshot: Path, step: int) -> None:
@@ -58,6 +123,7 @@ def _patch_snapshot_metadata(
     checkpoint: Path,
     checkpoint_step: int,
     command: list[str],
+    input_dir_override: Path | None,
 ) -> None:
     generated_config_path = snapshot / "config.json"
     config = {}
@@ -79,6 +145,7 @@ def _patch_snapshot_metadata(
         "snapshot_source_run_dir": str(source_run),
         "snapshot_source_n_steps": source_config.get("n_steps"),
         "snapshot_evaluation_n_steps": 0,
+        "snapshot_input_dir_override": str(input_dir_override) if input_dir_override else None,
         "n_steps": checkpoint_step,
     })
     generated_config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
@@ -100,6 +167,7 @@ def _patch_snapshot_metadata(
         "n_steps_completed": checkpoint_step,
         "snapshot_checkpoint_step": checkpoint_step,
         "snapshot_source_run_dir": str(source_run),
+        "snapshot_input_dir_override": str(input_dir_override) if input_dir_override else None,
         "final_checkpoint_path": str(checkpoint),
         "final_model_path": None,
     })
@@ -116,6 +184,7 @@ def _patch_snapshot_metadata(
         "checkpoint_path": str(checkpoint),
         "checkpoint_step": checkpoint_step,
         "evaluation_n_steps": 0,
+        "input_dir_override": str(input_dir_override) if input_dir_override else None,
         "replay_command": shlex.join(command),
     }
     (snapshot / "checkpoint_snapshot.json").write_text(
@@ -138,6 +207,7 @@ def _materialize_one(
     step: int,
     snapshot_root: Path,
     device: str | None,
+    input_dir_override: Path | None,
     overwrite: bool,
     dry_run: bool,
 ) -> Path:
@@ -152,6 +222,10 @@ def _materialize_one(
         return destination
 
     module, original = parse_saved_command(source_run)
+    resolved_override = input_dir_override.expanduser().resolve() if input_dir_override else None
+    if resolved_override is not None:
+        original = override_input_dir_args(original, resolved_override)
+
     command = [
         sys.executable,
         "-m",
@@ -159,6 +233,8 @@ def _materialize_one(
         *recovery_args(original, checkpoint, device),
     ]
     print(f"Checkpoint {step}: {checkpoint}")
+    if resolved_override is not None:
+        print(f"Input bundle override: {resolved_override}")
     print(f"Replay: {shlex.join(command)}")
     print(f"Snapshot: {destination}")
     if dry_run:
@@ -198,6 +274,7 @@ def _materialize_one(
         checkpoint=checkpoint.resolve(),
         checkpoint_step=step,
         command=command,
+        input_dir_override=resolved_override,
     )
     return destination
 
@@ -216,6 +293,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--device", default=None, help="Optional evaluation device override, e.g. cpu")
     parser.add_argument("--snapshot-root", type=Path, default=DEFAULT_SNAPSHOT_ROOT)
+    parser.add_argument(
+        "--input-dir-override",
+        type=Path,
+        default=None,
+        help=(
+            "Exact replacement Mizer input bundle for a legacy run whose saved --input-dir no longer exists. "
+            "Child --data-csv/--diag-grid-csv paths are remapped when they lived inside the original input bundle."
+        ),
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -224,6 +310,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     requested = set(args.steps) if args.steps is not None else None
+    if args.input_dir_override is not None and len(args.run_dirs) != 1:
+        raise ValueError("--input-dir-override can only be used with one run directory at a time.")
 
     for raw_run in args.run_dirs:
         source_run = raw_run.expanduser().resolve()
@@ -250,6 +338,7 @@ def main() -> None:
                 step=step,
                 snapshot_root=args.snapshot_root.expanduser().resolve(),
                 device=args.device,
+                input_dir_override=args.input_dir_override,
                 overwrite=args.overwrite,
                 dry_run=args.dry_run,
             )
