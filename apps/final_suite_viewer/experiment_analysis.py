@@ -55,7 +55,8 @@ def paired_cv_differences(values: pd.DataFrame, metric: str = "value") -> tuple[
 
 
 def gap_mask(data: pd.DataFrame, start: float, end: float) -> pd.Series:
-    return data.time.between(start, end, inclusive="both")
+    """Mask the actual withheld interval [start, end); observations resume at end."""
+    return data.time.between(start, end, inclusive="left")
 
 
 def missing_species_mask(data: pd.DataFrame, species_idx: int) -> pd.Series:

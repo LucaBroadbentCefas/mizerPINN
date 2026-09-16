@@ -93,26 +93,30 @@ def _restore_single_species_identity(state: pd.DataFrame, run_dir: str) -> pd.Da
     return out
 
 
-@st.cache_data(show_spinner=False)
-def load_w_max(run_dir: str) -> dict[int, float]:
+def _input_candidates(run_dir: str, filename: str) -> list[Path]:
     run = Path(run_dir)
     config = read_json(run_dir)
-    candidates = [run / "w_max.csv"]
-    if config.get("input_dir"):
-        raw = Path(str(config["input_dir"]))
-        candidates.extend([raw / "w_max.csv", run / raw / "w_max.csv", run.parent / raw / "w_max.csv"])
-    for path in candidates:
+    candidates = [run / filename]
+    configured = config.get("input_dir")
+    if configured:
+        raw = Path(str(configured))
+        candidates.extend([raw / filename, run / raw / filename, run.parent / raw / filename])
+        project_root = Path(__file__).resolve().parents[2]
+        candidates.append(project_root / raw / filename)
+    return candidates
+
+
+@st.cache_data(show_spinner=False)
+def load_w_max(run_dir: str) -> dict[int, float]:
+    """Load species active-size limits only from explicit biological inputs."""
+    for path in _input_candidates(run_dir, "w_max.csv"):
         if path.is_file():
             values = pd.read_csv(path).apply(pd.to_numeric, errors="coerce").to_numpy().reshape(-1)
-            values = values[np.isfinite(values) & (values > 0)]
-            if values.size:
-                if values.size == 1:
-                    state = load_prediction_state(run_dir)
-                    if state is not None and state.species_idx.nunique() == 1:
-                        return {int(state.species_idx.iloc[0]): float(values[0])}
-                return {i: float(value) for i, value in enumerate(values)}
-    # Positive saved state support is a safe fallback; it cannot add masked bins.
-    state = load_prediction_state(run_dir)
-    if state is None:
-        return {}
-    return {int(i): float(group.w.max()) for i, group in state.groupby("species_idx")}
+            if not (np.isfinite(values) & (values > 0)).all():
+                continue
+            if values.size == 1:
+                state = load_prediction_state(run_dir)
+                if state is not None and state.species_idx.nunique() == 1:
+                    return {int(state.species_idx.iloc[0]): float(values[0])}
+            return {i: float(value) for i, value in enumerate(values)}
+    return {}

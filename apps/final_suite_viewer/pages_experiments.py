@@ -138,7 +138,7 @@ def _missing_section(rows, truth_path):
     mode=st.radio("Missing-data error display",["Signed","Absolute"],horizontal=True); surface=selected.assign(display=selected.error_log10_N if mode=="Signed" else selected.error_log10_N.abs())
     if task_id in (45, 46):
         start, end = (10, 20) if task_id == 45 else (30, 40)
-        surface = surface[surface.time.between(start, end)]
+        surface = surface[gap_mask(surface, start, end)]
     grid=surface.pivot(index="time",columns="w",values="display"); limit=np.nanmax(np.abs(grid)) if mode=="Signed" else None
     fig=go.Figure(go.Heatmap(x=grid.columns,y=grid.index,z=grid,zmin=-limit if mode=="Signed" else None,zmax=limit,colorscale="RdBu_r" if mode=="Signed" else "Viridis")); fig.update_xaxes(type="log",title="physical body weight w"); fig.update_yaxes(title="model time")
     if task_id == 44:
