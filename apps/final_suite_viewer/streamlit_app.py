@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import pandas as pd
 import streamlit as st
@@ -15,7 +20,7 @@ from apps.final_suite_viewer.pages_inverse import inverse_page
 from apps.final_suite_viewer.pages_state_pde import pde_page, state_page
 from apps.final_suite_viewer.state import find_truth_source, load_truth_state
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2] / "HPC_clone"
+PROJECT_ROOT = REPO_ROOT / "HPC_clone"
 PAGES = (
     "Suite map", "Selected run: State", "Selected run: PDE", "Selected run: Data",
     "Selected run: Training", "Experiment analyses", "Inverse parameter analyses", "Technical details",
