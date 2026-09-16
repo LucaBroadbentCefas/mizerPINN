@@ -15,7 +15,7 @@ from apps.final_suite_viewer.pages_inverse import inverse_page
 from apps.final_suite_viewer.pages_state_pde import pde_page, state_page
 from apps.final_suite_viewer.state import find_truth_source, load_truth_state
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[2] / "HPC_clone"
 PAGES = (
     "Suite map", "Selected run: State", "Selected run: PDE", "Selected run: Data",
     "Selected run: Training", "Experiment analyses", "Inverse parameter analyses", "Technical details",
