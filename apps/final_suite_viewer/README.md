@@ -1,5 +1,8 @@
 # PINNmizer final-suite viewer
 
+The independent acceptance review, evidence, limitations, and per-feature
+PASS/FIXED/BLOCKED matrix are recorded in [FINAL_AUDIT.md](FINAL_AUDIT.md).
+
 This is a purpose-built, read-only Streamlit application for the fixed 70-task
 final HPC experimental design. It is separate from `apps/hpc_viewer`.
 

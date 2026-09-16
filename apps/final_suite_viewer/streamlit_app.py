@@ -147,7 +147,8 @@ def _technical(rows: list[dict], project_root: Path, truth_path: str) -> None:
         instances = row["instances"]
         if len(instances) > 1:
             choices = {f"{run.run_dir} (modified {run.modified:.0f})": run for run in instances}
-            chosen_label = st.selectbox("Duplicate instance", list(choices), help="The most recently modified instance is selected by default and listed first.")
+            key = f"duplicate_instance_{row['task_id']}"
+            chosen_label = st.selectbox("Duplicate instance", list(choices), key=key, help="The most recently modified instance is selected by default and listed first. This choice is retained for this browser session.")
             row["selected_instance"] = choices[chosen_label]
             st.warning("Duplicate suite identity. Selection defaults to the most recently modified local instance.")
         run = row["selected_instance"]
@@ -190,6 +191,15 @@ def main() -> None:
                 st.rerun()
     roots = tuple(line.strip() for line in roots_text.splitlines() if line.strip())
     rows = cached_discovery(str(project_root), roots, st.session_state.refresh_token)
+    # Reapply a duplicate choice on every rerun.  Mutating the cached row only
+    # on the Technical details page previously lost the choice on navigation.
+    for row in rows:
+        key = f"duplicate_instance_{row['task_id']}"
+        if key in st.session_state and len(row["instances"]) > 1:
+            chosen = st.session_state[key]
+            match = next((run for run in row["instances"] if chosen.startswith(str(run.run_dir) + " ")), None)
+            if match is not None:
+                row["selected_instance"] = match
     page = st.session_state.page
     if page == "Suite map": _suite_map(rows)
     elif page == "Selected run: State": state_page(rows, truth_path)

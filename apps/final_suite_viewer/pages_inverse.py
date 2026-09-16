@@ -42,7 +42,11 @@ def _input_dir(run_dir: str) -> Path | None:
 def _rmax_truth(run_dir: str) -> tuple[np.ndarray | None,str]:
     candidates=[Path(run_dir)/"r_max_true.csv"]
     root=_input_dir(run_dir)
-    if root: candidates += [root/"r_max_true.csv",root/"r_max.csv"]
+    # In recovery tasks r_max.csv is the deliberately perturbed *starting*
+    # value.  Falling back to it would make a failed recovery look exact.
+    # The suite copies r_max_true.csv into both the task input and run output;
+    # if neither copy is available the scientifically safe result is blocked.
+    if root: candidates += [root/"r_max_true.csv"]
     for path in candidates:
         if path.is_file(): return _read_numeric(str(path)).reshape(-1),str(path)
     return None,"r_max_true.csv (run directory or configured input directory)"

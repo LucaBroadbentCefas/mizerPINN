@@ -15,7 +15,7 @@ from apps.final_suite_viewer.analytics import (
 )
 from apps.final_suite_viewer.discovery import RunInstance, discover_local_runs, match_catalogue
 from apps.final_suite_viewer.metrics import aggregate_state_metrics, fold_error, state_rmse
-from apps.final_suite_viewer.state import align_states
+from apps.final_suite_viewer.state import align_states, normalise_state
 from apps.final_suite_viewer.experiment_analysis import (
     NN_SCENARIOS, ablation_task_matrix, gap_mask, missing_seen_metrics,
     missing_species_mask, noise_design, noise_summary, paired_cv_differences,
@@ -27,6 +27,7 @@ from apps.final_suite_viewer.inverse_analysis import (
     effort_errors, effort_recovery_summary, fishing_mortality,
     reshape_selectivity, rmax_recovery, rmse_log_ratio,
 )
+from apps.final_suite_viewer.pages_inverse import _rmax_truth
 
 
 def _state(rows):
@@ -108,6 +109,25 @@ def test_state_alignment_interpolates_in_log_weight_and_time():
     assert aligned.error_log10_N.iloc[0] == pytest.approx(0.0)
     assert metadata["interpolated_time_cells"] == 1
     assert metadata["extrapolation"] == "none"
+
+
+def test_state_alignment_never_extrapolates_and_preserves_named_species_index():
+    truth = pd.DataFrame({
+        "time": [0.0, 0.0, 2.0, 2.0],
+        "species": ["sp_7"] * 4,
+        "w": [1.0, np.e**2, 1.0, np.e**2],
+        "N": [1.0, 100.0, 100.0, 10000.0],
+    })
+    normalised = normalise_state(truth)
+    assert normalised.species_idx.unique().tolist() == [7]
+    prediction = pd.DataFrame({
+        "time": [1.0, 1.0, 3.0], "species": ["sp_7"] * 3,
+        "w": [np.e, np.e**3, np.e], "N": [100.0, 1.0, 1.0],
+    })
+    aligned, _ = align_states(prediction, truth)
+    assert len(aligned) == 1
+    assert aligned.species_idx.iloc[0] == 7
+    assert aligned.true_log10_N.iloc[0] == pytest.approx(2.0)
 
 
 def test_species_active_weight_mask_and_zero_bins():
@@ -309,6 +329,21 @@ def test_rmax_recovery_uses_truth_and_log_ratio_metric():
     assert recovered.ratio_to_truth.tolist() == [2.0, 0.5]
     assert recovered.abs_log_error.tolist() == pytest.approx([np.log(2), np.log(2)])
     assert rmse_log_ratio(estimated.estimated_r_max, [1, 4]) == pytest.approx(np.log(2))
+
+
+def test_rmax_truth_never_uses_perturbed_start_as_truth(tmp_path):
+    run = tmp_path / "run"
+    inputs = tmp_path / "inputs"
+    run.mkdir(); inputs.mkdir()
+    (run / "config.json").write_text(f'{{"input_dir": "{inputs}"}}')
+    pd.DataFrame({"r_max": [2.0]}).to_csv(inputs / "r_max.csv", index=False)
+    truth, source = _rmax_truth(str(run))
+    assert truth is None
+    assert "r_max_true.csv" in source
+    pd.DataFrame({"r_max": [1.0]}).to_csv(inputs / "r_max_true.csv", index=False)
+    truth, source = _rmax_truth(str(run))
+    assert truth.tolist() == [1.0]
+    assert source.endswith("r_max_true.csv")
 
 
 def test_effort_errors_keep_zero_truth_separate():

@@ -1,6 +1,7 @@
 """Canonical truth normalisation and deterministic state-grid alignment."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Mapping
 
@@ -26,8 +27,17 @@ def normalise_state(df: pd.DataFrame, source: str = "state") -> pd.DataFrame:
         raise ValueError(f"{source} needs time, w or x, and N/log_N/log10_N")
     if "species_idx" not in out:
         if "species" in out:
-            names = list(pd.unique(out["species"].astype(str)))
-            out["species_idx"] = out["species"].astype(str).map({name: i for i, name in enumerate(names)})
+            # Final-suite single-species folders use names such as ``sp_7``.
+            # Preserve that biological index rather than silently renumbering
+            # species by their order of appearance in a CSV.  Non-numeric
+            # names still receive a deterministic appearance-order index.
+            labels = out["species"].astype(str)
+            parsed = labels.str.extract(r"(?:^|_)sp(?:ecies)?_?(\d+)$", flags=re.IGNORECASE)[0]
+            if parsed.notna().all():
+                out["species_idx"] = pd.to_numeric(parsed)
+            else:
+                names = list(pd.unique(labels))
+                out["species_idx"] = labels.map({name: i for i, name in enumerate(names)})
         else:
             out["species_idx"] = 0
     if "species" not in out:
