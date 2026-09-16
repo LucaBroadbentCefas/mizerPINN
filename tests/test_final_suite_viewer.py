@@ -22,7 +22,7 @@ from apps.final_suite_viewer.experiment_analysis import (
     retained_omitted_years, validate_baseline_pair, validate_nn_pairings,
     year_location_mask,
 )
-from apps.final_suite_viewer.loaders import load_fixed_fields, load_prediction_state
+from apps.final_suite_viewer.loaders import load_fixed_fields, load_prediction_state, load_w_max
 from apps.final_suite_viewer.inverse_analysis import (
     effort_errors, effort_recovery_summary, fishing_mortality,
     reshape_selectivity, rmax_recovery, rmse_log_ratio,
@@ -124,6 +124,17 @@ def test_species_active_weight_mask_and_zero_bins():
     metrics, reason = aggregate_state_metrics(aligned, group_by="species_idx")
     assert reason is None
     assert metrics.n_cells.tolist() == [1.0, 1.0]
+
+
+def test_w_max_is_never_inferred_from_prediction_support(tmp_path: Path):
+    run = tmp_path / "run"; run.mkdir()
+    (run / "config.json").write_text("{}")
+    pd.DataFrame({"t": [0, 0], "species_idx": [0, 0], "w": [1, 100], "N": [2, 3]}).to_csv(run / "final_predictions_grid.csv", index=False)
+    load_w_max.clear()
+    assert load_w_max(str(run)) == {}
+    pd.DataFrame({"value": [10]}).to_csv(run / "w_max.csv", index=False)
+    load_w_max.clear()
+    assert load_w_max(str(run)) == {0: 10.0}
 
 
 def test_metric_selection_reports_empty_domain():
@@ -249,17 +260,18 @@ def test_paired_cv_differences_use_same_noise_seed():
     assert selected.n == 5
 
 
-def test_missing_design_masks_and_metrics():
+def test_missing_design_masks_and_metrics_use_half_open_gap():
     data = pd.DataFrame({
         "time": [0, 10, 15, 20, 30], "species_idx": [3, 3, 7, 7, 11],
         "error_log10_N": [0, 1, 2, 1, 0],
     })
-    assert gap_mask(data, 10, 20).tolist() == [False, True, True, True, False]
+    mask = gap_mask(data, 10, 20)
+    assert mask.tolist() == [False, True, True, False, False]
     assert missing_species_mask(data, 7).tolist() == [False, False, True, True, False]
-    summary = missing_seen_metrics(data, gap_mask(data, 10, 20))
-    assert summary["RMSE_missing"] == pytest.approx(np.sqrt(2))
-    assert summary["RMSE_seen"] == 0
-    assert summary["generalisation_penalty"] == pytest.approx(np.sqrt(2))
+    summary = missing_seen_metrics(data, mask)
+    assert summary["RMSE_missing"] == pytest.approx(np.sqrt(2.5))
+    assert summary["RMSE_seen"] == pytest.approx(np.sqrt(1 / 3))
+    assert summary["generalisation_penalty"] == pytest.approx(np.sqrt(2.5) - np.sqrt(1 / 3))
 
 
 def test_every_third_year_design_uses_actual_observation_years():
