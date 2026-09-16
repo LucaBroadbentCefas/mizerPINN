@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from .catalogue import CATALOGUE, SuiteTask
+from .catalogue import BY_TASK_ID, CATALOGUE, SuiteTask
 
 RUN_ROOTS = ("runs/pde_only_single_species", "runs/pde_multispecies")
 MANIFEST_GLOBS = ("final_runs/final_suite_manifest/**/*", "**/*final*suite*manifest*")
@@ -73,7 +74,22 @@ def _fallback_identity(run_dir: Path) -> tuple[str | None, int | None, str]:
         task = int(task) if task is not None else None
     except (TypeError, ValueError):
         task = None
-    return (str(label) if label else None, task, "config metadata")
+    if label:
+        return str(label), task, "config metadata"
+
+    # Final-suite HPC run directories are created with a terminal `_taskNN`
+    # suffix.  Older/copied runs may be missing final_suite_label.txt and may
+    # not carry suite metadata in config.json, but the task number is still an
+    # authoritative part of the final-suite run identity.  Map it back through
+    # the fixed 0-69 catalogue rather than inferring the experimental label.
+    match = re.search(r"_task(\d+)$", run_dir.name)
+    if match:
+        task = int(match.group(1))
+        suite_task = BY_TASK_ID.get(task)
+        if suite_task is not None:
+            return suite_task.run_label, task, "run-folder task id"
+
+    return None, task, "config metadata"
 
 
 def _is_complete(run_dir: Path) -> bool:
@@ -106,7 +122,8 @@ def discover_local_runs(project_root: Path, run_roots: Iterable[str | Path] = RU
                     pass
             if not label:
                 # An obsolete absolute manifest run_dir is only a hint. Match its
-                # basename locally, otherwise use configuration metadata.
+                # basename locally, otherwise use configuration metadata and,
+                # finally, the authoritative `_taskNN` folder suffix.
                 candidates = [m for m in manifests if Path(str(m.get("run_dir", ""))).name == run_dir.name]
                 if candidates:
                     metadata = candidates[0].copy()
