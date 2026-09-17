@@ -38,14 +38,17 @@ def _instance_options(rows, current):
     return next(row for row in found if row["task_id"] == selected), next((row for row in found if row["task_id"] == compare), None), found
 
 
-def _shared_controls(rows, source: pd.DataFrame):
-    row, comparison, _ = _instance_options(rows, st.session_state.get("selected_task_id"))
+def _shared_controls(row, comparison, source: pd.DataFrame):
     if row is None or source is None or source.empty: return row, comparison, None
     species_rows = source[["species_idx", "species"]].drop_duplicates().sort_values("species_idx")
     options = species_rows.species_idx.astype(int).tolist(); names = dict(zip(options, species_rows.species.astype(str)))
+    if not options:
+        return row, comparison, None
     species_idx = st.selectbox("Species", options, format_func=lambda i: names[i], key=f"species_{row['task_id']}")
     active = source[source.species_idx == species_idx]
     times = np.sort(active.time.unique()); weights = np.sort(active.w.unique())
+    if len(times) == 0 or len(weights) == 0:
+        return row, comparison, None
     c1, c2 = st.columns(2)
     time = c1.select_slider("Model time", options=times.tolist(), value=float(times[len(times)//2]), key=f"time_{row['task_id']}_{species_idx}")
     weight = c2.select_slider("Physical body weight w", options=weights.tolist(), value=float(weights[len(weights)//2]), key=f"weight_{row['task_id']}_{species_idx}")
@@ -56,39 +59,71 @@ def _shared_controls(rows, source: pd.DataFrame):
 
 
 def _heatmap(data, value, title, symmetric=False):
+    if data is None or data.empty or value not in data:
+        st.info(f"{title} unavailable: no valid cells are present in the selected domain.")
+        return False
     grid = data.pivot(index="time", columns="w", values=value).sort_index().sort_index(axis=1)
-    limit = float(np.nanmax(np.abs(grid.to_numpy()))) if symmetric else None
+    values = grid.to_numpy(dtype=float)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        st.info(f"{title} unavailable: the selected cells contain no finite values.")
+        return False
+    limit = None
+    if symmetric:
+        limit = float(np.max(np.abs(finite)))
+        if limit == 0:
+            limit = np.finfo(float).eps
     fig = go.Figure(go.Heatmap(x=grid.columns, y=grid.index, z=grid, colorscale="RdBu_r" if symmetric else "Viridis", zmin=-limit if symmetric else None, zmax=limit, colorbar_title=value))
     fig.update_layout(title=title, xaxis_title="physical body weight w", yaxis_title="model time"); fig.update_xaxes(type="log")
     st.plotly_chart(fig, use_container_width=True)
+    return True
 
 
 def state_page(rows):
     st.header("Selected run: State")
-    initial = next((r for r in rows if r["task_id"] == st.session_state.get("selected_task_id") and r["selected_instance"]), None)
-    if not initial:
+    row, comparison, _ = _instance_options(rows, st.session_state.get("selected_task_id"))
+    if row is None:
         st.info("Select a discovered run from the Suite map.")
         return
-    initial_truth = truth_source_for_task(initial["task_id"])
-    if not initial_truth.is_file():
-        st.error(f"Required truth file is missing: {initial_truth}")
+
+    truth_path = truth_source_for_task(row["task_id"])
+    if not truth_path.is_file():
+        st.error(f"Required truth file is missing: {truth_path}")
         return
+
+    run_dir = str(row["selected_instance"].run_dir)
     try:
-        source, _ = _aligned(str(initial["selected_instance"].run_dir), initial["task_id"])
+        aligned, meta = _aligned(run_dir, row["task_id"])
     except Exception as exc:
         st.error(f"Truth/state alignment failed: {exc}")
         return
-    row, comparison, ctl = _shared_controls(rows, source)
-    if not ctl:
-        st.warning("No saved prediction state is available.")
+    if aligned.empty:
+        st.warning("No overlapping valid prediction/truth state cells are available for this run.")
+        print(f"[state.page] empty aligned state task={row['task_id']} run_dir={run_dir}", flush=True)
         return
-    truth_path = truth_source_for_task(row["task_id"])
-    run_dir = str(row["selected_instance"].run_dir); aligned, meta = _aligned(run_dir, row["task_id"])
+
+    row, comparison, ctl = _shared_controls(row, comparison, aligned)
+    if not ctl:
+        st.warning("No valid saved prediction-state coordinates are available.")
+        return
+
     chosen = mask_domain(aligned[aligned.species_idx == ctl["species_idx"]], ctl["time_range"], ctl["weight_range"])
+    if chosen.empty:
+        st.warning("The selected species/time/weight domain contains no aligned prediction/truth cells.")
+        print(
+            f"[state.page] empty selected domain task={row['task_id']} species={ctl['species_idx']} "
+            f"time_range={ctl['time_range']} weight_range={ctl['weight_range']} aligned_rows={len(aligned)}",
+            flush=True,
+        )
+        return
+
     compare_aligned = None
     if comparison:
         compare_aligned, _ = _aligned(str(comparison["selected_instance"].run_dir), comparison["task_id"])
         compare_aligned = mask_domain(compare_aligned[compare_aligned.species_idx == ctl["species_idx"]], ctl["time_range"], ctl["weight_range"])
+        if compare_aligned.empty:
+            compare_aligned = None
+            st.info("The comparison run has no cells in the selected species/time/weight domain; comparison overlays are omitted.")
 
     st.caption(f"Truth source for task {row['task_id']}: {truth_path.name}")
     st.subheader("N3/N4 · State-error heatmap")
@@ -102,14 +137,14 @@ def state_page(rows):
     frames = [primary]
     if compare_aligned is not None:
         a, b = common_comparison_domain(chosen, compare_aligned); frames = [error_by_time(a).assign(run=row["run_label"]), error_by_time(b).assign(run=comparison["run_label"])]
-    st.plotly_chart(px.line(pd.concat(frames), x="time", y="RMSE_log10N", color="run", markers=True), use_container_width=True)
+    st.plotly_chart(px.line(pd.concat(frames), x="time", y="RMSE_log10N", color="run"), use_container_width=True)
     plot_explanation(st, interpretation="Tracks state error through model time over the selected body-size interval.", calculation=r"RMSE(t)=\sqrt{\operatorname{mean}_w e(t,w)^2}", inputs=["aligned predicted and task-specific mizer truth states"], selection=f"{ctl['species']}; w={ctl['weight_range']}", alignment="Comparison runs are each aligned to their own authoritative simulation truth, then restricted to identical species/time/weight coordinates before aggregation.")
 
     st.subheader("N6 · Error through body size")
     frames = [error_by_weight(chosen).assign(run=row["run_label"])]
     if compare_aligned is not None:
         a, b = common_comparison_domain(chosen, compare_aligned); frames = [error_by_weight(a).assign(run=row["run_label"]), error_by_weight(b).assign(run=comparison["run_label"])]
-    fig = px.line(pd.concat(frames), x="w", y="RMSE_log10N", color="run", markers=True); fig.update_xaxes(type="log", title="physical body weight w")
+    fig = px.line(pd.concat(frames), x="w", y="RMSE_log10N", color="run"); fig.update_xaxes(type="log", title="physical body weight w")
     st.plotly_chart(fig, use_container_width=True)
     plot_explanation(st, interpretation="Shows which physical body sizes have greatest state error over the selected times.", calculation=r"RMSE(w)=\sqrt{\operatorname{mean}_t e(t,w)^2}", inputs=["aligned predicted and task-specific mizer truth states"], selection=f"{ctl['species']}; t={ctl['time_range']}", alignment="Linear alignment is in log-weight; display axis is physical w on a logarithmic scale.")
 
@@ -145,25 +180,41 @@ def state_page(rows):
         cp = compare_aligned[np.isclose(compare_aligned.time if profile_mode == "Across body size" else compare_aligned.w, comparison_coordinate)]
         extra = cp[[x, "pred_log10_N"]].rename(columns={"pred_log10_N":"log10_N"}); extra["source"] = comparison["run_label"]; long = pd.concat([long, extra])
     y = "log10_N" if scale == "log10(N)" else "N"; long["N"] = 10**long.log10_N
-    fig = px.line(long, x=x, y=y, color="source", markers=True); fig.update_xaxes(title=xlabel, type="log" if x == "w" else None); st.plotly_chart(fig, use_container_width=True)
+    fig = px.line(long, x=x, y=y, color="source"); fig.update_xaxes(title=xlabel, type="log" if x == "w" else None); st.plotly_chart(fig, use_container_width=True)
     plot_explanation(st, interpretation="Always compares saved PINN state with the authoritative mizer truth for that task at one requested coordinate.", calculation=r"N=10^{\log_{10}N}", inputs=["aligned predicted state", str(truth_path)], selection=f"requested t={ctl['time']}, mapped to t={nearest_time}; requested w={ctl['weight']}, mapped to w={nearest_w}", alignment=f"{meta.get('weight_method')}; {meta.get('time_method')}; plotted coordinate uses the nearest available aligned cell.")
 
 
 def pde_page(rows):
     st.header("Selected run: PDE")
-    initial = next((r for r in rows if r["task_id"] == st.session_state.get("selected_task_id") and r["selected_instance"]), None)
-    if not initial: st.info("Select a discovered run from the Suite map."); return
-    initial_dir = str(initial["selected_instance"].run_dir)
-    fixed = load_fixed_fields(initial_dir)
-    if fixed is None or fixed.empty: st.warning("Saved fixed-grid diagnostics are unavailable; the viewer will not recompute the PDE."); return
-    limits = load_w_max(initial_dir)
-    fixed = fixed[fixed.apply(lambda item: item.w <= limits.get(int(item.species_idx), np.inf), axis=1)]
-    row, _, ctl = _shared_controls(rows, fixed)
-    if not ctl: return
+    row, comparison, _ = _instance_options(rows, st.session_state.get("selected_task_id"))
+    if row is None:
+        st.info("Select a discovered run from the Suite map.")
+        return
     selected_dir = str(row["selected_instance"].run_dir)
-    fixed = load_fixed_fields(selected_dir); limits = load_w_max(selected_dir)
+    fixed = load_fixed_fields(selected_dir)
+    if fixed is None or fixed.empty:
+        st.warning("Saved fixed-grid diagnostics are unavailable; the viewer will not recompute the PDE.")
+        return
+    if not {"time", "w", "species_idx"}.issubset(fixed.columns):
+        missing = sorted({"time", "w", "species_idx"}.difference(fixed.columns))
+        st.error(f"Saved fixed-grid diagnostics are missing required columns: {missing}")
+        print(f"[pde.page] missing required columns task={row['task_id']} columns={list(fixed.columns)}", flush=True)
+        return
+    limits = load_w_max(selected_dir)
     fixed = fixed[fixed.apply(lambda item: item.w <= limits.get(int(item.species_idx), np.inf), axis=1)]
+    row, comparison, ctl = _shared_controls(row, comparison, fixed)
+    if not ctl:
+        st.warning("No valid saved fixed-grid coordinates are available.")
+        return
     selected = mask_domain(fixed[fixed.species_idx == ctl["species_idx"]], ctl["time_range"], ctl["weight_range"])
+    if selected.empty:
+        st.warning("The selected species/time/weight domain contains no saved fixed-grid diagnostics.")
+        print(
+            f"[pde.page] empty selected domain task={row['task_id']} species={ctl['species_idx']} "
+            f"time_range={ctl['time_range']} weight_range={ctl['weight_range']} fixed_rows={len(fixed)}",
+            flush=True,
+        )
+        return
     st.caption("All fields below are loaded from saved fixed-grid diagnostics. No checkpoint, model evaluation, PDE call, derivative, or autograd calculation occurs in this viewer.")
     st.subheader("P1/P2 · Residual heatmap")
     mode = st.radio("Residual display", ["Signed R_log", "Absolute |R_log|"], horizontal=True); selected = selected.assign(display=selected.residual_log if mode.startswith("Signed") else selected.residual_log.abs())
