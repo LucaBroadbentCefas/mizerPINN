@@ -18,9 +18,9 @@ from .experiment_analysis import (CVS, NN_SCENARIOS, ablation_task_matrix,
                                   retained_omitted_years, year_location_mask)
 from .loaders import load_fixed_fields, load_prediction_state, load_w_max, read_csv
 from .metrics import fold_error, state_rmse
-from .state import align_states, load_truth_state
+from .state import MULTISPECIES_TRUTH, align_states, load_truth_state, truth_source_for_task
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[2] / "HPC_clone"
 METRICS = ("State RMSE_log10N", "State fold error", "Fixed-grid p95 |PDE residual|", "Observation mean |log error|")
 
 
@@ -28,16 +28,18 @@ def _row_map(rows): return {row["task_id"]: row for row in rows}
 
 
 @st.cache_data(show_spinner=False)
-def _aligned(run_dir: str, truth_path: str):
+def _aligned(run_dir: str, task_id: int):
     prediction = load_prediction_state(run_dir)
     if prediction is None: return pd.DataFrame()
+    truth_path = truth_source_for_task(task_id)
+    if not truth_path.is_file(): raise FileNotFoundError(f"Required truth file is missing: {truth_path}")
     return align_states(prediction, load_truth_state(truth_path), w_max=load_w_max(run_dir))[0]
 
 
 @st.cache_data(show_spinner=False)
-def _run_metric(run_dir: str, truth_path: str, metric: str, species_idx: int | None):
+def _run_metric(run_dir: str, task_id: int, metric: str, species_idx: int | None):
     if metric.startswith("State"):
-        aligned = _aligned(run_dir, truth_path)
+        aligned = _aligned(run_dir, task_id)
         if species_idx is not None: aligned = aligned[aligned.species_idx == species_idx]
         errors = aligned.error_log10_N
         return state_rmse(errors) if metric == METRICS[0] else fold_error(errors)
@@ -61,21 +63,21 @@ def _metric_controls(truth: pd.DataFrame):
     return metric, species
 
 
-def _metric_table(rows, task_ids, truth_path, metric, species):
+def _metric_table(rows, task_ids, metric, species):
     by_id = _row_map(rows); records=[]
     for task_id in task_ids:
-        row=by_id.get(int(task_id)); run=row and row["selected_instance"]
-        records.append({"task_id":int(task_id), "value": _run_metric(str(run.run_dir), truth_path, metric, species) if run else np.nan, "available": bool(run)})
+        task_id = int(task_id); row=by_id.get(task_id); run=row and row["selected_instance"]
+        records.append({"task_id":task_id, "value": _run_metric(str(run.run_dir), task_id, metric, species) if run else np.nan, "available": bool(run)})
     return pd.DataFrame(records)
 
 
-def _explain(interpretation, equation, inputs, selection, alignment="Canonical truth alignment for state metrics; saved fields for other metrics."):
+def _explain(interpretation, equation, inputs, selection, alignment="Task-specific truth alignment for state metrics; saved fields for other metrics."):
     plot_explanation(st, interpretation=interpretation, calculation=equation, inputs=inputs, selection=selection, alignment=alignment)
 
 
-def _noise_section(rows, truth_path, truth):
+def _noise_section(rows, truth):
     st.header("Noise and CV comparisons")
-    metric, species = _metric_controls(truth); design=noise_design(); values=design.merge(_metric_table(rows, design.task_id, truth_path, metric, species), on="task_id")
+    metric, species = _metric_controls(truth); design=noise_design(); values=design.merge(_metric_table(rows, design.task_id, metric, species), on="task_id")
     values=values[np.isfinite(values.value)]; gate_on=values[values.gate]
     if gate_on.empty: st.info("No discovered gate-ON noise runs have this metric."); return
     summary=noise_summary(values)
@@ -112,12 +114,12 @@ def _observation_design(task_id):
     return perfect,reduced
 
 
-def _missing_section(rows, truth_path):
+def _missing_section(rows):
     st.header("Missing and sparse observations")
     by_id=_row_map(rows); options=[i for i in range(44,50) if by_id.get(i) and by_id[i]["selected_instance"]]
     if not options: st.info("No missing-data runs were discovered."); return
     task_id=st.selectbox("Missing-data run",options,format_func=lambda i:f"{i}: {by_id[i]['display_label']}"); run_dir=str(by_id[task_id]["selected_instance"].run_dir)
-    aligned=_aligned(run_dir,truth_path); perfect,reduced=_observation_design(task_id)
+    aligned=_aligned(run_dir,task_id); perfect,reduced=_observation_design(task_id)
     omitted_species=sorted(set(perfect.species_idx)-set(reduced.species_idx)); retained_years,omitted_years=retained_omitted_years(perfect,reduced)
     species_options=sorted(aligned.species_idx.astype(int).unique()); default_species=omitted_species[0] if omitted_species else species_options[0]
     species=st.selectbox("Species",species_options,index=species_options.index(default_species)); selected=aligned[aligned.species_idx==species]
@@ -126,7 +128,7 @@ def _missing_section(rows, truth_path):
     st.caption(f"Validated observation design: {len(reduced)} retained of {len(perfect)} perfect-data rows. Omitted species={omitted_species or 'none'}; retained observation years={retained_years}; omitted observation years={omitted_years}.")
     at_time=selected[np.isclose(selected.time,time)]; through=selected[np.isclose(selected.w,weight)]
     for title,data,x in (("Across body size",at_time,"w"),("Through time",through,"time")):
-        long=data[[x,"true_log10_N","pred_log10_N"]].melt(x,var_name="source",value_name="log10_N"); long.source=long.source.map({"true_log10_N":"Canonical mizer truth","pred_log10_N":"PINN"}); fig=px.line(long,x=x,y="log10_N",color="source",markers=True,title=title)
+        long=data[[x,"true_log10_N","pred_log10_N"]].melt(x,var_name="source",value_name="log10_N"); long.source=long.source.map({"true_log10_N":"Mizer truth","pred_log10_N":"PINN"}); fig=px.line(long,x=x,y="log10_N",color="source",markers=True,title=title)
         if x=="w": fig.update_xaxes(type="log")
         if x=="time" and task_id in (45,46): fig.add_vrect(x0=10 if task_id==45 else 30,x1=20 if task_id==45 else 40,fillcolor="grey",opacity=.2,line_width=0)
         if x=="time" and task_id==44:
@@ -145,7 +147,7 @@ def _missing_section(rows, truth_path):
         for year in retained_years: fig.add_hline(y=year,line_color="green",opacity=.25)
         for year in omitted_years: fig.add_hline(y=year,line_color="orange",opacity=.35,line_dash="dot")
     st.plotly_chart(fig,use_container_width=True)
-    _explain("Maps latent-state error over the withheld domain without treating observation truth as true state.",r"e=\log_{10}N_{pred}-\log_{10}N_{true}",["aligned canonical state truth","actual observation design"],f"species {species}; {mode}","Gap runs are cropped to the continuous gap; every-third-year lines mark discrete retained/omitted years.")
+    _explain("Maps latent-state error over the withheld domain without treating observation truth as true state.",r"e=\log_{10}N_{pred}-\log_{10}N_{true}",["aligned task-specific state truth","actual observation design"],f"species {species}; {mode}","Gap runs are cropped to the continuous gap; every-third-year lines mark discrete retained/omitted years.")
     if task_id in (45,46): missing=gap_mask(aligned,10 if task_id==45 else 30,20 if task_id==45 else 40)
     elif omitted_species: missing=missing_species_mask(aligned,omitted_species[0])
     else: missing=year_location_mask(aligned,omitted_years)
@@ -172,10 +174,10 @@ def _missing_section(rows, truth_path):
             for year in retained_years: fig.add_vline(x=year,line_color="green",opacity=.2)
             for year in omitted_years: fig.add_vline(x=year,line_color="orange",opacity=.3,line_dash="dot")
     st.plotly_chart(fig,use_container_width=True)
-    _explain("Separates state error on the actual withheld design from comparable seen cells; the default penalty is a difference, not a ratio.",r"penalty=RMSE_{miss}-RMSE_{seen}", ["actual perfect/reduced observation CSVs","canonical state truth"],by_id[task_id]["display_label"])
+    _explain("Separates state error on the actual withheld design from comparable seen cells; the default penalty is a difference, not a ratio.",r"penalty=RMSE_{miss}-RMSE_{seen}", ["actual perfect/reduced observation CSVs","task-specific state truth"],by_id[task_id]["display_label"])
 
 
-def _nn_and_ablation(rows,truth_path,truth):
+def _nn_and_ablation(rows,truth):
     st.header("PINN versus no-PDE NN")
     by_id=_row_map(rows); scenario=st.selectbox("Matched scenario",list(NN_SCENARIOS)); pair=NN_SCENARIOS[scenario]
     if not all(by_id.get(i) and by_id[i]["selected_instance"] for i in pair): st.info("Both matched runs are required.")
@@ -183,43 +185,45 @@ def _nn_and_ablation(rows,truth_path,truth):
         species_choices=[None]+sorted(truth.species_idx.astype(int).unique()); species=st.selectbox("NN comparison species",species_choices,format_func=lambda x:"All species" if x is None else f"species {x}")
         aligned=[]
         for task_id,label in zip(pair,("PINN","Data-only NN")):
-            data=_aligned(str(by_id[task_id]["selected_instance"].run_dir),truth_path); data=data if species is None else data[data.species_idx==species]; aligned.append(data)
+            data=_aligned(str(by_id[task_id]["selected_instance"].run_dir),task_id); data=data if species is None else data[data.species_idx==species]; aligned.append(data)
         aligned=list(common_comparison_domain(aligned[0],aligned[1]))
         overall=pd.DataFrame({"model":["PINN","Data-only NN"],"state RMSE":[state_rmse(x.error_log10_N) for x in aligned],"fold error":[fold_error(x.error_log10_N) for x in aligned]})
         st.subheader("NN1 · Overall state recovery"); st.dataframe(overall,use_container_width=True); st.plotly_chart(px.bar(overall,x="model",y=["state RMSE","fold error"],barmode="group"),use_container_width=True)
-        _explain("Compares overall latent-state recovery for matched PINN and data-only networks, not their incompatible objectives.",r"RMSE=\sqrt{mean(e^2)},\quad F=10^{mean|e|}",["matched aligned states","canonical truth"],scenario,"Both runs are restricted to identical comparison cells.")
+        _explain("Compares overall latent-state recovery for matched PINN and data-only networks, not their incompatible objectives.",r"RMSE=\sqrt{mean(e^2)},\quad F=10^{mean|e|}",["matched aligned states","task-specific truth"],scenario,"Both runs are restricted to identical comparison cells.")
         st.subheader("NN2 · State error through time"); curves=pd.concat([error_by_time(x).assign(model=label) for x,label in zip(aligned,("PINN","Data-only NN"))]); fig=px.line(curves,x="time",y="RMSE_log10N",color="model")
         if scenario.startswith("Gap"): fig.add_vrect(x0=30,x1=40,fillcolor="grey",opacity=.2,line_width=0)
-        st.plotly_chart(fig,use_container_width=True); _explain("Compares matched state recovery without comparing incompatible training objectives.",r"RMSE(t)=\sqrt{mean_{i,w}e^2}",["catalogue-validated matched runs","canonical truth"],scenario)
+        st.plotly_chart(fig,use_container_width=True); _explain("Compares matched state recovery without comparing incompatible training objectives.",r"RMSE(t)=\sqrt{mean_{i,w}e^2}",["catalogue-validated matched runs","task-specific truth"],scenario)
     st.header("A1 · Single-species ablation matrix")
     task_matrix=ablation_task_matrix(); metric=st.selectbox("Ablation metric",METRICS[:3]); values=task_matrix.astype(float).copy()
     for sp in values.index:
         for variant in values.columns:
-            task_id=int(task_matrix.loc[sp,variant]); row=by_id.get(task_id); values.loc[sp,variant]=_run_metric(str(row["selected_instance"].run_dir),truth_path,metric,int(sp.split("_")[1])) if row and row["selected_instance"] else np.nan
+            task_id=int(task_matrix.loc[sp,variant]); row=by_id.get(task_id); values.loc[sp,variant]=_run_metric(str(row["selected_instance"].run_dir),task_id,metric,int(sp.split("_")[1])) if row and row["selected_instance"] else np.nan
     st.plotly_chart(px.imshow(values,text_auto=".4g",aspect="auto",labels={"color":metric}),use_container_width=True)
-    _explain("Compares architecture and state-parameterisation ablations within each single-species fixture.",metric,["tasks 0–11 from authoritative catalogue"],"rows=species; columns=parameterisation/architecture","Each cell uses its restored fixture species identity and its own metric colour range.")
+    _explain("Compares architecture and state-parameterisation ablations within each single-species fixture.",metric,["tasks 0–11", "single_species_projection_long.csv"],"rows=species; columns=parameterisation/architecture","Each cell uses the independent single-species simulation truth and its restored fixture species identity.")
     chosen=st.selectbox("Set an ablation run as global selection",task_matrix.stack().astype(int).tolist(),format_func=lambda i:f"task {i}: {by_id[i]['run_label']}")
     if st.button("Select ablation run"): st.session_state.selected_task_id=chosen; st.success(f"Selected task {chosen}.")
     st.header("A2 · Multispecies no-data versus perfect-data")
     if all(by_id.get(i) and by_id[i]["selected_instance"] for i in (12,13)):
-        raw_data=[_aligned(str(by_id[i]["selected_instance"].run_dir),truth_path) for i in (12,13)]; labels=("No data","Perfect data")
+        raw_data=[_aligned(str(by_id[i]["selected_instance"].run_dir),i) for i in (12,13)]; labels=("No data","Perfect data")
         all_data=list(common_comparison_domain(raw_data[0],raw_data[1]))
         choices=[None]+sorted(set(all_data[0].species_idx.astype(int)) & set(all_data[1].species_idx.astype(int)))
         selected_species=st.selectbox("A2 species",choices,format_func=lambda x:"All species" if x is None else f"species {x}")
         data=all_data if selected_species is None else [frame[frame.species_idx==selected_species] for frame in all_data]
         data=list(common_comparison_domain(data[0],data[1]))
         curves=pd.concat([error_by_time(x).assign(run=label) for x,label in zip(data,labels)]); st.plotly_chart(px.line(curves,x="time",y="RMSE_log10N",color="run",title="A2a · State RMSE through time"),use_container_width=True)
-        _explain("Shows through-time improvement from observations beyond PDE/IC/BC information alone.",r"RMSE(t)=\sqrt{mean_{i,w}e^2}",["tasks 12 and 13","canonical truth"],"all species" if selected_species is None else f"species {selected_species}","Common valid cells only.")
+        _explain("Shows through-time improvement from observations beyond PDE/IC/BC information alone.",r"RMSE(t)=\sqrt{mean_{i,w}e^2}",["tasks 12 and 13","mizer_projection_long.csv"],"all species" if selected_species is None else f"species {selected_species}","Common valid cells only.")
         species=pd.concat([error_by_species(x).assign(run=label) for x,label in zip(all_data,labels)]); st.plotly_chart(px.bar(species,x="species",y="RMSE_log10N",color="run",barmode="group",title="A2b · State RMSE by species"),use_container_width=True)
-        _explain("Shows which species benefit from perfect observations relative to the no-data baseline.",r"RMSE_i=\sqrt{mean_{t,w}e_i^2}",["tasks 12 and 13","canonical truth"],"All species","Common valid cells and species-specific active domains.")
+        _explain("Shows which species benefit from perfect observations relative to the no-data baseline.",r"RMSE_i=\sqrt{mean_{t,w}e_i^2}",["tasks 12 and 13","mizer_projection_long.csv"],"All species","Common valid cells and species-specific active domains.")
 
 
-def experiment_page(rows,truth_path):
+def experiment_page(rows):
     st.title("Experiment analyses")
-    if not truth_path: st.error("Canonical state truth is required for experiment-level state metrics."); return
-    try: truth=load_truth_state(truth_path)
+    if not MULTISPECIES_TRUTH.is_file():
+        st.error(f"Required multispecies truth file is missing: {MULTISPECIES_TRUTH}")
+        return
+    try: truth=load_truth_state(MULTISPECIES_TRUTH)
     except Exception as exc: st.error(f"Truth source unavailable: {exc}"); return
     section=st.radio("Analysis",["Noise/CV E1–E3","Missing/sparse data","PINN vs NN and ablations"],horizontal=True)
-    if section.startswith("Noise"): _noise_section(rows,truth_path,truth)
-    elif section.startswith("Missing"): _missing_section(rows,truth_path)
-    else: _nn_and_ablation(rows,truth_path,truth)
+    if section.startswith("Noise"): _noise_section(rows,truth)
+    elif section.startswith("Missing"): _missing_section(rows)
+    else: _nn_and_ablation(rows,truth)
