@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import re
+import time
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -92,16 +94,38 @@ def load_fixed_fields(run_dir: str) -> pd.DataFrame | None:
 @st.cache_data(show_spinner=False)
 def load_prediction_state(run_dir: str) -> pd.DataFrame | None:
     """Prefer the denser fixed diagnostic state, then the final prediction grid."""
-    fixed = load_fixed_fields(run_dir)
-    if fixed is not None and not fixed.empty and "log10_N" in fixed:
-        raw = fixed[[c for c in ("time", "species_idx", "species", "w", "x", "log10_N") if c in fixed]].copy()
-        raw["N"] = np.power(10.0, raw.log10_N)
-        state = normalise_state(raw, "fixed_grid_fields.csv")
-        return _restore_single_species_identity(state, run_dir)
-    final = read_csv(run_dir, "final_predictions_grid.csv")
-    if final is None or final.empty:
-        return None
-    return _restore_single_species_identity(normalise_state(final, "final_predictions_grid.csv"), run_dir)
+    started = time.perf_counter()
+    print(f"[state.load] start run_dir={run_dir}", flush=True)
+    try:
+        print("[state.load] checking fixed-grid diagnostics", flush=True)
+        fixed = load_fixed_fields(run_dir)
+        print(
+            f"[state.load] fixed-grid rows={0 if fixed is None else len(fixed)} "
+            f"columns={[] if fixed is None else list(fixed.columns)}",
+            flush=True,
+        )
+        if fixed is not None and not fixed.empty and "log10_N" in fixed:
+            print("[state.load] using fixed_grid_fields.csv state", flush=True)
+            raw = fixed[[c for c in ("time", "species_idx", "species", "w", "x", "log10_N") if c in fixed]].copy()
+            raw["N"] = np.power(10.0, raw.log10_N)
+            state = normalise_state(raw, "fixed_grid_fields.csv")
+            state = _restore_single_species_identity(state, run_dir)
+            print(f"[state.load] done rows={len(state)} elapsed_s={time.perf_counter() - started:.3f}", flush=True)
+            return state
+
+        print("[state.load] fixed-grid state unavailable; checking final_predictions_grid.csv", flush=True)
+        final = read_csv(run_dir, "final_predictions_grid.csv")
+        print(f"[state.load] final prediction rows={0 if final is None else len(final)}", flush=True)
+        if final is None or final.empty:
+            print(f"[state.load] no prediction state elapsed_s={time.perf_counter() - started:.3f}", flush=True)
+            return None
+        state = _restore_single_species_identity(normalise_state(final, "final_predictions_grid.csv"), run_dir)
+        print(f"[state.load] done rows={len(state)} elapsed_s={time.perf_counter() - started:.3f}", flush=True)
+        return state
+    except Exception:
+        print(f"[state.load] FAILED after {time.perf_counter() - started:.3f}s", flush=True)
+        traceback.print_exc()
+        raise
 
 
 def _restore_single_species_identity(state: pd.DataFrame, run_dir: str) -> pd.DataFrame:

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import re
+import time
+import traceback
 from pathlib import Path
 from typing import Mapping
 
@@ -90,37 +92,126 @@ def align_states(prediction: pd.DataFrame, truth: pd.DataFrame, *, w_max: Mappin
     Exact time/x values are naturally preserved by ``numpy.interp``. Values
     outside truth support are NaN (never extrapolated). Both states are first
     restricted to positive abundance and species-specific active weights.
+
+    Interpolation is vectorised over the target grid: first all target x values
+    are interpolated at each truth time, then all target times are interpolated
+    for each target x. This is mathematically equivalent to the previous
+    per-cell implementation but avoids repeated DataFrame filtering/grouping.
     """
-    pred, true = normalise_state(prediction, "prediction"), normalise_state(truth, "truth")
-    w_max = dict(w_max or {})
-    if w_max:
-        pred = pred[pred.apply(lambda row: row.w <= w_max.get(int(row.species_idx), np.inf), axis=1)]
-        true = true[true.apply(lambda row: row.w <= w_max.get(int(row.species_idx), np.inf), axis=1)]
-    rows: list[dict[str, object]] = []
-    exact_time, interpolated_time = 0, 0
-    for species_idx, targets in pred.groupby("species_idx"):
-        source = true[true.species_idx == species_idx]
-        if source.empty:
-            continue
-        source_times = np.sort(source.time.unique())
-        for target in targets.itertuples(index=False):
-            values = []
-            for time in source_times:
-                profile = source[np.isclose(source.time, time)].groupby("x", as_index=False).log10_N.mean().sort_values("x")
-                xs, ys = profile.x.to_numpy(), profile.log10_N.to_numpy()
-                values.append(np.interp(target.x, xs, ys, left=np.nan, right=np.nan) if len(xs) else np.nan)
-            values = np.asarray(values, dtype=float)
-            valid = np.isfinite(values)
-            if not valid.any() or target.time < source_times[valid].min() or target.time > source_times[valid].max():
-                truth_value = np.nan
-            else:
-                truth_value = float(np.interp(target.time, source_times[valid], values[valid]))
-                if np.any(np.isclose(source_times[valid], target.time)):
-                    exact_time += 1
-                else:
-                    interpolated_time += 1
-            if np.isfinite(truth_value):
-                rows.append({"time": target.time, "species_idx": int(species_idx), "species": target.species, "w": target.w, "x": target.x, "pred_log10_N": target.log10_N, "true_log10_N": truth_value, "error_log10_N": target.log10_N - truth_value})
-    aligned = pd.DataFrame(rows)
-    metadata = {"time_method": "exact where available, otherwise linear interpolation", "weight_method": "exact where available, otherwise linear interpolation in x=log(w)", "extrapolation": "none", "target_grid": "prediction", "valid_cells": len(aligned), "exact_time_cells": exact_time, "interpolated_time_cells": interpolated_time, "active_weight_limits": w_max}
-    return aligned, metadata
+    started = time.perf_counter()
+    print("[state.align] start", flush=True)
+    try:
+        pred, true = normalise_state(prediction, "prediction"), normalise_state(truth, "truth")
+        print(
+            f"[state.align] normalised prediction_rows={len(pred)} truth_rows={len(true)} "
+            f"prediction_species={pred.species_idx.nunique()} truth_species={true.species_idx.nunique()}",
+            flush=True,
+        )
+
+        w_max = dict(w_max or {})
+        if w_max:
+            pred = pred[pred.apply(lambda row: row.w <= w_max.get(int(row.species_idx), np.inf), axis=1)]
+            true = true[true.apply(lambda row: row.w <= w_max.get(int(row.species_idx), np.inf), axis=1)]
+            print(f"[state.align] active-weight mask prediction_rows={len(pred)} truth_rows={len(true)}", flush=True)
+
+        aligned_parts: list[pd.DataFrame] = []
+        exact_time, interpolated_time = 0, 0
+
+        for species_idx, targets in pred.groupby("species_idx", sort=False):
+            source = true[true.species_idx == species_idx]
+            print(
+                f"[state.align] species={int(species_idx)} target_rows={len(targets)} source_rows={len(source)}",
+                flush=True,
+            )
+            if source.empty:
+                continue
+
+            source_times = np.sort(source.time.unique())
+            target_times = np.sort(targets.time.unique())
+            target_xs = np.sort(targets.x.unique())
+
+            # Stage 1: interpolate in x=log(w) for every requested target x at
+            # each truth time. Only one profile/groupby is built per truth time.
+            weight_interpolated = np.full((len(source_times), len(target_xs)), np.nan, dtype=float)
+            for time_index, source_time in enumerate(source_times):
+                profile = (
+                    source[np.isclose(source.time, source_time)]
+                    .groupby("x", as_index=False)
+                    .log10_N.mean()
+                    .sort_values("x")
+                )
+                xs = profile.x.to_numpy()
+                ys = profile.log10_N.to_numpy()
+                if len(xs):
+                    weight_interpolated[time_index] = np.interp(
+                        target_xs, xs, ys, left=np.nan, right=np.nan
+                    )
+
+            # Stage 2: for each requested target x, interpolate those values in
+            # time onto all requested prediction times. Again, never extrapolate.
+            truth_grid = np.full((len(target_times), len(target_xs)), np.nan, dtype=float)
+            exact_grid = np.zeros((len(target_times), len(target_xs)), dtype=bool)
+            for x_index in range(len(target_xs)):
+                values = weight_interpolated[:, x_index]
+                valid = np.isfinite(values)
+                if not valid.any():
+                    continue
+                valid_times = source_times[valid]
+                valid_values = values[valid]
+                truth_grid[:, x_index] = np.interp(
+                    target_times,
+                    valid_times,
+                    valid_values,
+                    left=np.nan,
+                    right=np.nan,
+                )
+                exact_grid[:, x_index] = np.isclose(
+                    target_times[:, None], valid_times[None, :]
+                ).any(axis=1)
+
+            time_index = np.searchsorted(target_times, targets.time.to_numpy())
+            x_index = np.searchsorted(target_xs, targets.x.to_numpy())
+            truth_values = truth_grid[time_index, x_index]
+            valid_rows = np.isfinite(truth_values)
+            if not valid_rows.any():
+                continue
+
+            exact_rows = exact_grid[time_index, x_index] & valid_rows
+            exact_time += int(exact_rows.sum())
+            interpolated_time += int(valid_rows.sum() - exact_rows.sum())
+
+            part = targets.loc[valid_rows, ["time", "species_idx", "species", "w", "x", "log10_N"]].copy()
+            part = part.rename(columns={"log10_N": "pred_log10_N"})
+            part["true_log10_N"] = truth_values[valid_rows]
+            part["error_log10_N"] = part.pred_log10_N - part.true_log10_N
+            aligned_parts.append(part)
+
+        aligned = (
+            pd.concat(aligned_parts, ignore_index=True)
+            if aligned_parts
+            else pd.DataFrame(
+                columns=[
+                    "time", "species_idx", "species", "w", "x",
+                    "pred_log10_N", "true_log10_N", "error_log10_N",
+                ]
+            )
+        )
+        metadata = {
+            "time_method": "exact where available, otherwise linear interpolation",
+            "weight_method": "exact where available, otherwise linear interpolation in x=log(w)",
+            "extrapolation": "none",
+            "target_grid": "prediction",
+            "valid_cells": len(aligned),
+            "exact_time_cells": exact_time,
+            "interpolated_time_cells": interpolated_time,
+            "active_weight_limits": w_max,
+        }
+        print(
+            f"[state.align] done valid_cells={len(aligned)} elapsed_s={time.perf_counter() - started:.3f}",
+            flush=True,
+        )
+        return aligned, metadata
+    except Exception:
+        print(f"[state.align] FAILED after {time.perf_counter() - started:.3f}s", flush=True)
+        traceback.print_exc()
+        raise
