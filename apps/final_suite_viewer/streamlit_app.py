@@ -178,6 +178,18 @@ def _technical(rows: list[dict], project_root: Path) -> None:
             st.error(f"Required truth file is missing: {truth_path}")
 
 
+@st.fragment(key="state-analysis")
+def _state_fragment(rows: list[dict]) -> None:
+    """Rerun only State controls/plots when State-page widgets change."""
+    state_page(rows)
+
+
+@st.fragment(key="pde-analysis")
+def _pde_fragment(rows: list[dict]) -> None:
+    """Rerun only PDE controls/plots when PDE-page widgets change."""
+    pde_page(rows)
+
+
 def main() -> None:
     st.set_page_config(page_title="PINNmizer final suite", layout="wide")
     st.title("PINNmizer final HPC suite")
@@ -206,8 +218,8 @@ def main() -> None:
                 row["selected_instance"] = match
     page = st.session_state.page
     if page == "Suite map": _suite_map(rows)
-    elif page == "Selected run: State": state_page(rows)
-    elif page == "Selected run: PDE": pde_page(rows)
+    elif page == "Selected run: State": _state_fragment(rows)
+    elif page == "Selected run: PDE": _pde_fragment(rows)
     elif page == "Selected run: Data": data_page(rows)
     elif page == "Selected run: Training": training_page(rows)
     elif page == "Experiment analyses": experiment_page(rows)
