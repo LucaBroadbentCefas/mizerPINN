@@ -5,9 +5,9 @@ from typing import Iterable
 
 
 def plot_explanation(st, *, interpretation: str, calculation: str, inputs: Iterable[str], selection: str, alignment: str) -> None:
-    """Render the mandatory explanation directly below a scientific plot."""
-    with st.container(border=True):
-        st.markdown(f"**Interpretation** — {interpretation}")
+    """Render a collapsed scientific explanation directly below a plot."""
+    with st.expander("Interpretation", expanded=False):
+        st.markdown(interpretation)
         st.markdown("**Calculation**")
         st.latex(calculation)
         st.markdown("**Inputs** — " + ", ".join(f"`{value}`" for value in inputs))
