@@ -1,63 +1,48 @@
-#producing the single species runs
+# producing the single-species runs
 
 library(mizer)
 
-new_params <- newMultispeciesParams(NS_params@species_params[1,], kappa = 1.5e11)
+# Keep the same species-specific resource carrying capacities used previously.
+single_species_kappa <- c(
+  rep(1.5e11, 5),
+  rep(0.5e11, 3),
+  rep(1e11, 4)
+)
 
-plot(project(new_params, t_max = 30))
+projection_long <- vector("list", nrow(NS_params@species_params))
 
+for (i in seq_len(nrow(NS_params@species_params))) {
+  new_params <- newMultispeciesParams(
+    NS_params@species_params[i, ],
+    kappa = single_species_kappa[i]
+  )
 
-new_params <- newMultispeciesParams(NS_params@species_params[2,], kappa = 1.5e11)
+  sim <- project(new_params, t_max = 30)
+  plot(sim)
 
-plot(project(new_params, t_max = 30))
+  # sim@n has dimensions time x species x weight.
+  # Export the latent projection in the same long format used by
+  # mizer_projection_long.csv so it can be used as truth in the viewer.
+  sim_long <- as.data.frame.table(
+    sim@n,
+    responseName = "N",
+    stringsAsFactors = FALSE
+  )
+  names(sim_long)[1:3] <- c("time", "species", "weight")
 
+  sim_long$time <- as.numeric(sim_long$time)
+  sim_long$species <- as.character(sim_long$species)
+  sim_long$weight <- as.numeric(sim_long$weight)
+  sim_long$N <- as.numeric(sim_long$N)
 
-new_params <- newMultispeciesParams(NS_params@species_params[3,], kappa = 1.5e11)
+  projection_long[[i]] <- sim_long[, c("time", "species", "weight", "N")]
+}
 
-plot(project(new_params, t_max = 30))
+single_species_projection_long <- do.call(rbind, projection_long)
+row.names(single_species_projection_long) <- NULL
 
-
-new_params <- newMultispeciesParams(NS_params@species_params[4,], kappa = 1.5e11)
-
-plot(project(new_params, t_max = 30))
-
-
-new_params <- newMultispeciesParams(NS_params@species_params[5,], kappa = 1.5e11)
-
-plot(project(new_params, t_max = 30))
-
-
-new_params <- newMultispeciesParams(NS_params@species_params[6,], kappa = 0.5e11)
-
-plot(project(new_params, t_max = 30))
-
-
-new_params <- newMultispeciesParams(NS_params@species_params[7,], kappa = 0.5e11)
-
-plot(project(new_params, t_max = 30))
-
-
-new_params <- newMultispeciesParams(NS_params@species_params[8,], kappa = 0.5e11)
-
-plot(project(new_params, t_max = 30))
-
-
-new_params <- newMultispeciesParams(NS_params@species_params[9,], kappa = 1e11)
-
-plot(project(new_params, t_max = 30))
-
-
-new_params <- newMultispeciesParams(NS_params@species_params[10,], kappa = 1e11)
-
-plot(project(new_params, t_max = 30))
-
-
-new_params <- newMultispeciesParams(NS_params@species_params[11,], kappa = 1e11)
-
-plot(project(new_params, t_max = 30))
-
-
-new_params <- newMultispeciesParams(NS_params@species_params[12,], kappa = 1e11)
-
-plot(project(new_params, t_max = 30))
-
+write.csv(
+  single_species_projection_long,
+  "final_runs/single_species_projection_long.csv",
+  row.names = FALSE
+)
