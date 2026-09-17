@@ -10,7 +10,7 @@ import streamlit as st
 from .analytics import (available_columns, denoising_metrics,
                         interval_seconds_per_step, normal_quantiles,
                         prepare_observations, rank_misfits)
-from .components import plot_explanation
+from .components import plot_explanation, plot_scale_controls
 from .loaders import load_prediction_state, read_csv, read_json
 
 
@@ -52,13 +52,17 @@ def data_page(rows):
     state = load_prediction_state(run_dir); names = {} if state is None else dict(state[["species_idx","species"]].drop_duplicates().itertuples(index=False, name=None))
     try: data = prepare_observations(raw, names)
     except Exception as exc: st.error(f"Saved observation schema is unusable: {exc}"); return
-    cols = st.columns(4)
-    species = cols[0].multiselect("Species", sorted(data.species.unique()), default=sorted(data.species.unique()))
-    types = cols[1].multiselect("Observation type", sorted(data.obs_type.unique()), default=sorted(data.obs_type.unique()))
-    datasets = cols[2].multiselect("Dataset/source", sorted(data.dataset.unique()), default=sorted(data.dataset.unique()))
-    gears_all = sorted(data.gear_idx.dropna().unique().tolist()) if "gear_idx" in data else []
-    gears = cols[3].multiselect("Gear", gears_all, default=gears_all) if gears_all else None
-    time_values = np.sort(np.unique(np.r_[data.t_start, data.t_end])); time_range = st.select_slider("Observation time range", time_values.tolist(), value=(float(time_values[0]), float(time_values[-1])))
+
+    with st.sidebar:
+        st.markdown("### Data filters")
+        species = st.multiselect("Species", sorted(data.species.unique()), default=sorted(data.species.unique()), key="data_species_filter")
+        types = st.multiselect("Observation type", sorted(data.obs_type.unique()), default=sorted(data.obs_type.unique()), key="data_type_filter")
+        datasets = st.multiselect("Dataset/source", sorted(data.dataset.unique()), default=sorted(data.dataset.unique()), key="data_dataset_filter")
+        gears_all = sorted(data.gear_idx.dropna().unique().tolist()) if "gear_idx" in data else []
+        gears = st.multiselect("Gear", gears_all, default=gears_all, key="data_gear_filter") if gears_all else None
+        time_values = np.sort(np.unique(np.r_[data.t_start, data.t_end]))
+        time_range = st.select_slider("Observation time range", time_values.tolist(), value=(float(time_values[0]), float(time_values[-1])), key="data_time_filter")
+
     data = data[data.species.isin(species) & data.obs_type.isin(types) & data.dataset.isin(datasets) & (data.t_end >= time_range[0]) & (data.t_start <= time_range[1])]
     if gears is not None: data = data[data.gear_idx.isin(gears)]
     if data.empty: st.info("The current filters select no observations."); return
@@ -105,18 +109,24 @@ def data_page(rows):
             ([c for c in present if c == "data_loss_active"], "Saved binary gate activity", r"active=\mathbf{1}[Q>Q_{95}]\quad (gate\ enabled)"),
             ([c for c in present if c in {"loss_data","loss_data_effective"}], "Raw and effective data loss", r"L_{effective}=L_{data}\mathbf{1}[Q>Q_{95}]\quad (gate\ enabled)"),
         )
-        for group, interpretation, equation in groups:
+        for index, (group, interpretation, equation) in enumerate(groups):
             if not group:
                 continue
-            st.plotly_chart(px.line(history,x="step",y=group,labels={"step":"optimization step"}),use_container_width=True)
+            fig = px.line(history,x="step",y=group,labels={"step":"optimization step"})
+            if index in (0, 2):
+                fig = plot_scale_controls(st, fig, key=f"data_gate_{index}", log_y=True)
+            st.plotly_chart(fig,use_container_width=True)
             _explain(interpretation + "; explicit saved values are never inferred.", equation, ["loss_history.csv: " + ", ".join(group)], "All retained optimization steps", "Rows are aligned by saved optimization step.")
 
 
-def _history_plot(data, columns, title, equation, interpretation, source="loss_history.csv"):
+def _history_plot(data, columns, title, equation, interpretation, source="loss_history.csv", *, log_y=True, key=None):
     present,_=available_columns(data,columns)
     st.subheader(title)
     if not present: st.info("No corresponding saved columns are available."); return
-    st.plotly_chart(px.line(data,x="step",y=present,labels={"step":"optimization step","value":title}),use_container_width=True)
+    fig = px.line(data,x="step",y=present,labels={"step":"optimization step","value":title})
+    if log_y:
+        fig = plot_scale_controls(st, fig, key=key or title.replace(" ", "_").replace("·", "_"), log_y=True)
+    st.plotly_chart(fig,use_container_width=True)
     _explain(interpretation,equation,[source+": "+", ".join(present)],"All retained optimization steps")
 
 
@@ -125,25 +135,25 @@ def training_page(rows):
     if not row: st.info("Select a discovered run from the Suite map."); return
     run_dir=str(row["selected_instance"].run_dir); history=read_csv(run_dir,"loss_history.csv")
     if history is None or history.empty: st.info("No saved loss_history.csv is available."); return
-    _history_plot(history,["loss"],"T1 · Total objective",r"L_{total}=L\ (saved)","Tracks the saved optimization objective.")
-    _history_plot(history,["loss_pde","loss_ic","loss_bc","loss_timestep","loss_data"],"T2 · Raw loss components",r"L_k\ before\ adaptive/objective\ weighting","Compares available explicitly saved raw constraint losses.")
+    _history_plot(history,["loss"],"T1 · Total objective",r"L_{total}=L\ (saved)","Tracks the saved optimization objective.",key="T1")
+    _history_plot(history,["loss_pde","loss_ic","loss_bc","loss_timestep","loss_data"],"T2 · Raw loss components",r"L_k\ before\ adaptive/objective\ weighting","Compares available explicitly saved raw constraint losses.",key="T2")
     objective=["objective_loss_pde","objective_loss_ic","objective_loss_bc","objective_loss_timestep","objective_loss_data"]
     if not available_columns(history,objective)[0]: objective=["weighted_loss_pde","weighted_loss_ic","weighted_loss_bc","weighted_loss_timestep","weighted_loss_data"]
-    _history_plot(history,objective,"T3 · Weighted/objective components",r"L_{objective,k}\ (saved)","Compares exact saved weighted contributions; the viewer does not reconstruct them.")
-    _history_plot(history,["w_pde","w_ic","w_bc","w_timestep","w_data"],"T4 · Adaptive weights",r"w_k\ (saved)","Tracks optimizer loss-balancing weights.")
+    _history_plot(history,objective,"T3 · Weighted/objective components",r"L_{objective,k}\ (saved)","Compares exact saved weighted contributions; the viewer does not reconstruct them.",key="T3")
+    _history_plot(history,["w_pde","w_ic","w_bc","w_timestep","w_data"],"T4 · Adaptive weights",r"w_k\ (saved)","Tracks optimizer loss-balancing weights.",key="T4")
     st.subheader("T5 · Per-term weighting gradients")
     expected=["grad_norm_pde_for_weighting","grad_norm_ic_for_weighting","grad_norm_bc_for_weighting","grad_norm_timestep_for_weighting","grad_norm_data_for_weighting"]
     present,missing=available_columns(history,expected)
     if present:
-        st.plotly_chart(px.line(history,x="step",y=present,labels={"step":"optimization step"}),use_container_width=True); _explain("Shows only retained adaptive-weighting gradient norms.",r"\|\nabla_\theta L_k\|\ (saved)",["loss_history.csv: "+", ".join(present)])
+        fig=px.line(history,x="step",y=present,labels={"step":"optimization step"}); fig=plot_scale_controls(st,fig,key="T5",log_y=True); st.plotly_chart(fig,use_container_width=True); _explain("Shows only retained adaptive-weighting gradient norms.",r"\|\nabla_\theta L_k\|\ (saved)",["loss_history.csv: "+", ".join(present)])
     else: st.info("Per-term gradient-weighting diagnostics were not retained in this HPC output.")
     if missing: st.caption("Missing expected columns: "+", ".join(missing))
-    _history_plot(history,["grad_norm"],"T6 · Overall gradient norm",r"\|\nabla_\theta L\|","Tracks the saved total network gradient norm.")
+    _history_plot(history,["grad_norm"],"T6 · Overall gradient norm",r"\|\nabla_\theta L\|","Tracks the saved total network gradient norm.",key="T6")
     st.subheader("T7 · Learning rates")
     learning_rates, _ = available_columns(history, ["lr","rmax_lr","data_cv_lr","effort_lr"])
     if learning_rates:
         learning_rate = st.selectbox("Learning-rate group", learning_rates)
-        st.plotly_chart(px.line(history, x="step", y=learning_rate, labels={"step":"optimization step"}), use_container_width=True)
+        fig=px.line(history, x="step", y=learning_rate, labels={"step":"optimization step"}); fig=plot_scale_controls(st,fig,key="T7",log_y=True); st.plotly_chart(fig, use_container_width=True)
         _explain("Shows one saved network or inverse-parameter learning rate without mixing incomparable scales.", r"\eta_g(step)\ (saved)", [f"loss_history.csv: {learning_rate}"])
     else: st.info("No saved learning-rate column is available.")
     st.subheader("T8 · Causal curriculum")
@@ -156,17 +166,17 @@ def training_page(rows):
             continue
         st.plotly_chart(px.line(history,x="step",y=column,title=title,labels={"step":"optimization step"}),use_container_width=True)
         _explain(interpretation, equation, [f"loss_history.csv: {column}"], "All retained optimization steps")
-    _history_plot(history,["pde_causal_weight_first","pde_causal_weight_mean","pde_causal_weight_last"],"T9a · Causal chunk weights",r"w_{first},mean(w_k),w_{last}","Tracks saved causal weighting across chunks.")
-    _history_plot(history,["pde_causal_chunk_loss_mean","pde_causal_chunk_loss_max"],"T9b · Causal chunk losses",r"mean(L_k),max(L_k)","Tracks saved causal chunk loss summaries.")
+    _history_plot(history,["pde_causal_weight_first","pde_causal_weight_mean","pde_causal_weight_last"],"T9a · Causal chunk weights",r"w_{first},mean(w_k),w_{last}","Tracks saved causal weighting across chunks.",key="T9a")
+    _history_plot(history,["pde_causal_chunk_loss_mean","pde_causal_chunk_loss_max"],"T9b · Causal chunk losses",r"mean(L_k),max(L_k)","Tracks saved causal chunk loss summaries.",key="T9b")
     fixed=read_csv(run_dir,"fixed_diagnostic_history.csv")
     if fixed is not None and not fixed.empty:
-        _history_plot(fixed,["fixed_residual_log_rms","fixed_residual_log_abs_mean","fixed_residual_log_abs_p95","fixed_residual_log_abs_max"],"T10 · Fixed-grid PDE residual history",r"RMS(R_{log}),mean|R_{log}|,p_{95}|R_{log}|,max|R_{log}|","This is the deterministic fixed diagnostic grid, not stochastic training collocation residual.","fixed_diagnostic_history.csv")
-        _history_plot(fixed,["rms_dlogN_dt","rms_advective","rms_mu","rms_dg_dw"],"T11 · Fixed-grid PDE-term RMS",r"R_{log}=\partial_t\log N+g\partial_w\log N+\mu+\partial_wg","Compares RMS magnitude of each saved PDE-balance term.","fixed_diagnostic_history.csv")
+        _history_plot(fixed,["fixed_residual_log_rms","fixed_residual_log_abs_mean","fixed_residual_log_abs_p95","fixed_residual_log_abs_max"],"T10 · Fixed-grid PDE residual history",r"RMS(R_{log}),mean|R_{log}|,p_{95}|R_{log}|,max|R_{log}|","This is the deterministic fixed diagnostic grid, not stochastic training collocation residual.","fixed_diagnostic_history.csv",key="T10")
+        _history_plot(fixed,["rms_dlogN_dt","rms_advective","rms_mu","rms_dg_dw"],"T11 · Fixed-grid PDE-term RMS",r"R_{log}=\partial_t\log N+g\partial_w\log N+\mu+\partial_wg","Compares RMS magnitude of each saved PDE-balance term.","fixed_diagnostic_history.csv",key="T11")
     else: st.info("T10/T11 unavailable: no fixed_diagnostic_history.csv.")
     st.subheader("T12 · Runtime")
     if {"step","seconds_elapsed"}.issubset(history):
         runtime=interval_seconds_per_step(history)
-        st.plotly_chart(px.line(runtime,x="step",y="seconds_per_step",labels={"step":"optimization step"}),use_container_width=True)
+        fig=px.line(runtime,x="step",y="seconds_per_step",labels={"step":"optimization step"}); fig=plot_scale_controls(st,fig,key="T12",log_y=True); st.plotly_chart(fig,use_container_width=True)
         timing = read_csv(run_dir, "timing_summary.csv")
         total = float(runtime.seconds_elapsed.max())
         total_source = "loss_history.csv: seconds_elapsed"
