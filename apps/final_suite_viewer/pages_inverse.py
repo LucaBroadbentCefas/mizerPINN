@@ -14,6 +14,7 @@ from .inverse_analysis import (effort_errors, effort_recovery_summary,
                                fishing_mortality, reshape_selectivity,
                                rmax_recovery, rmse_log_ratio)
 from .loaders import read_csv, read_json
+from .state import MULTISPECIES_TRUTH, load_truth_state
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RMAX_TASKS = tuple(range(53, 62)); CV_TASKS = tuple(range(62, 66)); EFFORT_TASKS = tuple(range(66, 70))
@@ -31,6 +32,46 @@ def _read_numeric(path: str) -> np.ndarray:
     return pd.read_csv(path).apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
 
 
+@st.cache_data(show_spinner=False)
+def _rmax_species_names() -> dict[int, str]:
+    """Use canonical multispecies truth for display names, never inverse-output labels."""
+    if not MULTISPECIES_TRUTH.is_file():
+        return {}
+    try:
+        truth = load_truth_state(MULTISPECIES_TRUTH)
+    except Exception:
+        return {}
+    names = {}
+    for idx, name in truth[["species_idx", "species"]].drop_duplicates("species_idx").itertuples(index=False, name=None):
+        if pd.isna(idx) or pd.isna(name):
+            continue
+        text = str(name).strip()
+        if text and text.lower() != "nan":
+            names[int(idx)] = text
+    return names
+
+
+def _with_species_labels(data: pd.DataFrame, canonical: dict[int, str]) -> pd.DataFrame:
+    """Attach a guaranteed non-null display label while grouping by species_idx."""
+    out = data.copy()
+    idx = pd.to_numeric(out["species_idx"], errors="coerce")
+    labels = []
+    existing = out["species"] if "species" in out else pd.Series([None] * len(out), index=out.index)
+    for raw_idx, raw_name in zip(idx, existing):
+        if pd.isna(raw_idx):
+            labels.append("species ?")
+            continue
+        species_idx = int(raw_idx)
+        canonical_name = canonical.get(species_idx)
+        if canonical_name:
+            labels.append(canonical_name)
+            continue
+        existing_name = "" if pd.isna(raw_name) else str(raw_name).strip()
+        labels.append(existing_name if existing_name and existing_name.lower() != "nan" else f"species {species_idx}")
+    out["species_label"] = labels
+    return out
+
+
 def _input_dir(run_dir: str) -> Path | None:
     configured=read_json(run_dir).get("input_dir"); candidates=[]
     if configured:
@@ -43,9 +84,7 @@ def _rmax_truth(run_dir: str) -> tuple[np.ndarray | None,str]:
     candidates=[Path(run_dir)/"r_max_true.csv"]
     root=_input_dir(run_dir)
     # In recovery tasks r_max.csv is the deliberately perturbed *starting*
-    # value.  Falling back to it would make a failed recovery look exact.
-    # The suite copies r_max_true.csv into both the task input and run output;
-    # if neither copy is available the scientifically safe result is blocked.
+    # value. Falling back to it would make a failed recovery look exact.
     if root: candidates += [root/"r_max_true.csv"]
     for path in candidates:
         if path.is_file(): return _read_numeric(str(path)).reshape(-1),str(path)
@@ -66,24 +105,47 @@ def _rmax(rows):
     st.header("Rmax recovery"); by_id=_rows(rows); available=_available(rows,RMAX_TASKS)
     if not available: st.info("Rmax diagnostics unavailable: no tasks 53–61 were discovered."); return
     task=st.selectbox("Rmax recovery run",available,format_func=lambda i:f"{i}: {by_id[i]['display_label']}"); run=str(by_id[task]["selected_instance"].run_dir)
-    estimated=read_csv(run,"estimated_rmax.csv"); truth,truth_source=_rmax_truth(run)
+    estimated=read_csv(run,"estimated_rmax.csv"); truth,truth_source=_rmax_truth(run); canonical_names=_rmax_species_names()
     ready = estimated is not None and not estimated.empty and truth is not None
     selected = 0
+    selected_label = "species 0"
     if not ready:
         missing = "estimated_rmax.csv" if estimated is None or estimated.empty else truth_source
         st.warning(f"R1–R3 unavailable for the selected run: {missing} is required. Starting values are not used as truth. R4/R5 remain available where their run files exist.")
     else:
-        recovered=rmax_recovery(estimated,truth); species=list(recovered.species_idx.astype(int).unique()); selected=st.selectbox("Rmax species",species,format_func=lambda i:str(recovered.loc[recovered.species_idx==i,"species"].iloc[0] or f"species {i}"))
+        recovered=_with_species_labels(rmax_recovery(estimated,truth),canonical_names)
+        species=list(recovered.species_idx.astype(int).unique())
+        label_by_idx=(recovered[["species_idx","species_label"]].drop_duplicates("species_idx").assign(species_idx=lambda x:x.species_idx.astype(int)).set_index("species_idx").species_label.to_dict())
+        selected=st.selectbox("Rmax species",species,format_func=lambda i:label_by_idx.get(int(i),f"species {i}"))
+        selected_label=label_by_idx.get(int(selected),f"species {selected}")
         st.subheader("R1 · True versus final estimated Rmax")
-        fig=_one_to_one(px.scatter(recovered,x="true_r_max",y="estimated_r_max",hover_data=["species","true_r_max","estimated_r_max","ratio_to_truth"],log_x=True,log_y=True),recovered.true_r_max,recovered.estimated_r_max); st.plotly_chart(fig,use_container_width=True)
+        fig=_one_to_one(px.scatter(recovered,x="true_r_max",y="estimated_r_max",hover_data=["species_label","true_r_max","estimated_r_max","ratio_to_truth"],log_x=True,log_y=True),recovered.true_r_max,recovered.estimated_r_max); st.plotly_chart(fig,use_container_width=True)
         _explain("Checks final per-species recovery against the actual reference Rmax.",r"\rho_i=\widehat R_{max,i}/R_{max,i}^{true}",["estimated_rmax.csv",truth_source],f"task {task}")
         st.subheader("R2 · Rmax optimization trajectory"); history=read_csv(run,"rmax_history.csv")
         if history is None or history.empty or not {"step","species_idx","r_max"}.issubset(history): st.info("R2 unavailable: rmax_history.csv with step, species_idx, and r_max is required.")
         else:
-            show_all=st.checkbox("Show all species trajectories",False); plotted=history if show_all else history[history.species_idx==selected]
-            fig=px.line(plotted,x="step",y="r_max",color="species" if "species" in plotted else "species_idx",labels={"step":"optimization step"}); fig.add_hline(y=float(truth[selected]),line_dash="dash",annotation_text="true Rmax"); st.plotly_chart(fig,use_container_width=True)
-            _explain("Shows saved parameter optimization history, not model time.",r"\widehat R_{max,i}(optimization\ step)",["rmax_history.csv",truth_source],"all species" if show_all else f"species {selected}")
-        st.subheader("R3 · Final Rmax ratio"); fig=px.bar(recovered,x="species",y="ratio_to_truth"); fig.add_hline(y=1,line_dash="dash"); st.plotly_chart(fig,use_container_width=True)
+            history=_with_species_labels(history,canonical_names)
+            history["species_idx"]=pd.to_numeric(history.species_idx,errors="coerce").astype("Int64")
+            show_all=st.checkbox("Show all species trajectories",False)
+            plotted=history if show_all else history[history.species_idx==int(selected)]
+            plotted=plotted.sort_values(["species_idx","step"])
+            fig=px.line(plotted,x="step",y="r_max",color="species_label",labels={"step":"optimization step","species_label":"species"})
+            colour_by_species={trace.name:trace.line.color for trace in fig.data}
+            shown_species=sorted(plotted.species_idx.dropna().astype(int).unique())
+            if len(plotted):
+                x0=float(pd.to_numeric(plotted.step,errors="coerce").min()); x1=float(pd.to_numeric(plotted.step,errors="coerce").max())
+                for species_idx in shown_species:
+                    if species_idx >= len(truth):
+                        continue
+                    label=canonical_names.get(species_idx,f"species {species_idx}")
+                    fig.add_trace(go.Scatter(
+                        x=[x0,x1], y=[float(truth[species_idx]),float(truth[species_idx])],
+                        mode="lines", name=f"{label} truth", legendgroup=label,
+                        line={"dash":"dash","color":colour_by_species.get(label)},
+                    ))
+            st.plotly_chart(fig,use_container_width=True)
+            _explain("Shows each species as an independent saved Rmax optimization trajectory with its own dashed truth reference; rows are grouped by species_idx, never by the potentially missing saved species label.",r"\widehat R_{max,i}(optimization\ step)",["rmax_history.csv",truth_source],"all species" if show_all else selected_label)
+        st.subheader("R3 · Final Rmax ratio"); fig=px.bar(recovered,x="species_label",y="ratio_to_truth",labels={"species_label":"species"}); fig.add_hline(y=1,line_dash="dash"); st.plotly_chart(fig,use_container_width=True)
         _explain("A ratio of one is exact parameter recovery.",r"\rho_i=\widehat R_{max,i}/R_{max,i}^{true}",["estimated_rmax.csv",truth_source],f"task {task}")
     st.subheader("R4 · Initialization sensitivity"); species_mode=st.checkbox("R4 selected-species error",False,key="rmax_species_mode"); records=[]
     for task_id,factor in zip(range(53,57),(0.25,0.5,2.0,4.0)):
@@ -92,7 +154,7 @@ def _rmax(rows):
         if est is not None and not est.empty and true is not None: value=abs(np.log(float(est.loc[est.species_idx==selected,"estimated_r_max"].iloc[0])/true[selected])) if st.session_state.get("rmax_species_mode",False) else rmse_log_ratio(est.estimated_r_max,true)
         records.append({"start_factor":factor,"parameter_error":value})
     st.plotly_chart(px.line(pd.DataFrame(records),x="start_factor",y="parameter_error",markers=True),use_container_width=True)
-    _explain("Tests final Rmax sensitivity to four starting factors without treating starts as truth.",r"RMSE_{logR}=\sqrt{mean_i[\log(\widehat R_i/R_i^{true})]^2}",["tasks 53–56 estimated_rmax.csv","r_max_true.csv"],f"{'species '+str(selected) if species_mode else 'all species'}")
+    _explain("Tests final Rmax sensitivity to four starting factors without treating starts as truth.",r"RMSE_{logR}=\sqrt{mean_i[\log(\widehat R_i/R_i^{true})]^2}",["tasks 53–56 estimated_rmax.csv","r_max_true.csv"],selected_label if species_mode else "all species")
     st.subheader("R5 · Noisy Rmax recovery"); noisy=[]
     for task_id in range(57,62):
         row=by_id.get(task_id); rd=str(row["selected_instance"].run_dir) if row and row["selected_instance"] else ""; est=read_csv(rd,"estimated_rmax.csv") if rd else None; true,_=_rmax_truth(rd) if rd else (None,"")
@@ -101,7 +163,7 @@ def _rmax(rows):
     if noisy.empty: st.info("R5 unavailable: tasks 57–61 need estimated_rmax.csv and r_max_true.csv.")
     else:
         fig=px.scatter(noisy,x="replicate",y="error",hover_data=["noise_seed"]); fig.add_trace(go.Scatter(x=[3],y=[noisy.error.mean()],error_y={"type":"data","array":[noisy.error.std(ddof=1)]},mode="markers",name="mean ± 1 SD",marker={"symbol":"x","size":12})); st.plotly_chart(fig,use_container_width=True)
-        _explain("Summarises five noisy recovery replicates at true observation CV 0.3 and initial Rmax factor 0.5; error bars are ±1 sample SD, not a confidence interval.",r"RMSE_{logR}\ or\ |\log(\widehat R_i/R_i^{true})|",["tasks 57–61 inverse outputs"],f"{'species '+str(selected) if species_mode else 'all species'}")
+        _explain("Summarises five noisy recovery replicates at true observation CV 0.3 and initial Rmax factor 0.5; error bars are ±1 sample SD, not a confidence interval.",r"RMSE_{logR}\ or\ |\log(\widehat R_i/R_i^{true})|",["tasks 57–61 inverse outputs"],selected_label if species_mode else "all species")
 
 
 def _cv(rows):
