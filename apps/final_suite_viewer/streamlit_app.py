@@ -18,7 +18,8 @@ from apps.final_suite_viewer.pages_data_training import data_page, training_page
 from apps.final_suite_viewer.pages_experiments import experiment_page
 from apps.final_suite_viewer.pages_inverse import inverse_page
 from apps.final_suite_viewer.pages_state_pde import pde_page, state_page
-from apps.final_suite_viewer.state import find_truth_source, load_truth_state
+from apps.final_suite_viewer.state import (MULTISPECIES_TRUTH, SINGLE_SPECIES_TRUTH,
+                                           load_truth_state, truth_source_for_task)
 
 PROJECT_ROOT = REPO_ROOT / "HPC_clone"
 PAGES = (
@@ -51,7 +52,6 @@ def _technical_help(row: dict) -> str:
 
 
 def _select(task_id: int) -> None:
-    """Button callback runs before widgets are recreated on the next rerun."""
     st.session_state.selected_task_id = task_id
     st.session_state.page = "Selected run: State"
 
@@ -118,7 +118,7 @@ def _selected(rows: list[dict]) -> dict | None:
     return next((row for row in rows if row["task_id"] == task_id), None)
 
 
-def _placeholder(page: str, row: dict | None, truth_path: str) -> None:
+def _placeholder(page: str, row: dict | None) -> None:
     st.header(page)
     if row is None:
         st.info("Select an experiment from the Suite map.")
@@ -127,8 +127,6 @@ def _placeholder(page: str, row: dict | None, truth_path: str) -> None:
     st.caption(row["run_label"])
     if not row["selected_instance"]:
         st.warning("This expected suite task has no discovered local run.")
-    if page == "Selected run: State" and not truth_path:
-        st.error("Truth source unavailable: no canonical full time × species × weight truth export was found. Configure an explicit long-form truth CSV under Technical details; no PINN run is substituted as truth.")
     st.info("This scientific page is intentionally reserved for a later stage; this change provides navigation, discovery, truth loading, alignment, metrics, and explanation foundations only.")
 
 
@@ -144,7 +142,7 @@ def _show_file(path: Path) -> None:
         except OSError: st.warning("Unreadable file")
 
 
-def _technical(rows: list[dict], project_root: Path, truth_path: str) -> None:
+def _technical(rows: list[dict], project_root: Path) -> None:
     st.header("Technical details")
     st.markdown("Normal scientific navigation uses suite labels. Timestamp folders and infrastructure metadata are kept here.")
     row = _selected(rows)
@@ -165,15 +163,19 @@ def _technical(rows: list[dict], project_root: Path, truth_path: str) -> None:
             if chosen: _show_file(run.run_dir / chosen)
     else:
         st.info("Select a task to inspect its configuration, command, summary, files, and metadata.")
+
     st.subheader("Truth state")
-    if truth_path:
-        try:
-            truth = cached_truth(truth_path)
-            st.success(f"Loaded canonical truth from {truth_path}: {len(truth):,} positive active rows.")
-            st.dataframe(truth.head(100), use_container_width=True)
-        except Exception as exc: st.error(f"Truth source could not be loaded: {exc}")
-    else:
-        st.warning("No canonical full truth export was discovered. The fixture n.csv/n_init_full.csv files are initial-state inputs, and perfect.csv is observation data; neither is treated as full truth.")
+    st.code(f"Tasks 0–11:  {SINGLE_SPECIES_TRUTH}\nTasks 12–69: {MULTISPECIES_TRUTH}", language=None)
+    if row:
+        truth_path = truth_source_for_task(row["task_id"])
+        if truth_path.is_file():
+            try:
+                truth = cached_truth(str(truth_path))
+                st.success(f"Task {row['task_id']} uses {truth_path.name}: {len(truth):,} positive state rows.")
+                st.dataframe(truth.head(100), use_container_width=True)
+            except Exception as exc: st.error(f"Truth source could not be loaded: {exc}")
+        else:
+            st.error(f"Required truth file is missing: {truth_path}")
 
 
 def main() -> None:
@@ -181,7 +183,6 @@ def main() -> None:
     st.title("PINNmizer final HPC suite")
     st.session_state.setdefault("page", "Suite map")
     st.session_state.setdefault("refresh_token", 0)
-    automatic_truth = find_truth_source(PROJECT_ROOT)
     with st.sidebar:
         st.selectbox("Page", PAGES, key="page")
         selected = st.session_state.get("selected_task_id")
@@ -189,15 +190,13 @@ def main() -> None:
         with st.expander("Technical settings"):
             project_root = Path(st.text_input("Project root", str(PROJECT_ROOT))).expanduser()
             roots_text = st.text_area("Run roots (one per line)", "\n".join(RUN_ROOTS))
-            truth_path = st.text_input("Canonical truth CSV", str(automatic_truth or ""), help="Explicit long-form mizer truth only; never a PINN prediction.")
+            st.caption("Truth files are fixed by task and are not user-configurable.")
             if st.button("Refresh disk index"):
                 st.session_state.refresh_token += 1
                 st.cache_data.clear()
                 st.rerun()
     roots = tuple(line.strip() for line in roots_text.splitlines() if line.strip())
     rows = cached_discovery(str(project_root), roots, st.session_state.refresh_token)
-    # Reapply a duplicate choice on every rerun.  Mutating the cached row only
-    # on the Technical details page previously lost the choice on navigation.
     for row in rows:
         key = f"duplicate_instance_{row['task_id']}"
         if key in st.session_state and len(row["instances"]) > 1:
@@ -207,14 +206,14 @@ def main() -> None:
                 row["selected_instance"] = match
     page = st.session_state.page
     if page == "Suite map": _suite_map(rows)
-    elif page == "Selected run: State": state_page(rows, truth_path)
+    elif page == "Selected run: State": state_page(rows)
     elif page == "Selected run: PDE": pde_page(rows)
     elif page == "Selected run: Data": data_page(rows)
     elif page == "Selected run: Training": training_page(rows)
-    elif page == "Experiment analyses": experiment_page(rows, truth_path)
+    elif page == "Experiment analyses": experiment_page(rows)
     elif page == "Inverse parameter analyses": inverse_page(rows)
-    elif page == "Technical details": _technical(rows, project_root, truth_path)
-    else: _placeholder(page, _selected(rows), truth_path)
+    elif page == "Technical details": _technical(rows, project_root)
+    else: _placeholder(page, _selected(rows))
 
 
 if __name__ == "__main__":

@@ -12,13 +12,17 @@ from .analytics import (common_comparison_domain, error_by_species, error_by_tim
                         residual_aggregate, residual_summary)
 from .components import plot_explanation
 from .loaders import load_fixed_fields, load_prediction_state, load_w_max
-from .state import align_states, load_truth_state
+from .state import align_states, load_truth_state, truth_source_for_task
 
 
 @st.cache_data(show_spinner=False)
-def _aligned(run_dir: str, truth_path: str):
+def _aligned(run_dir: str, task_id: int):
     prediction = load_prediction_state(run_dir)
-    if prediction is None: return pd.DataFrame(), {}
+    if prediction is None:
+        return pd.DataFrame(), {}
+    truth_path = truth_source_for_task(task_id)
+    if not truth_path.is_file():
+        raise FileNotFoundError(f"Required truth file is missing: {truth_path}")
     return align_states(prediction, load_truth_state(truth_path), w_max=load_w_max(run_dir))
 
 
@@ -59,27 +63,39 @@ def _heatmap(data, value, title, symmetric=False):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def state_page(rows, truth_path: str):
+def state_page(rows):
     st.header("Selected run: State")
-    if not truth_path:
-        st.error("Truth source unavailable: configure a canonical full mizer truth CSV. Observation truth and PINN outputs are never substituted."); return
     initial = next((r for r in rows if r["task_id"] == st.session_state.get("selected_task_id") and r["selected_instance"]), None)
-    if not initial: st.info("Select a discovered run from the Suite map."); return
-    source, _ = _aligned(str(initial["selected_instance"].run_dir), truth_path)
+    if not initial:
+        st.info("Select a discovered run from the Suite map.")
+        return
+    initial_truth = truth_source_for_task(initial["task_id"])
+    if not initial_truth.is_file():
+        st.error(f"Required truth file is missing: {initial_truth}")
+        return
+    try:
+        source, _ = _aligned(str(initial["selected_instance"].run_dir), initial["task_id"])
+    except Exception as exc:
+        st.error(f"Truth/state alignment failed: {exc}")
+        return
     row, comparison, ctl = _shared_controls(rows, source)
-    if not ctl: st.warning("No saved prediction state is available."); return
-    run_dir = str(row["selected_instance"].run_dir); aligned, meta = _aligned(run_dir, truth_path)
+    if not ctl:
+        st.warning("No saved prediction state is available.")
+        return
+    truth_path = truth_source_for_task(row["task_id"])
+    run_dir = str(row["selected_instance"].run_dir); aligned, meta = _aligned(run_dir, row["task_id"])
     chosen = mask_domain(aligned[aligned.species_idx == ctl["species_idx"]], ctl["time_range"], ctl["weight_range"])
     compare_aligned = None
     if comparison:
-        compare_aligned, _ = _aligned(str(comparison["selected_instance"].run_dir), truth_path)
+        compare_aligned, _ = _aligned(str(comparison["selected_instance"].run_dir), comparison["task_id"])
         compare_aligned = mask_domain(compare_aligned[compare_aligned.species_idx == ctl["species_idx"]], ctl["time_range"], ctl["weight_range"])
 
+    st.caption(f"Truth source for task {row['task_id']}: {truth_path.name}")
     st.subheader("N3/N4 · State-error heatmap")
     mode = st.radio("Error display", ["Signed", "Absolute"], horizontal=True)
     display = chosen.assign(display=chosen.error_log10_N.abs() if mode == "Absolute" else chosen.error_log10_N)
     _heatmap(display, "display", f"{mode} state error", mode == "Signed")
-    plot_explanation(st, interpretation="Locates signed over/under-prediction or its magnitude. e=0 is exact; e≈+0.301 is about twice truth; e≈−0.301 is about half truth; e=+1 is ten times truth.", calculation=r"e(t,w)=\log_{10}N_{pred}-\log_{10}N_{true}", inputs=["fixed_grid_fields.csv or final_predictions_grid.csv", truth_path], selection=f"{ctl['species']}; t={ctl['time_range']}; w={ctl['weight_range']}", alignment=f"{meta.get('time_method')}; {meta.get('weight_method')}; no extrapolation; active species bins only")
+    plot_explanation(st, interpretation="Locates signed over/under-prediction or its magnitude. e=0 is exact; e≈+0.301 is about twice truth; e≈−0.301 is about half truth; e=+1 is ten times truth.", calculation=r"e(t,w)=\log_{10}N_{pred}-\log_{10}N_{true}", inputs=["fixed_grid_fields.csv or final_predictions_grid.csv", str(truth_path)], selection=f"{ctl['species']}; t={ctl['time_range']}; w={ctl['weight_range']}", alignment=f"{meta.get('time_method')}; {meta.get('weight_method')}; no extrapolation; active species bins only")
 
     st.subheader("N5 · Error through time")
     primary = error_by_time(chosen).assign(run=row["run_label"])
@@ -87,7 +103,7 @@ def state_page(rows, truth_path: str):
     if compare_aligned is not None:
         a, b = common_comparison_domain(chosen, compare_aligned); frames = [error_by_time(a).assign(run=row["run_label"]), error_by_time(b).assign(run=comparison["run_label"])]
     st.plotly_chart(px.line(pd.concat(frames), x="time", y="RMSE_log10N", color="run", markers=True), use_container_width=True)
-    plot_explanation(st, interpretation="Tracks state error through model time over the selected body-size interval.", calculation=r"RMSE(t)=\sqrt{\operatorname{mean}_w e(t,w)^2}", inputs=["aligned predicted and canonical truth states"], selection=f"{ctl['species']}; w={ctl['weight_range']}", alignment="Comparison runs are restricted to identical species/time/weight coordinates before aggregation.")
+    plot_explanation(st, interpretation="Tracks state error through model time over the selected body-size interval.", calculation=r"RMSE(t)=\sqrt{\operatorname{mean}_w e(t,w)^2}", inputs=["aligned predicted and task-specific mizer truth states"], selection=f"{ctl['species']}; w={ctl['weight_range']}", alignment="Comparison runs are each aligned to their own authoritative simulation truth, then restricted to identical species/time/weight coordinates before aggregation.")
 
     st.subheader("N6 · Error through body size")
     frames = [error_by_weight(chosen).assign(run=row["run_label"])]
@@ -95,13 +111,13 @@ def state_page(rows, truth_path: str):
         a, b = common_comparison_domain(chosen, compare_aligned); frames = [error_by_weight(a).assign(run=row["run_label"]), error_by_weight(b).assign(run=comparison["run_label"])]
     fig = px.line(pd.concat(frames), x="w", y="RMSE_log10N", color="run", markers=True); fig.update_xaxes(type="log", title="physical body weight w")
     st.plotly_chart(fig, use_container_width=True)
-    plot_explanation(st, interpretation="Shows which physical body sizes have greatest state error over the selected times.", calculation=r"RMSE(w)=\sqrt{\operatorname{mean}_t e(t,w)^2}", inputs=["aligned predicted and canonical truth states"], selection=f"{ctl['species']}; t={ctl['time_range']}", alignment="Linear alignment is in log-weight; display axis is physical w on a logarithmic scale.")
+    plot_explanation(st, interpretation="Shows which physical body sizes have greatest state error over the selected times.", calculation=r"RMSE(w)=\sqrt{\operatorname{mean}_t e(t,w)^2}", inputs=["aligned predicted and task-specific mizer truth states"], selection=f"{ctl['species']}; t={ctl['time_range']}", alignment="Linear alignment is in log-weight; display axis is physical w on a logarithmic scale.")
 
     all_primary = mask_domain(aligned, ctl["time_range"], ctl["weight_range"])
     st.subheader("N7 · Error by species")
     bars = [error_by_species(all_primary).assign(run=row["run_label"])]
     if comparison:
-        other, _ = _aligned(str(comparison["selected_instance"].run_dir), truth_path); other = mask_domain(other, ctl["time_range"], ctl["weight_range"]); a, b = common_comparison_domain(all_primary, other); bars = [error_by_species(a).assign(run=row["run_label"]), error_by_species(b).assign(run=comparison["run_label"])]
+        other, _ = _aligned(str(comparison["selected_instance"].run_dir), comparison["task_id"]); other = mask_domain(other, ctl["time_range"], ctl["weight_range"]); a, b = common_comparison_domain(all_primary, other); bars = [error_by_species(a).assign(run=row["run_label"]), error_by_species(b).assign(run=comparison["run_label"])]
     st.plotly_chart(px.bar(pd.concat(bars), x="species", y="RMSE_log10N", color="run", barmode="group"), use_container_width=True)
     plot_explanation(st, interpretation="Compares state accuracy among species, with each species restricted to its own active size domain.", calculation=r"RMSE_i=\sqrt{\operatorname{mean}_{t,w}e_i^2}", inputs=["aligned states", "species w_max"], selection=f"t={ctl['time_range']}; requested w={ctl['weight_range']}", alignment="Species active-weight masks are applied before aggregation.")
 
@@ -109,7 +125,7 @@ def state_page(rows, truth_path: str):
     fold_mode = st.radio("Fold-error aggregation", ["By species", "All valid cells"], horizontal=True)
     folds = fold_by_species(all_primary) if fold_mode == "By species" else pd.DataFrame({"group": ["All valid cells"], "fold_error": [10 ** np.mean(np.abs(all_primary.error_log10_N))]})
     x = "species" if fold_mode == "By species" else "group"; st.plotly_chart(px.bar(folds, x=x, y="fold_error"), use_container_width=True)
-    plot_explanation(st, interpretation="Summarises typical unsigned multiplicative disagreement: 1 is exact and 2 is a typical factor-of-two difference.", calculation=r"F=10^{\operatorname{mean}|e|}", inputs=["aligned predicted and canonical truth states"], selection=f"t={ctl['time_range']}; w={ctl['weight_range']}", alignment="All aggregation uses valid active cells only.")
+    plot_explanation(st, interpretation="Summarises typical unsigned multiplicative disagreement: 1 is exact and 2 is a typical factor-of-two difference.", calculation=r"F=10^{\operatorname{mean}|e|}", inputs=["aligned predicted and task-specific mizer truth states"], selection=f"t={ctl['time_range']}; w={ctl['weight_range']}", alignment="All aggregation uses valid active cells only.")
 
     st.subheader("N9 · State comparison profile")
     profile_mode = st.radio("Profile mode", ["Across body size", "Through time"], horizontal=True); scale = st.radio("Display", ["log10(N)", "physical N"], horizontal=True)
@@ -118,7 +134,7 @@ def state_page(rows, truth_path: str):
         profile = chosen[np.isclose(chosen.time, nearest_time)]; x, xlabel = "w", "physical body weight w"
     else:
         profile = chosen[np.isclose(chosen.w, nearest_w)]; x, xlabel = "time", "model time"
-    value_cols = ["true_log10_N", "pred_log10_N"]; labels = {"true_log10_N": "Canonical mizer truth", "pred_log10_N": row["run_label"]}
+    value_cols = ["true_log10_N", "pred_log10_N"]; labels = {"true_log10_N": "Task-specific mizer truth", "pred_log10_N": row["run_label"]}
     long = profile[[x]+value_cols].melt(x, var_name="source", value_name="log10_N"); long.source = long.source.map(labels)
     if compare_aligned is not None:
         comparison_coordinate = float(
@@ -130,7 +146,7 @@ def state_page(rows, truth_path: str):
         extra = cp[[x, "pred_log10_N"]].rename(columns={"pred_log10_N":"log10_N"}); extra["source"] = comparison["run_label"]; long = pd.concat([long, extra])
     y = "log10_N" if scale == "log10(N)" else "N"; long["N"] = 10**long.log10_N
     fig = px.line(long, x=x, y=y, color="source", markers=True); fig.update_xaxes(title=xlabel, type="log" if x == "w" else None); st.plotly_chart(fig, use_container_width=True)
-    plot_explanation(st, interpretation="Always compares saved PINN state with canonical mizer truth at one requested coordinate.", calculation=r"N=10^{\log_{10}N}", inputs=["aligned predicted state", truth_path], selection=f"requested t={ctl['time']}, mapped to t={nearest_time}; requested w={ctl['weight']}, mapped to w={nearest_w}", alignment=f"{meta.get('weight_method')}; {meta.get('time_method')}; plotted coordinate uses the nearest available aligned cell.")
+    plot_explanation(st, interpretation="Always compares saved PINN state with the authoritative mizer truth for that task at one requested coordinate.", calculation=r"N=10^{\log_{10}N}", inputs=["aligned predicted state", str(truth_path)], selection=f"requested t={ctl['time']}, mapped to t={nearest_time}; requested w={ctl['weight']}, mapped to w={nearest_w}", alignment=f"{meta.get('weight_method')}; {meta.get('time_method')}; plotted coordinate uses the nearest available aligned cell.")
 
 
 def pde_page(rows):
