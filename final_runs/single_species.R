@@ -27,6 +27,10 @@ for (i in seq_len(nrow(run_spec))) {
 
   names(sim_long)[1:3] <- c("time", "species", "weight")
 
+  export_mizer_inputs_for_python(new_params,
+                                 outdir = paste0("validation/fixtures/pde_single_species/",run_spec[i,4])
+                                 )
+
   sim_long$time   <- as.numeric(sim_long$time)
   sim_long$weight <- as.numeric(sim_long$weight)
   sim_long$species <- as.character(sim_long$species)

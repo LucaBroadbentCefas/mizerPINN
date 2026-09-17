@@ -45,21 +45,47 @@ def load_fixed_fields(run_dir: str) -> pd.DataFrame | None:
     path = _fixed_csv_path(Path(run_dir))
     if path is None:
         return None
+
     try:
         data = pd.read_csv(path)
     except (OSError, pd.errors.EmptyDataError):
         return pd.DataFrame()
-    data = data.rename(columns={"t_eval": "time", "x_eval": "x", "w_eval": "w", "g_eval": "g", "mu_eval": "mu"})
+
+    aliases = {
+        "t_eval": "time",
+        "t": "time",
+        "x_eval": "x",
+        "w_eval": "w",
+        "g_eval": "g",
+        "mu_eval": "mu",
+    }
+
+    for source, target in aliases.items():
+        if target not in data.columns and source in data.columns:
+            data = data.rename(columns={source: target})
+
     if "species_idx" not in data:
         data["species_idx"] = 0
+
     if "species" not in data:
-        data["species"] = data.species_idx.map(lambda value: f"species_{int(value)}")
+        data["species"] = data.species_idx.map(
+            lambda value: f"species_{int(value)}"
+        )
+
     if "w" not in data and "x" in data:
-        data["w"] = np.exp(pd.to_numeric(data.x, errors="coerce"))
+        data["w"] = np.exp(
+            pd.to_numeric(data["x"], errors="coerce")
+        )
+
     for column in data.columns.difference(["species"]):
-        data[column] = pd.to_numeric(data[column], errors="coerce")
-    if "advective" not in data and {"g", "dlogN_dw"}.issubset(data):
-        data["advective"] = data.g * data.dlogN_dw
+        data[column] = pd.to_numeric(
+            data[column],
+            errors="coerce",
+        )
+
+    if "advective" not in data and {"g", "dlogN_dw"}.issubset(data.columns):
+        data["advective"] = data["g"] * data["dlogN_dw"]
+
     return _restore_single_species_identity(data, run_dir)
 
 
