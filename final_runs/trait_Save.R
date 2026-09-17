@@ -4,7 +4,11 @@ library(tidyr)
 library(purrr)
 library(tibble)
 
+new_NS <- mizer::NS_params
 
+new_NS$interaction[] <- 0.75
+
+new_NS <- tuneSteadyState(new_NS)
 
 gears <- gear_params(mizer::NS_params)
 
@@ -16,14 +20,15 @@ survey_gears <- data.frame(
   knife_edge_size = rep(15,12)
 )
 
-gear_params(NS_params) <- rbind(gears, survey_gears)
+gear_params(new_NS) <- rbind(gears, survey_gears)
 effort <- initial_effort(NS_params)
 effort[5] <- 0.02
+names(effort)[5] <- "survey"
 effort[2] <- 0.6
 effort[4] <- 3
-initial_effort(NS_params) <- effort
+initial_effort(new_NS) <- effort
 
-sim <- project(NS_params, t_max = 40, t_save = 0.1, effort  = effort)
+sim_trait <- project(new_NS, t_max = 40, t_save = 0.1, effort  = effort)
 
 make_observation_data <- function(sim, cv, survey_gear_name = "survey") {
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=pinn_final_suite
-#SBATCH --cpus-per-task=24
-#SBATCH --mem=24G
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=12G
 #SBATCH --time=48:00:00
 #SBATCH --output=slurm_logs/%x_%A_%a.out
 #SBATCH --error=slurm_logs/%x_%A_%a.err
@@ -377,7 +377,8 @@ run_multispecies() {
     local cv_init="$7"
     local estimate_effort="$8"
     local effort_init="$9"
-
+    local lambda_ic="${10:-1.0}"
+    local lambda_bc="${11:-1.0}"
     require_dir "${INPUT_DIR}"
     if [[ -n "${DATA_CSV}" ]]; then
         require_file "${DATA_CSV}"
@@ -412,8 +413,8 @@ run_multispecies() {
         --lambda-bc 1.0
 
         --initial-w-pde 1.0
-        --initial-w-ic 1.0
-        --initial-w-bc 0.1
+        --lambda-ic "${lambda_ic}"
+        --lambda-bc "${lambda_bc}"
         --initial-w-data 1.0
 
         --lambda-data "${lambda_data}"
@@ -428,7 +429,7 @@ run_multispecies() {
         --causal-loss expert
         --causal-curriculum linear
         --causal-start-fraction 0.05
-        --causal-ramp-steps 20000
+        --causal-ramp-steps 10000
         --causal-step-fractions "0.05,0.10,0.20,0.40,0.70,1.0"
         --causal-n-chunks 64
         --causal-epsilon 1.0
@@ -633,23 +634,23 @@ if (( TASK_ID >= 44 && TASK_ID <= 49 )); then
     exit 0
 fi
 
-# 50-52: lambda_PDE = 0 comparisons.
-# Only lambda_PDE changes relative to the corresponding primary experiment.
+# 50-52: data-only NN comparisons.
+# PDE, initial-condition, and boundary-condition losses are disabled.
 if (( TASK_ID == 50 )); then
     DATA_CSV="${DATA_VARIANTS_DIR}/perfect.csv"
-    run_multispecies "lambdaPDE0_perfect" "0.0" "1.0" "0" "0" "0" "" "0" ""
+    run_multispecies "lambdaPDE0_perfect" "0.0" "1.0" "0" "0" "0" "" "0" "" "0.0" "0.0"
     exit 0
 fi
 
 if (( TASK_ID == 51 )); then
     prepare_noisy_data "0.3" "${NOISE_SEEDS[0]}" "lambdaPDE0_noise"
-    run_multispecies "lambdaPDE0_noise_cv0p3_rep1" "0.0" "1.0" "1" "0" "0" "" "0" ""
+    run_multispecies "lambdaPDE0_noise_cv0p3_rep1" "0.0" "1.0" "1" "0" "0" "" "0" "" "0.0" "0.0"
     exit 0
 fi
 
 if (( TASK_ID == 52 )); then
     DATA_CSV="${DATA_VARIANTS_DIR}/gap_30_40.csv"
-    run_multispecies "lambdaPDE0_gap_30_40" "0.0" "1.0" "0" "0" "0" "" "0" ""
+    run_multispecies "lambdaPDE0_gap_30_40" "0.0" "1.0" "0" "0" "0" "" "0" "" "0.0" "0.0"
     exit 0
 fi
 

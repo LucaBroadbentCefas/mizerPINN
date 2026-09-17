@@ -29,8 +29,9 @@ survey_gears <- data.frame(
 )
 
 gear_params(NS_params) <- rbind(gears, survey_gears)
-effort <- initial_effort(NS_params)
+effort <- initial_effort(mizer::NS_params)
 effort[5] <- 0.02
+names(effort)[5] <- "survey"
 effort[2] <- 0.6
 effort[4] <- 3
 initial_effort(NS_params) <- effort
