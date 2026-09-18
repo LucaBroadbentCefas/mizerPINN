@@ -178,13 +178,13 @@ def _technical(rows: list[dict], project_root: Path) -> None:
             st.error(f"Required truth file is missing: {truth_path}")
 
 
-@st.fragment(key="state-analysis")
+@st.fragment
 def _state_fragment(rows: list[dict]) -> None:
     """Rerun only State controls/plots when State-page widgets change."""
     state_page(rows)
 
 
-@st.fragment(key="pde-analysis")
+@st.fragment
 def _pde_fragment(rows: list[dict]) -> None:
     """Rerun only PDE controls/plots when PDE-page widgets change."""
     pde_page(rows)
