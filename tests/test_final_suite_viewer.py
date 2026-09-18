@@ -9,7 +9,7 @@ from apps.final_suite_viewer.catalogue import BY_TASK_ID, build_catalogue
 from apps.final_suite_viewer.analytics import (
     available_columns, common_comparison_domain, cv_to_sigma,
     denoising_metrics, discrepancy_action, discrepancy_q, error_by_species,
-    error_by_time, error_by_weight, interval_seconds_per_step, mask_domain,
+    error_by_species_time, error_by_time, error_by_weight, interval_seconds_per_step, mask_domain,
     pde_balance, prepare_observations, rank_misfits, residual_aggregate,
     state_error_table,
 )
@@ -183,6 +183,17 @@ def test_species_aggregation_fold_and_range_masking():
     assert species.RMSE_log10N.tolist() == pytest.approx([np.sqrt(1.5), 1])
     selected = mask_domain(data, (1, 1), (1, 1))
     assert len(selected) == 1 and selected.error_log10_N.iloc[0] == 2
+
+
+def test_species_time_error_keeps_species_separate():
+    data = _aligned_errors()
+    result = error_by_species_time(data)
+    sp0 = result[result.species_idx == 0].sort_values("time")
+    sp1 = result[result.species_idx == 1].sort_values("time")
+    assert sp0.RMSE_log10N.tolist() == pytest.approx([1.0, np.sqrt(2.0)])
+    assert sp1.RMSE_log10N.tolist() == pytest.approx([1.0])
+    assert sp0.time.tolist() == [0, 1]
+    assert sp1.time.tolist() == [0]
 
 
 def test_comparison_domain_is_exactly_common():
