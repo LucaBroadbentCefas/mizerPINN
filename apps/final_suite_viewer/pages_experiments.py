@@ -9,12 +9,15 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from .analytics import common_comparison_domain, error_by_species, error_by_time, mask_domain
+from .analytics import (common_comparison_domain, error_by_species, error_by_time,
+                        error_by_weight, mask_domain)
 from .components import plot_explanation
 from .experiment_analysis import (CVS, NN_SCENARIOS, ablation_task_matrix,
-                                  gap_mask, missing_seen_metrics,
-                                  missing_species_mask, noise_design,
-                                  noise_summary, paired_cv_differences,
+                                  common_replicate_domain, gap_mask,
+                                  missing_seen_metrics, missing_species_mask,
+                                  noise_design, noise_summary,
+                                  paired_cv_differences,
+                                  replicate_species_metrics,
                                   retained_omitted_years, year_location_mask)
 from .loaders import load_fixed_fields, load_prediction_state, load_w_max, read_csv
 from .metrics import fold_error, state_rmse
@@ -104,6 +107,249 @@ def _noise_section(rows, truth):
     st.metric("Mean paired difference",f"{differences.mean():.5g}"); st.metric("SD of paired differences",f"{differences.std(ddof=1):.5g}")
     st.dataframe(summary.rename(columns={"mean":"mean","sd":"SD","minimum":"minimum","maximum":"maximum"}),use_container_width=True)
     _explain("Positive differences mean worse performance at the second CV for the error metrics; negative means better. No significance test is performed.",r"\Delta M_r(c_2,c_1)=M(c_2,r)-M(c_1,r)", ["matched noise_seed catalogue fields"],f"CV {cv2} minus CV {cv1}; {metric}","Only identical noise seeds are paired.")
+    _replicate_comparison(rows)
+
+
+
+def _replicate_comparison(rows):
+    st.header("Detailed replicate comparison")
+    st.caption("Direct comparison of the five gate-ON fits at one observation CV. State errors use the same aligned mizer truth and are restricted to cells shared by every available replicate.")
+
+    by_id = _row_map(rows)
+    cv = st.selectbox("Replicate comparison CV", CVS, index=2, key="replicate_compare_cv")
+    design = noise_design()
+    selected = design[(design.gate) & np.isclose(design.cv.astype(float), float(cv))].sort_values("replicate")
+
+    frames = {}
+    histories = {}
+    for item in selected.itertuples(index=False):
+        row = by_id.get(int(item.task_id))
+        run = row and row["selected_instance"]
+        if not run:
+            continue
+        run_dir = str(run.run_dir)
+        aligned = _aligned(run_dir, int(item.task_id))
+        if aligned is not None and not aligned.empty:
+            frames[int(item.replicate)] = aligned
+        history = read_csv(run_dir, "loss_history.csv")
+        if history is not None and not history.empty:
+            histories[int(item.replicate)] = history
+
+    if len(frames) < 2:
+        st.info("At least two discovered gate-ON replicates with aligned state output are required.")
+        return
+
+    frames = common_replicate_domain(frames)
+    if not frames or any(frame.empty for frame in frames.values()):
+        st.info("The available replicates have no common state-comparison cells.")
+        return
+
+    common_species = sorted(set.intersection(*[set(frame.species_idx.astype(int).unique()) for frame in frames.values()]))
+    if not common_species:
+        st.info("The available replicates have no common species.")
+        return
+    names = {}
+    for frame in frames.values():
+        if "species" in frame:
+            names.update(dict(frame[["species_idx", "species"]].drop_duplicates().itertuples(index=False, name=None)))
+    species = st.selectbox(
+        "Replicate species",
+        common_species,
+        format_func=lambda x: names.get(x, f"species {x}"),
+        key="replicate_compare_species",
+    )
+    species_frames = {rep: frame[frame.species_idx.astype(int).eq(species)].copy() for rep, frame in frames.items()}
+    st.caption(f"CV {cv:g}; {len(species_frames)} available replicates; comparisons use the exact common species/time/weight domain.")
+
+    st.subheader("R1 · State fit across replicates")
+    state_view = st.radio(
+        "State slice",
+        ["Across weight at selected time", "Through time at selected weight"],
+        horizontal=True,
+        key="replicate_state_slice",
+    )
+    state_display = st.radio(
+        "State display",
+        ["Prediction", "Signed error", "Absolute error"],
+        horizontal=True,
+        key="replicate_state_display",
+    )
+    state_layout = st.radio(
+        "State layout",
+        ["Overlay", "Small multiples"],
+        horizontal=True,
+        key="replicate_state_layout",
+    )
+
+    first = next(iter(species_frames.values()))
+    if state_view.startswith("Across weight"):
+        values = sorted(first.time.unique().tolist())
+        selected_coord = st.select_slider("State time", values, value=values[len(values) // 2], key="replicate_state_time")
+        x_col = "w"
+        sliced = {rep: frame[np.isclose(frame.time, selected_coord)].copy() for rep, frame in species_frames.items()}
+        selection_text = f"species {species}; time={selected_coord:g}"
+    else:
+        values = sorted(first.w.unique().tolist())
+        selected_coord = st.select_slider("State body weight w", values, value=values[len(values) // 2], key="replicate_state_weight")
+        x_col = "time"
+        sliced = {rep: frame[np.isclose(frame.w, selected_coord)].copy() for rep, frame in species_frames.items()}
+        selection_text = f"species {species}; w={selected_coord:g}"
+
+    plot_rows = []
+    for rep, frame in sliced.items():
+        frame = frame.sort_values(x_col)
+        if state_display == "Prediction":
+            y = frame.pred_log10_N
+        elif state_display == "Signed error":
+            y = frame.error_log10_N
+        else:
+            y = frame.error_log10_N.abs()
+        plot_rows.append(pd.DataFrame({x_col: frame[x_col], "value": y, "replicate": f"rep{rep}"}))
+    state_plot = pd.concat(plot_rows, ignore_index=True)
+
+    if state_layout == "Overlay":
+        fig = px.line(state_plot, x=x_col, y="value", color="replicate")
+        if state_display == "Prediction":
+            truth_slice = next(iter(sliced.values())).sort_values(x_col)
+            fig.add_trace(go.Scatter(x=truth_slice[x_col], y=truth_slice.true_log10_N, mode="lines", name="mizer truth", line={"width": 4}))
+        elif state_display == "Signed error":
+            fig.add_hline(y=0, line_dash="dash")
+    else:
+        if state_display == "Prediction":
+            facet_rows = []
+            truth_slice = next(iter(sliced.values())).sort_values(x_col)
+            for rep, frame in sliced.items():
+                frame = frame.sort_values(x_col)
+                facet_rows.append(pd.DataFrame({x_col: frame[x_col], "value": frame.pred_log10_N, "series": "PINN", "replicate": f"rep{rep}"}))
+                facet_rows.append(pd.DataFrame({x_col: truth_slice[x_col], "value": truth_slice.true_log10_N, "series": "mizer truth", "replicate": f"rep{rep}"}))
+            facet_data = pd.concat(facet_rows, ignore_index=True)
+            fig = px.line(facet_data, x=x_col, y="value", color="series", facet_col="replicate", facet_col_wrap=3)
+        else:
+            fig = px.line(state_plot, x=x_col, y="value", facet_col="replicate", facet_col_wrap=3)
+            if state_display == "Signed error":
+                fig.add_hline(y=0, line_dash="dash", row="all", col="all")
+    if x_col == "w":
+        fig.update_xaxes(type="log")
+    fig.update_yaxes(title="log10 N" if state_display == "Prediction" else ("log10 error" if state_display == "Signed error" else "|log10 error|"))
+    st.plotly_chart(fig, use_container_width=True)
+    _explain(
+        "Shows the fitted state functions themselves rather than reducing each replicate to one score. Prediction mode includes the common mizer truth; error modes compare the same state cells directly.",
+        r"e_r(t,w)=\log_{10}\hat N_r(t,w)-\log_{10}N_{true}(t,w)",
+        ["aligned replicate state predictions", "task-specific mizer truth"],
+        selection_text,
+        "All available replicates are restricted to identical species/time/weight cells before plotting.",
+    )
+
+    st.subheader("R2 · Error comparison")
+
+    weights = sorted(first.w.unique().tolist())
+    weight_range = st.select_slider(
+        "Weight range used for RMSE through time",
+        weights,
+        value=(weights[0], weights[-1]),
+        key="replicate_error_weight_range",
+    )
+    time_curves = []
+    for rep, frame in species_frames.items():
+        curve = error_by_time(mask_domain(frame, weight_range=weight_range)).assign(replicate=f"rep{rep}")
+        time_curves.append(curve)
+    time_curves = pd.concat(time_curves, ignore_index=True)
+    st.plotly_chart(px.line(time_curves, x="time", y="RMSE_log10N", color="replicate"), use_container_width=True)
+    _explain(
+        "Shows when replicate fits separate in state accuracy. The selected weight range is applied identically to every replicate.",
+        r"RMSE_r(t)=\sqrt{mean_w\{e_r(t,w)^2\}}",
+        ["common-domain aligned state"],
+        f"species {species}; w in [{weight_range[0]:g}, {weight_range[1]:g}]",
+    )
+
+    times = sorted(first.time.unique().tolist())
+    time_range = st.select_slider(
+        "Time range used for RMSE across weight",
+        times,
+        value=(times[0], times[-1]),
+        key="replicate_error_time_range",
+    )
+    weight_curves = []
+    for rep, frame in species_frames.items():
+        curve = error_by_weight(mask_domain(frame, time_range=time_range)).assign(replicate=f"rep{rep}")
+        weight_curves.append(curve)
+    weight_curves = pd.concat(weight_curves, ignore_index=True)
+    fig = px.line(weight_curves, x="w", y="RMSE_log10N", color="replicate")
+    fig.update_xaxes(type="log")
+    st.plotly_chart(fig, use_container_width=True)
+    _explain(
+        "Shows which body-size regions differ in accuracy between replicates. The selected time range is applied identically to every replicate.",
+        r"RMSE_r(w)=\sqrt{mean_t\{e_r(t,w)^2\}}",
+        ["common-domain aligned state"],
+        f"species {species}; t in [{time_range[0]:g}, {time_range[1]:g}]",
+    )
+
+    species_metrics = replicate_species_metrics(frames)
+    metric_options = {
+        "RMSE log10N": "RMSE_log10N",
+        "Fold error": "fold_error",
+        "Mean absolute log10 error": "MAE_log10N",
+    }
+    metric_label = st.selectbox("Species × replicate error metric", list(metric_options), key="replicate_species_metric")
+    metric_col = metric_options[metric_label]
+    species_metrics["species_label"] = species_metrics.apply(
+        lambda row: str(row["species"]) if "species" in species_metrics.columns and pd.notna(row.get("species")) else f"species {int(row.species_idx)}",
+        axis=1,
+    )
+    matrix = species_metrics.pivot(index="species_label", columns="replicate", values=metric_col)
+    matrix = matrix.reindex(columns=sorted(matrix.columns))
+    fig = px.imshow(matrix, text_auto=".3g", aspect="auto", labels={"x": "replicate", "y": "species", "color": metric_label})
+    st.plotly_chart(fig, use_container_width=True)
+    _explain(
+        "Separates a globally poor replicate from species-specific instability. Every heatmap cell is calculated on the common replicate comparison domain.",
+        r"RMSE_{s,r}=\sqrt{mean_{t,w}(e_{s,r}^2)};\quad F_{s,r}=10^{mean|e_{s,r}|}",
+        ["common-domain aligned state"],
+        metric_label,
+    )
+
+    st.subheader("R3 · Training comparison")
+    component_columns = {
+        "Total": "loss",
+        "PDE": "loss_pde",
+        "Data": "loss_data",
+        "IC": "loss_ic",
+        "BC": "loss_bc",
+    }
+    available_components = [
+        label for label, column in component_columns.items()
+        if sum(column in history and pd.to_numeric(history[column], errors="coerce").notna().any() for history in histories.values()) >= 2
+    ]
+    if not available_components:
+        st.info("At least two replicate loss histories with a common saved loss component are required.")
+        return
+    component = st.selectbox("Training loss component", available_components, key="replicate_training_component")
+    column = component_columns[component]
+    history_rows = []
+    for rep, history in histories.items():
+        if column not in history or "step" not in history:
+            continue
+        values = pd.DataFrame({
+            "step": pd.to_numeric(history["step"], errors="coerce"),
+            "value": pd.to_numeric(history[column], errors="coerce"),
+            "replicate": f"rep{rep}",
+        }).dropna()
+        history_rows.append(values)
+    history_plot = pd.concat(history_rows, ignore_index=True) if history_rows else pd.DataFrame()
+    if history_plot.empty:
+        st.info(f"No usable saved {component} histories are available.")
+        return
+    positive = bool((history_plot.value > 0).all())
+    fig = px.line(history_plot, x="step", y="value", color="replicate", log_y=positive)
+    st.plotly_chart(fig, use_container_width=True)
+    if not positive:
+        st.caption("Linear y-axis used because this saved loss component contains zero or negative values.")
+    _explain(
+        "Compares optimization trajectories for the same saved loss component across replicates. This helps distinguish different final fits from different training paths.",
+        rf"{column}(step)\quad\text{{as saved during training}}",
+        [f"loss_history.csv: step, {column}"],
+        f"CV {cv:g}; {component}",
+        "Optimization steps are not interpolated; each replicate uses its own retained history rows.",
+    )
 
 
 @st.cache_data(show_spinner=False)
