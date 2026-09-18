@@ -38,6 +38,11 @@ def error_by_species(aligned: pd.DataFrame) -> pd.DataFrame:
     return aligned.groupby(keys, as_index=False).error_log10_N.agg(lambda x: state_rmse(x)).rename(columns={"error_log10_N": "RMSE_log10N"})
 
 
+def error_by_species_time(aligned: pd.DataFrame) -> pd.DataFrame:
+    keys = ["species_idx"] + (["species"] if "species" in aligned else []) + ["time"]
+    return aligned.groupby(keys, as_index=False).error_log10_N.agg(lambda x: state_rmse(x)).rename(columns={"error_log10_N": "RMSE_log10N"})
+
+
 def fold_by_species(aligned: pd.DataFrame) -> pd.DataFrame:
     keys = ["species_idx"] + (["species"] if "species" in aligned else [])
     return aligned.groupby(keys, as_index=False).error_log10_N.agg(lambda x: fold_error(x)).rename(columns={"error_log10_N": "fold_error"})
