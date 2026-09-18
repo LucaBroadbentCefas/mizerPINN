@@ -7,8 +7,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from .analytics import (common_comparison_domain, error_by_species, error_by_time,
-                        error_by_weight, fold_by_species, mask_domain, pde_balance,
+from .analytics import (common_comparison_domain, error_by_species,
+                        error_by_species_time, error_by_time, error_by_weight,
+                        fold_by_species, mask_domain, pde_balance,
                         residual_aggregate, residual_summary)
 from .components import plot_explanation, plot_scale_controls
 from .loaders import load_fixed_fields, load_prediction_state, load_w_max
@@ -86,6 +87,156 @@ def _heatmap(data, value, title, symmetric=False):
     return True
 
 
+def _multi_species_state_overview(aligned: pd.DataFrame, row, truth_path):
+    species_rows = aligned[["species_idx", "species"]].drop_duplicates().sort_values("species_idx")
+    if len(species_rows) < 2:
+        return
+    species_order = species_rows.species.astype(str).tolist()
+    species_ids = species_rows.species_idx.astype(int).tolist()
+    names = dict(zip(species_ids, species_order))
+
+    counts = aligned.groupby("time").species_idx.nunique()
+    common_times = counts[counts == len(species_ids)].index.to_numpy(dtype=float)
+    times = common_times if len(common_times) else np.sort(aligned.time.unique())
+    if len(times) == 0:
+        return
+
+    st.subheader("Multi-species state overview")
+    overview_time = st.select_slider(
+        "Multi-species profile time",
+        options=times.tolist(),
+        value=float(times[len(times) // 2]),
+        key=f"multi_species_time_{row['task_id']}",
+    )
+    at_time = aligned[np.isclose(aligned.time, overview_time)].copy()
+    if at_time.empty:
+        st.info("No aligned state cells are available at the selected overview time.")
+        return
+
+    st.markdown("**All species as small multiples**")
+    y_scale = st.radio(
+        "Small-multiple y scale",
+        ["Shared", "Independent"],
+        horizontal=True,
+        key=f"multi_species_y_scale_{row['task_id']}",
+    )
+    facets = at_time[["species_idx", "species", "w", "true_log10_N", "pred_log10_N"]].melt(
+        id_vars=["species_idx", "species", "w"],
+        value_vars=["true_log10_N", "pred_log10_N"],
+        var_name="source",
+        value_name="log10_N",
+    )
+    facets["source"] = facets.source.map({
+        "true_log10_N": "Mizer truth",
+        "pred_log10_N": "PINN",
+    })
+    fig = px.line(
+        facets,
+        x="w",
+        y="log10_N",
+        color="source",
+        line_dash="source",
+        facet_col="species",
+        facet_col_wrap=4,
+        category_orders={"species": species_order},
+    )
+    fig.update_xaxes(type="log", matches=None, title="physical body weight w")
+    if y_scale == "Independent":
+        fig.update_yaxes(matches=None)
+    fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
+    fig.update_layout(height=max(700, 230 * int(np.ceil(len(species_order) / 4))))
+    st.plotly_chart(fig, use_container_width=True)
+    plot_explanation(
+        st,
+        interpretation="Shows every species' fitted size spectrum against its own mizer truth at the same model time. Independent y scaling emphasises shape agreement; shared y scaling preserves between-species abundance differences.",
+        calculation=r"N_i(t,w)\rightarrow\log_{10}N_i(t,w)",
+        inputs=["aligned predicted state", str(truth_path)],
+        selection=f"all species; time={overview_time:g}",
+        alignment="Each species retains its own active body-weight domain; no cross-species weight extrapolation is introduced.",
+    )
+
+    st.markdown("**All species on one graph**")
+    displayed = st.multiselect(
+        "Displayed species",
+        species_ids,
+        default=species_ids,
+        format_func=lambda i: names[i],
+        key=f"multi_species_overlay_species_{row['task_id']}",
+    )
+    overlay = at_time[at_time.species_idx.astype(int).isin(displayed)].copy()
+    if overlay.empty:
+        st.info("Select at least one species to display.")
+    else:
+        palette = px.colors.qualitative.Dark24
+        fig = go.Figure()
+        for index, species_idx in enumerate(species_ids):
+            if species_idx not in displayed:
+                continue
+            frame = overlay[overlay.species_idx.astype(int).eq(species_idx)].sort_values("w")
+            if frame.empty:
+                continue
+            colour = palette[index % len(palette)]
+            species_name = names[species_idx]
+            fig.add_trace(go.Scatter(
+                x=frame.w,
+                y=frame.true_log10_N,
+                mode="lines",
+                name=f"{species_name} truth",
+                legendgroup=species_name,
+                showlegend=False,
+                line={"color": colour, "dash": "dash"},
+                hovertemplate=f"{species_name}<br>truth<br>w=%{{x:.4g}}<br>log10N=%{{y:.4g}}<extra></extra>",
+            ))
+            fig.add_trace(go.Scatter(
+                x=frame.w,
+                y=frame.pred_log10_N,
+                mode="lines",
+                name=species_name,
+                legendgroup=species_name,
+                showlegend=True,
+                line={"color": colour},
+                hovertemplate=f"{species_name}<br>PINN<br>w=%{{x:.4g}}<br>log10N=%{{y:.4g}}<extra></extra>",
+            ))
+        fig.update_layout(
+            xaxis_title="physical body weight w",
+            yaxis_title="log10 N",
+            legend={"groupclick": "togglegroup", "title": {"text": "Species"}},
+        )
+        fig.update_xaxes(type="log")
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("Solid = PINN; dashed = mizer truth. Clicking a species in the legend toggles both traces for that species. The multiselect can also remove species explicitly.")
+        plot_explanation(
+            st,
+            interpretation="Places all selected species on the same axes for direct between-species comparison while keeping truth and PINN paired by species.",
+            calculation=r"\{\log_{10}N_i^{true}(t,w),\ \log_{10}\hat N_i(t,w)\}_{i=1}^{S}",
+            inputs=["aligned predicted state", str(truth_path)],
+            selection=f"time={overview_time:g}; displayed species={len(displayed)}",
+            alignment="Species keep their own active body-weight domains. Legend groups toggle the truth and PINN traces together.",
+        )
+
+    st.markdown("**Species × time state error**")
+    by_species_time = error_by_species_time(aligned)
+    heatmap = by_species_time.pivot(index="species", columns="time", values="RMSE_log10N").reindex(species_order)
+    fig = go.Figure(go.Heatmap(
+        x=heatmap.columns,
+        y=heatmap.index,
+        z=heatmap.to_numpy(dtype=float),
+        colorscale="Viridis",
+        colorbar_title="RMSE log10N",
+        hovertemplate="species=%{y}<br>time=%{x:.4g}<br>RMSE=%{z:.4g}<extra></extra>",
+    ))
+    fig.update_layout(xaxis_title="model time", yaxis_title="species")
+    st.plotly_chart(fig, use_container_width=True)
+    plot_explanation(
+        st,
+        interpretation="Shows which species are inaccurate and when. Each cell aggregates over that species' valid active body-weight bins only.",
+        calculation=r"RMSE_i(t)=\sqrt{\operatorname{mean}_{w\in active_i}e_i(t,w)^2}",
+        inputs=["aligned predicted and task-specific mizer truth states", "species active-size masks"],
+        selection="all species; all aligned times",
+        alignment="No averaging across species; each row uses that species' own valid body-weight domain.",
+    )
+
+
 def state_page(rows):
     st.header("Selected run: State")
     row, comparison, _ = _instance_options(rows, st.session_state.get("selected_task_id"))
@@ -124,6 +275,7 @@ def state_page(rows):
             st.info("The comparison run has no cells in the selected species/time/weight domain; comparison overlays are omitted.")
 
     st.caption(f"Truth source for task {row['task_id']}: {truth_path.name}")
+    _multi_species_state_overview(aligned, row, truth_path)
     st.subheader("N3/N4 · State-error heatmap")
     mode = st.radio("Error display", ["Signed", "Absolute"], horizontal=True)
     display = chosen.assign(display=chosen.error_log10_N.abs() if mode == "Absolute" else chosen.error_log10_N)
