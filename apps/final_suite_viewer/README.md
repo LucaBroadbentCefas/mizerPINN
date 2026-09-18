@@ -44,10 +44,16 @@ operators and likelihood chain. The **Training** page reads `loss_history.csv`,
 deterministic alignment are cached; controls only filter in-memory tables.
 
 The **Experiment analyses** page uses the catalogue fields rather than parsing
-run-folder names. It includes paired noise/CV summaries, actual observation-file
-validation for sparse and missing-data designs, matched PINN versus no-PDE
-comparisons, the single-species ablation matrix, and no-data versus perfect-data
-multispecies baselines. Run/truth metric tables and state alignments are cached.
+run-folder names. Its noise section opens with a dedicated replicate-comparison
+view for one CV: all available gate-ON fits can be compared directly against the
+same mizer truth across weight or time, with signed/absolute state error, RMSE
+through time, RMSE across weight, a species-by-replicate error matrix, and
+overlaid saved training-loss histories. Replicate state diagnostics are first
+restricted to the exact common species/time/weight cells. The page also retains
+paired noise/CV summaries, actual observation-file validation for sparse and
+missing-data designs, matched PINN versus no-PDE comparisons, the single-species
+ablation matrix, and no-data versus perfect-data multispecies baselines.
+Run/truth metric tables and state alignments are cached.
 
 ## Dependencies and saved outputs
 
