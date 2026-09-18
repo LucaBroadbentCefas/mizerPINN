@@ -54,6 +54,42 @@ def paired_cv_differences(values: pd.DataFrame, metric: str = "value") -> tuple[
     return pd.DataFrame(rows), wide
 
 
+def common_replicate_domain(frames: dict[int, pd.DataFrame]) -> dict[int, pd.DataFrame]:
+    """Restrict replicate states to exactly the same species/time/weight cells."""
+    if not frames:
+        return {}
+    keys = ["species_idx", "time", "w"]
+    common = None
+    for frame in frames.values():
+        cells = frame[keys].drop_duplicates()
+        common = cells if common is None else common.merge(cells, on=keys, how="inner")
+    return {replicate: frame.merge(common, on=keys, how="inner") for replicate, frame in frames.items()}
+
+
+def replicate_species_metrics(frames: dict[int, pd.DataFrame]) -> pd.DataFrame:
+    """State-error summaries for each replicate/species on a common domain."""
+    rows = []
+    for replicate, frame in common_replicate_domain(frames).items():
+        keys = ["species_idx"] + (["species"] if "species" in frame else [])
+        for group_key, group in frame.groupby(keys, dropna=False):
+            values = pd.to_numeric(group.error_log10_N, errors="coerce").dropna().to_numpy()
+            if not len(values):
+                continue
+            group_key = group_key if isinstance(group_key, tuple) else (group_key,)
+            row = {
+                "replicate": int(replicate),
+                "species_idx": int(group_key[0]),
+                "RMSE_log10N": state_rmse(values),
+                "fold_error": fold_error(values),
+                "MAE_log10N": float(np.mean(np.abs(values))),
+                "n_cells": int(len(values)),
+            }
+            if len(group_key) > 1:
+                row["species"] = group_key[1]
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def gap_mask(data: pd.DataFrame, start: float, end: float) -> pd.Series:
     """Mask the actual withheld interval [start, end); observations resume at end."""
     return data.time.between(start, end, inclusive="left")
