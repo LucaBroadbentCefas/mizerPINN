@@ -53,12 +53,17 @@ def _shared_controls(row, comparison, source: pd.DataFrame):
         times = np.sort(active.time.unique()); weights = np.sort(active.w.unique())
         if len(times) == 0 or len(weights) == 0:
             return row, comparison, None
-        time = st.select_slider("Model time", options=times.tolist(), value=float(times[len(times)//2]), key=f"time_{row['task_id']}_{species_idx}")
-        weight = st.select_slider("Physical body weight w", options=weights.tolist(), value=float(weights[len(weights)//2]), key=f"weight_{row['task_id']}_{species_idx}")
-        time_range = st.select_slider("Model-time range", options=times.tolist(), value=(float(times[0]), float(times[-1])), key=f"time_range_{row['task_id']}_{species_idx}")
-        weight_range = st.select_slider("Body-weight range", options=weights.tolist(), value=(float(weights[0]), float(weights[-1])), key=f"weight_range_{row['task_id']}_{species_idx}")
-    return row, comparison, {"species_idx": species_idx, "species": names[species_idx], "time": float(time), "weight": float(weight), "time_range": time_range, "weight_range": weight_range}
 
+        # Batch coordinate changes into a single rerun. While the user moves
+        # these sliders, Streamlit does not start another expensive alignment.
+        with st.form(key=f"state_pde_coordinates_{row['task_id']}_{species_idx}", clear_on_submit=False):
+            time = st.select_slider("Model time", options=times.tolist(), value=float(times[len(times)//2]), key=f"time_{row['task_id']}_{species_idx}")
+            weight = st.select_slider("Physical body weight w", options=weights.tolist(), value=float(weights[len(weights)//2]), key=f"weight_{row['task_id']}_{species_idx}")
+            time_range = st.select_slider("Model-time range", options=times.tolist(), value=(float(times[0]), float(times[-1])), key=f"time_range_{row['task_id']}_{species_idx}")
+            weight_range = st.select_slider("Body-weight range", options=weights.tolist(), value=(float(weights[0]), float(weights[-1])), key=f"weight_range_{row['task_id']}_{species_idx}")
+            st.form_submit_button("Apply coordinates", type="primary", use_container_width=True)
+        st.caption("Adjust time/weight controls, then apply once. Slider movement alone does not start a new calculation.")
+    return row, comparison, {"species_idx": species_idx, "species": names[species_idx], "time": float(time), "weight": float(weight), "time_range": time_range, "weight_range": weight_range}
 
 def _heatmap(data, value, title, symmetric=False):
     if data is None or data.empty or value not in data:
