@@ -34,7 +34,11 @@ The **State** page reads the best saved state grid (`fixed_grid_fields.csv`
 where available, otherwise `final_predictions_grid.csv`) and compares it only
 with the configured canonical mizer truth. It provides signed/absolute error,
 RMSE through time and body size, species and fold-error summaries, and state
-profiles. Optional run comparisons are restricted to common aligned cells.
+profiles. A multi-species overview shows all species simultaneously as small
+multiples, as a single toggleable overlay, and as a species-by-time RMSE
+heatmap. The overlay groups each species' PINN and mizer-truth traces so one
+legend click hides or restores both, and also provides an explicit species
+multiselect. Optional run comparisons are restricted to common aligned cells.
 
 The **PDE** page reads saved fixed-grid residuals and component fields. It never
 recomputes derivatives or calls the PDE. The **Data** page reads
