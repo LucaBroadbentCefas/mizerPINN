@@ -17,10 +17,10 @@ from apps.final_suite_viewer.discovery import RunInstance, discover_local_runs, 
 from apps.final_suite_viewer.metrics import aggregate_state_metrics, fold_error, state_rmse
 from apps.final_suite_viewer.state import align_states, normalise_state
 from apps.final_suite_viewer.experiment_analysis import (
-    NN_SCENARIOS, ablation_task_matrix, gap_mask, missing_seen_metrics,
-    missing_species_mask, noise_design, noise_summary, paired_cv_differences,
-    retained_omitted_years, validate_baseline_pair, validate_nn_pairings,
-    year_location_mask,
+    NN_SCENARIOS, ablation_task_matrix, common_replicate_domain, gap_mask,
+    missing_seen_metrics, missing_species_mask, noise_design, noise_summary,
+    paired_cv_differences, replicate_species_metrics, retained_omitted_years,
+    validate_baseline_pair, validate_nn_pairings, year_location_mask,
 )
 from apps.final_suite_viewer.loaders import load_fixed_fields, load_prediction_state
 from apps.final_suite_viewer.inverse_analysis import (
@@ -267,6 +267,35 @@ def test_paired_cv_differences_use_same_noise_seed():
     expected = 0.4 * np.mean(wide.index)
     assert selected.mean_difference == pytest.approx(expected)
     assert selected.n == 5
+
+
+def test_replicate_comparison_uses_exact_common_state_domain():
+    first = _aligned_errors().iloc[:4].copy()
+    second = first.iloc[[0, 1, 3]].copy()
+    third = first.iloc[[0, 3]].copy()
+    common = common_replicate_domain({1: first, 2: second, 3: third})
+    assert set(common) == {1, 2, 3}
+    assert all(len(frame) == 2 for frame in common.values())
+    assert all(set(zip(frame.time, frame.w)) == {(0, 1), (1, 10)} for frame in common.values())
+
+
+def test_replicate_species_metrics_report_rmse_fold_and_mae():
+    base = pd.DataFrame({
+        "species_idx": [3, 3, 7, 7],
+        "species": ["sp_3", "sp_3", "sp_7", "sp_7"],
+        "time": [0, 1, 0, 1],
+        "w": [1, 1, 1, 1],
+        "error_log10_N": [1.0, -1.0, 0.0, 0.0],
+    })
+    metrics = replicate_species_metrics({1: base, 2: base.assign(error_log10_N=base.error_log10_N * 2)})
+    sp3_rep1 = metrics[(metrics.replicate == 1) & (metrics.species_idx == 3)].iloc[0]
+    sp3_rep2 = metrics[(metrics.replicate == 2) & (metrics.species_idx == 3)].iloc[0]
+    assert sp3_rep1.RMSE_log10N == pytest.approx(1.0)
+    assert sp3_rep1.fold_error == pytest.approx(10.0)
+    assert sp3_rep1.MAE_log10N == pytest.approx(1.0)
+    assert sp3_rep2.RMSE_log10N == pytest.approx(2.0)
+    assert sp3_rep2.fold_error == pytest.approx(100.0)
+    assert sp3_rep2.MAE_log10N == pytest.approx(2.0)
 
 
 def test_missing_design_masks_and_metrics():
