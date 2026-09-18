@@ -80,6 +80,10 @@ def _explain(interpretation, equation, inputs, selection, alignment="Task-specif
 
 def _noise_section(rows, truth):
     st.header("Noise and CV comparisons")
+    view = st.radio("Noise analysis view", ["Replicate comparison", "CV overview"], horizontal=True, key="noise_analysis_view")
+    if view == "Replicate comparison":
+        _replicate_comparison(rows)
+        return
     metric, species = _metric_controls(truth); design=noise_design(); values=design.merge(_metric_table(rows, design.task_id, metric, species), on="task_id")
     values=values[np.isfinite(values.value)]; gate_on=values[values.gate]
     if gate_on.empty: st.info("No discovered gate-ON noise runs have this metric."); return
@@ -107,8 +111,6 @@ def _noise_section(rows, truth):
     st.metric("Mean paired difference",f"{differences.mean():.5g}"); st.metric("SD of paired differences",f"{differences.std(ddof=1):.5g}")
     st.dataframe(summary.rename(columns={"mean":"mean","sd":"SD","minimum":"minimum","maximum":"maximum"}),use_container_width=True)
     _explain("Positive differences mean worse performance at the second CV for the error metrics; negative means better. No significance test is performed.",r"\Delta M_r(c_2,c_1)=M(c_2,r)-M(c_1,r)", ["matched noise_seed catalogue fields"],f"CV {cv2} minus CV {cv1}; {metric}","Only identical noise seeds are paired.")
-    _replicate_comparison(rows)
-
 
 
 def _replicate_comparison(rows):
@@ -143,6 +145,7 @@ def _replicate_comparison(rows):
     if not frames or any(frame.empty for frame in frames.values()):
         st.info("The available replicates have no common state-comparison cells.")
         return
+    histories = {rep: histories[rep] for rep in frames if rep in histories}
 
     common_species = sorted(set.intersection(*[set(frame.species_idx.astype(int).unique()) for frame in frames.values()]))
     if not common_species:
