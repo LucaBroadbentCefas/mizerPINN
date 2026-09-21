@@ -104,6 +104,9 @@ LR="1e-3"
 LR_MIN="1e-5"
 
 STATE_PARAMETERIZATION="log-u"
+STATE_SCALE_SOURCE="${STATE_SCALE_SOURCE:-initial-condition}"
+STATE_SCALE_POWER="${STATE_SCALE_POWER:-2.05}"
+STATE_SCALE_REFERENCE_WEIGHT="${STATE_SCALE_REFERENCE_WEIGHT:-1.0}"
 RESIDUAL_FORM="scaled"
 BOUNDARY_LOSS_FORM="relative"
 
@@ -279,6 +282,9 @@ run_single_species() {
         --lr-min "${LR_MIN}"
 
         --state-parameterization "${state_parameterization}"
+        --state-scale-source "${STATE_SCALE_SOURCE}"
+        --state-scale-power "${STATE_SCALE_POWER}"
+        --state-scale-reference-weight "${STATE_SCALE_REFERENCE_WEIGHT}"
         --state-scale-eps 1e-30
         --residual-form "${RESIDUAL_FORM}"
 
@@ -355,6 +361,9 @@ run_single_species() {
     echo "mode=single_species"
     echo "input_dir=${input_dir}"
     echo "state_parameterization=${state_parameterization}"
+    echo "state_scale_source=${STATE_SCALE_SOURCE}"
+    echo "state_scale_power=${STATE_SCALE_POWER}"
+    echo "state_scale_reference_weight=${STATE_SCALE_REFERENCE_WEIGHT}"
     echo "model_arch=${model_arch}"
     echo "start_time=$(date --iso-8601=seconds)"
     echo "git_commit=$(git rev-parse HEAD)"
@@ -397,6 +406,9 @@ run_multispecies() {
         --lr-min "${LR_MIN}"
 
         --state-parameterization "${STATE_PARAMETERIZATION}"
+        --state-scale-source "${STATE_SCALE_SOURCE}"
+        --state-scale-power "${STATE_SCALE_POWER}"
+        --state-scale-reference-weight "${STATE_SCALE_REFERENCE_WEIGHT}"
         --state-scale-eps 1e-30
         --residual-form "${RESIDUAL_FORM}"
 
@@ -518,6 +530,9 @@ run_multispecies() {
     echo "estimate_data_cv=${estimate_cv}"
     echo "estimate_effort=${estimate_effort}"
     echo "data_default_cv=${DATA_DEFAULT_CV}"
+    echo "state_scale_source=${STATE_SCALE_SOURCE}"
+    echo "state_scale_power=${STATE_SCALE_POWER}"
+    echo "state_scale_reference_weight=${STATE_SCALE_REFERENCE_WEIGHT}"
     echo "start_time=$(date --iso-8601=seconds)"
     echo "git_commit=$(git rev-parse HEAD)"
     echo "============================================================"
