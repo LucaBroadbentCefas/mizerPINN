@@ -33,7 +33,13 @@ from PINNmizer.training.outputs import (
     save_run_command,
 )
 from PINNmizer.training.loop import train_one_step, total_grad_norm_and_check, scalar_min, scalar_max, scalar_mean
-from PINNmizer.pinn.state_scale import set_state_scale_from_initial_condition, DEFAULT_STATE_SCALE_EPS
+from PINNmizer.pinn.state_scale import (
+    DEFAULT_STATE_SCALE_EPS,
+    DEFAULT_STATE_SCALE_POWER,
+    DEFAULT_STATE_SCALE_REFERENCE_WEIGHT,
+    grid_state_scale,
+    set_state_scale,
+)
 from PINNmizer.pinn.r3 import make_r3_population, CausalR3
 from PINNmizer.inverse_parameters import BoundedDataCV, BoundedLogRMax
 
@@ -101,10 +107,36 @@ def load_checkpoint_weights(
     if "model_state_dict" not in checkpoint:
         raise KeyError(f"Checkpoint has no 'model_state_dict': {checkpoint_path}")
 
-    checkpoint_param = (checkpoint.get("config") or {}).get("state_parameterization", "log-n")
+    checkpoint_config = checkpoint.get("config") or {}
+    checkpoint_param = checkpoint_config.get("state_parameterization", "log-n")
     requested_param = getattr(model, "state_parameterization", checkpoint_param)
     if checkpoint_param != requested_param:
         raise ValueError(f"Checkpoint state_parameterization={checkpoint_param!r} does not match requested {requested_param!r}.")
+
+    if requested_param == "log-u":
+        checkpoint_scale_source = checkpoint_config.get("state_scale_source", "initial_condition")
+        requested_scale_source = getattr(model, "state_scale_source", checkpoint_scale_source)
+        if checkpoint_scale_source != requested_scale_source:
+            raise ValueError(
+                f"Checkpoint state_scale_source={checkpoint_scale_source!r} does not match "
+                f"requested {requested_scale_source!r}."
+            )
+        if requested_scale_source == "power_law":
+            checkpoint_power = checkpoint_config.get("state_scale_power")
+            checkpoint_ref = checkpoint_config.get("state_scale_reference_weight")
+            requested_power = getattr(model, "state_scale_power", checkpoint_power)
+            requested_ref = getattr(model, "state_scale_reference_weight", checkpoint_ref)
+            if checkpoint_power is None or checkpoint_ref is None:
+                raise ValueError("Power-law log-u checkpoint is missing state-scale metadata.")
+            if not math.isclose(float(checkpoint_power), float(requested_power), rel_tol=0.0, abs_tol=1e-12):
+                raise ValueError(
+                    f"Checkpoint state_scale_power={checkpoint_power} does not match requested {requested_power}."
+                )
+            if not math.isclose(float(checkpoint_ref), float(requested_ref), rel_tol=0.0, abs_tol=1e-12):
+                raise ValueError(
+                    "Checkpoint state_scale_reference_weight="
+                    f"{checkpoint_ref} does not match requested {requested_ref}."
+                )
 
     model.load_state_dict(checkpoint["model_state_dict"])
     inverse_loaded = False
@@ -328,7 +360,8 @@ def initialise_final_bias_from_ic(
 
     log_init = torch.log(torch.clamp(n_init, min=eps))
     if state_parameterization == "log-u":
-        log_init = log_init - torch.log(torch.clamp(n_init, min=eps))
+        log_s, _ = grid_state_scale(params)
+        log_init = log_init - log_s
     mask = active_grid_mask(params).to(dtype=log_init.dtype, device=log_init.device)
 
     denom = mask.sum(dim=1)
@@ -383,6 +416,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pde-penalty", choices=["squared", "pseudo-huber"], default="squared")
     parser.add_argument("--pde-pseudo-huber-delta", type=float, default=1.0)
     parser.add_argument("--state-parameterization", choices=["log-n", "log-u"], default="log-n")
+    parser.add_argument(
+        "--state-scale-source",
+        choices=["initial-condition", "power-law"],
+        default="initial-condition",
+        help=(
+            "Reference S(w) used by log-u. 'initial-condition' preserves the legacy "
+            "S(w)=N(0,w); 'power-law' uses S_i(w)=C_i (w/w_ref)^(-p), with only "
+            "one scalar C_i fitted per species from the IC."
+        ),
+    )
+    parser.add_argument("--state-scale-power", type=float, default=DEFAULT_STATE_SCALE_POWER)
+    parser.add_argument(
+        "--state-scale-reference-weight",
+        type=float,
+        default=DEFAULT_STATE_SCALE_REFERENCE_WEIGHT,
+    )
     parser.add_argument("--state-scale-eps", type=float, default=DEFAULT_STATE_SCALE_EPS)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--print-every", type=int, default=50)
@@ -731,7 +780,14 @@ def main() -> None:
     )
 
     params.state_parameterization = args.state_parameterization
-    set_state_scale_from_initial_condition(params, n_init, eps=args.state_scale_eps)
+    set_state_scale(
+        params,
+        n_init,
+        source=args.state_scale_source,
+        eps=args.state_scale_eps,
+        power=args.state_scale_power,
+        reference_weight=args.state_scale_reference_weight,
+    )
 
     if args.hpc:
         diag_every = hpc_history_every
@@ -814,6 +870,9 @@ def main() -> None:
         rwf_base_init=args.rwf_base_init,
     ).to(dtype=dtype, device=params.w.device)
     model.state_parameterization = args.state_parameterization
+    model.state_scale_source = params.state_scale_source
+    model.state_scale_power = params.state_scale_power
+    model.state_scale_reference_weight = params.state_scale_reference_weight
 
     if args.init_final_bias_from_ic:
         initialise_final_bias_from_ic(
@@ -904,9 +963,12 @@ def main() -> None:
         "bc_penalty": args.bc_penalty,
         "bc_pseudo_huber_delta": args.bc_pseudo_huber_delta,
         "state_parameterization": args.state_parameterization,
-        "state_scale_source": "initial_condition",
+        "state_scale_source": params.state_scale_source,
         "state_scale_eps": args.state_scale_eps,
-        "state_scale_interpolation": "linear_log_weight",
+        "state_scale_interpolation": params.state_scale_interpolation,
+        "state_scale_power": params.state_scale_power,
+        "state_scale_reference_weight": params.state_scale_reference_weight,
+        "state_scale_amplitude_source": params.state_scale_amplitude_source,
         "learning_rate": args.lr,
         "initial_lr": args.lr,
         "model_arch": args.model_arch,
