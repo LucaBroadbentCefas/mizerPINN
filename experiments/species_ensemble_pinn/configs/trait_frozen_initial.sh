@@ -1,0 +1,1 @@
+python -m experiments.species_ensemble_pinn.scripts.run_all_species --input-dir /path/to/trait_fixture --known-state-csv /path/to/trait_known_state.csv --biology-label trait -- --environment-state frozen-initial
