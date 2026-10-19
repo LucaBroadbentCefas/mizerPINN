@@ -88,6 +88,9 @@ class MizerTorchParams:
     state_scale_eps: float = 1e-30
     state_scale_source: str = "initial_condition"
     state_scale_interpolation: str = "linear_log_weight"
+    state_scale_power: Optional[float] = None
+    state_scale_reference_weight: Optional[float] = None
+    state_scale_amplitude_source: Optional[str] = None
 
 def fish_start(params: MizerTorchParams) -> int:
     return params.w_full.numel() - params.w.numel()
