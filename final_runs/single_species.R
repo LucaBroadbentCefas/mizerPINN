@@ -17,7 +17,16 @@ for (i in seq_len(nrow(run_spec))) {
     kappa = run_spec$kappa[i]
   )
 
-  sim <- project(new_params, t_max = 40)
+  fixture <- paste0("validation/fixtures/pde_single_species/",run_spec[i,4])
+
+  n_pp_csv <- read.csv(
+    file.path(fixture, "n_pp.csv")
+  )$value
+
+  initialNResource(new_params) <- n_pp_csv
+  resource_dynamics(new_params) <- "resource_constant"
+
+  sim <- project(new_params, t_max = 40, t_save = 0.1)
 
   sim_long <- as.data.frame.table(
     sim@n,
@@ -27,9 +36,9 @@ for (i in seq_len(nrow(run_spec))) {
 
   names(sim_long)[1:3] <- c("time", "species", "weight")
 
-  export_mizer_inputs_for_python(new_params,
-                                 outdir = paste0("validation/fixtures/pde_single_species/",run_spec[i,4])
-                                 )
+  # export_mizer_inputs_for_python(new_params,
+  #                                outdir = paste0("validation/fixtures/pde_single_species/",run_spec[i,4])
+  #                                )
 
   sim_long$time   <- as.numeric(sim_long$time)
   sim_long$weight <- as.numeric(sim_long$weight)
@@ -44,6 +53,6 @@ row.names(single_species_projection_long) <- NULL
 
 write.csv(
   single_species_projection_long,
-  "final_runs/single_species_projection_long.csv",
+  "single_species_projection_long.csv",
   row.names = FALSE
 )
