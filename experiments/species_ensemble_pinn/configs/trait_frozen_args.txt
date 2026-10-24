@@ -1,0 +1,11 @@
+# Tranche 1 log-u scaled residual argument template
+--state-parameterization log-u
+--residual-form scaled
+--state-scale-eps 1e-30
+--n-time 128
+--n-eval 60
+--lr 3e-4
+--lr-min 1e-6
+--causal-n-chunks 32
+--causal-ramp-steps 1500
+--weight-max 1e3
